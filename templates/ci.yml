@@ -1,0 +1,49 @@
+name: CI
+
+# ouro template — copy to .github/workflows/ and fill the <placeholders>.
+#
+# The repository's own [[gate]] loop (.claude/ouro.toml), through the ouro plugin's shipped
+# `actions/gates` Action, on every pull request against the default branch and every push to it,
+# so a PR runs the loop once. Each [[gate]] runs its `ci` command when the entry declares one,
+# else its `run` command; a red gate is reported and the job fails once every gate has run.
+#
+# The job runs on GitHub's `ubuntu-latest` unless the repository variable `OURO_RUNS_ON` names
+# other runners (JSON: a label string or an array of labels), set in the repository's settings. A
+# pull request from another repository always runs on `ubuntu-latest`, never on OURO_RUNS_ON's
+# runner: that routes an honest fork away from a self-hosted machine and is no security boundary
+# -- a pull_request run uses the fork's own copy of this file.
+#
+# The runner needs pwsh, and python3 3.11+ when the Action's setup-python input is turned off (see
+# actions/gates/action.yml in the ouro plugin).
+
+on:
+  pull_request:
+    branches: [<your-default-branch>]
+  push:
+    branches: [<your-default-branch>]
+
+permissions:
+  contents: read
+
+# A newer push to a pull request replaces its earlier run, so the earlier one is cancelled instead
+# of holding a runner. A push to the default branch is grouped by its own commit, so it never
+# cancels another: every landed commit keeps its run.
+concurrency:
+  group: ouro-ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || (vars.OURO_RUNS_ON && fromJSON(vars.OURO_RUNS_ON)) || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      # fetch-depth: 0, because a gate may read commits (Test-ChangelogEntry.ps1 diffs the
+      # checkout against the merge base with the default branch, which a depth-1 checkout carries
+      # neither of). persist-credentials: false, because no gate reads the remote.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gates from the binding
+        uses: iteramen/ouro/actions/gates@<tag>

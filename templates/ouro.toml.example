@@ -1,0 +1,88 @@
+# .claude/ouro.toml — the ouro binding for this repo. Schema: ouro/docs/binding.md
+# Validate: python3 <ouro>/bin/ouro-binding.py check
+schema = 1
+
+[repo]
+slug = "owner/name"
+default_branch = "main"
+protected_branch_prefixes = []
+
+[labels]
+scope = []
+area = []
+type = []
+
+[[gate]]
+areas = ["*"]
+run = "uv run pytest -q"
+# ci = "uv run pytest -q"                # optional -- what CI runs in place of `run`, when a gate's
+                                          # `run` is a dev-box wrapper CI cannot run as written
+
+[ship]
+policy = "stop-at-pr"
+review = "adversarial-review"
+# How a branch is brought up to date and how its PR lands, as one named pair:
+# merge-squash | rebase-squash | rebase-merge | merge-merge. Default: merge-squash -- merge to
+# sync, squash to land, a linear default branch but for a merge commit per PR with more than one
+# author. [ship].sync and [ship].merge may be declared
+# instead, or beside this where they agree with it. Table: ouro/docs/binding.md.
+landing = "merge-squash"
+
+[models]
+# Optional, like every table below. Absent means each role runs the reading skill's own
+# default -- builder sonnet, builder_trivial sonnet, reviewer opus, verifier opus, weekly
+# sonnet. Values: opus | sonnet | haiku | fable. Table: ouro/docs/binding.md.
+# builder = "sonnet"
+# builder_trivial = "sonnet"
+# reviewer = "opus"
+# verifier = "opus"
+# weekly = "sonnet"
+
+[rolling_issues]
+drift_audit = "Docs drift audit"
+loop_runs = "Loop runs"
+docs_freshness = "Docs freshness"
+# comments_freshness = "Comments freshness"
+
+# Optional, like every table below. Absent means the docs gate runs on its own defaults, which
+# name no repository. Schema and the regex-vs-prefix distinction: ouro/docs/binding.md.
+# Every key but `exclude` is COMMENTED OUT on purpose. An empty list here means
+# EMPTY, not "use the default" -- `extensions = []` disables the backticked-path check
+# outright, `exclude = []` scans node_modules, and `report_only = []` makes every signal
+# block. Uncomment further keys only as this repo needs them.
+[docs]
+# extensions = [".md", ".rs"]
+# The gate's shipped defaults plus /tests/docs-freshness/fixtures/: Vendor-Ouro.ps1 copies the
+# fixture suite's deliberately broken documents into this repo, and a declared list REPLACES
+# the default rather than adding to it, so dropping an entry widens the scan.
+exclude = ["node_modules/", "/vendor/", "/_site/", ".claude/", "/tests/docs-freshness/fixtures/"]
+# Uncomment after vendoring (bin/Vendor-Ouro.ps1), and only then: the vendored contract,
+# governance and binding docs cite plugin paths (bin/Get-RollingIssue.ps1,
+# bin/Test-AgentReadyAnchors.ps1, bin/Test-AgentReadyShape.ps1, docs/contract.md,
+# docs/binding.md, templates/) this repo does not have. suppress_prefixes is a prefix test on
+# every link and backticked path (S1, S2, S3), global to this repo's own docs -- live in a repo
+# that only installs the plugin, it hides real findings under those prefixes.
+# suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "docs/contract.md", "docs/binding.md", "templates/"]
+# generated_pattern = "api/generated/"
+# html_globs = ["site/*.html"]
+# index_path = "docs/index.md"
+# indexed_trees = ["src/"]
+# index_exempt = ['(^|/)CHANGELOG']
+# planning_paths = ['^docs/policy/']
+# report_only = ["S9"]
+
+[docs.banned]
+# "dead.example.com/old" = "why it is dead, and what replaced it"
+
+[authority]
+local = []
+
+[overlays]
+implement = []
+review = []
+land = []
+drift = []
+
+[owner]
+role = "loop owner"
+ruling_approvers = ["owner-login"]

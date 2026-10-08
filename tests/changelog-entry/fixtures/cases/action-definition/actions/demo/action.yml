@@ -1,0 +1,7 @@
+name: demo action
+description: A demo Action, the subject of the action-definition surface.
+
+runs:
+  using: composite
+  steps:
+    - run: echo demo and then some

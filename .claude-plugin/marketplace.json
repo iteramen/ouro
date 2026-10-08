@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ouro",
+  "description": "The issue-driven agent loop: eight-state backlog, anchor-verified specs, graded autonomy, report-only automation.",
+  "owner": {
+    "name": "Daniel Brousser",
+    "url": "https://github.com/BoJl4apa"
+  },
+  "plugins": [
+    {
+      "name": "ouro",
+      "description": "init / triage / e2e / fuse / execute / land / land-batch / drift / compile / seam / review / external-audit / intake — the loop, repo-agnostic; each repo binds it with .claude/ouro.toml.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "ouro",
+  "version": "0.2.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "description": "The issue-driven agent loop, repo-agnostic. Skills read the repo's .claude/ouro.toml binding; no binding, no run, except /ouro:init, whose installer writes it.",
+  "author": {
+    "name": "Daniel Brousser",
+    "url": "https://github.com/BoJl4apa"
+  }
+}

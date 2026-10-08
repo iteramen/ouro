@@ -1,0 +1,2 @@
+# ouro template — copy to .github/ISSUE_TEMPLATE/config.yml: GitHub reads the template chooser config under that name only.
+blank_issues_enabled: true

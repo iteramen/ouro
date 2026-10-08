@@ -1,0 +1,60 @@
+name: ouro docs-freshness gate
+description: The deterministic docs-rot gate, run against the repo the calling workflow checked out.
+
+inputs:
+  setup-python:
+    description: >-
+      Pin the interpreter the gate runs under. Any value but the string true turns the pin off,
+      and true is the default: set it to false on a runner that already carries python3 3.11+, or
+      in a repository whose policy forbids actions/setup-*. Unpinned, the gate reads the binding
+      through the runner's own python3, and fails with ouro-binding.py's floor message under one
+      older than 3.11.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # The gate reads the consumer's [docs] table through ouro-binding.py, which needs `tomllib`
+    # (Python 3.11+). Under an older `python3` the gate does not fall back to its defaults: its
+    # first binding read fails with the floor message. Runner images ship whatever python they ship,
+    # so the pin makes every runner behave alike, and it is what a consumer gets without asking.
+    # update-environment is off, so the pinned python reaches the gate step below and none of the
+    # consumer's later steps; that step sets PATH and, on Linux, LD_LIBRARY_PATH itself.
+    - uses: actions/setup-python@v7
+      if: inputs.setup-python == 'true'
+      id: python
+      with:
+        python-version: '3.12'
+        update-environment: false
+
+    # The script is resolved from this file's own directory, never from a checkout of the plugin
+    # into the consumer's workspace; ouro-binding.py sits beside it and must stay there. A
+    # composite step runs in the job workspace, which is where the gate takes its root from, so
+    # the consumer checks its repo out there, without `path:`.
+    - name: Docs-freshness gate (deterministic)
+      shell: pwsh
+      run: |
+        # Empty when the step above was skipped, and Split-Path refuses an empty path: under the
+        # error preference a pwsh step runs with, prepending it unguarded ends the step before the
+        # gate. Unpinned, the runner's own python is what the gate reads the binding through.
+        $pinned = '${{ steps.python.outputs.python-path }}'
+        if ($pinned) {
+          $pinDir = Split-Path -Parent $pinned
+          $env:PATH = $pinDir + [IO.Path]::PathSeparator + $env:PATH
+          # setup-python's Windows installer already symlinks python3.exe beside python.exe; this
+          # is a guard for a runner account where that symlink could not be made.
+          if ($IsWindows -and (Split-Path -Leaf $pinned) -eq 'python.exe' -and
+              (Test-Path -LiteralPath $pinned -PathType Leaf) -and
+              -not (Test-Path -LiteralPath (Join-Path $pinDir 'python3.exe'))) {
+            Copy-Item -LiteralPath $pinned -Destination (Join-Path $pinDir 'python3.exe')
+          }
+          # On Linux the tool cache's python links its own libpython, which update-environment
+          # would put on LD_LIBRARY_PATH; with it off, the binary loads the host's libpython of
+          # another patch release, and a python child can crash with a segfault.
+          if ($IsLinux) {
+            $lib = Join-Path (Split-Path -Parent (Split-Path -Parent $pinned)) 'lib'
+            $env:LD_LIBRARY_PATH = if ($env:LD_LIBRARY_PATH) { "${lib}:$($env:LD_LIBRARY_PATH)" } else { $lib }
+          }
+        }
+        pwsh -NoProfile -File '${{ github.action_path }}/../../bin/Test-DocsFreshness.ps1' -Mode Gate

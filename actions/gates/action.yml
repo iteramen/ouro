@@ -1,0 +1,168 @@
+name: ouro gate loop
+description: Runs every [[gate]] from the binding of the repo checked out by the calling workflow, or with select-by-paths on, a pull request's gates selected by their paths.
+
+inputs:
+  select-by-paths:
+    description: >-
+      Select a pull request's gates by the paths its diff touches. Any value but the string true
+      leaves selection off, and false is the default: every gate runs. On, for a pull_request
+      event, a gate with no paths runs, and a gate with paths (docs/binding.md) runs only when the
+      diff against the pull request's base touches one of them; a changed path no gate claims
+      selects nothing more. Every gate runs on any other event, when the diff cannot be read, and
+      when it touches .claude/ouro.toml, .github/workflows/ or actions/gates/.
+    required: false
+    default: 'false'
+  setup-python:
+    description: >-
+      Pin the interpreter the loop reads the binding through. Any value but the string true turns
+      the pin off, and true is the default: set it to false on a runner that already carries
+      python3 3.11+, or in a repository whose policy forbids actions/setup-*. Unpinned, the loop
+      reads the binding through the runner's own python3, and fails with ouro-binding.py's floor
+      message under one older than 3.11.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # Same pin as actions/docs-freshness, for the same reason: reading [[gate]] needs tomllib
+    # (Python 3.11+), and a runner image ships whatever python it ships. update-environment is
+    # off, so the pinned python reaches only the step below, never the caller's later steps; that
+    # step sets PATH and, on Linux, LD_LIBRARY_PATH itself.
+    - uses: actions/setup-python@v7
+      if: inputs.setup-python == 'true'
+      id: python
+      with:
+        python-version: '3.12'
+        update-environment: false
+
+    # The loop a repository's own gates workflow runs from its binding, lifted so a bound
+    # repo runs the identical loop: a red gate must not end it, every break is reported, and the
+    # job fails once at the end. A composite step runs in the job workspace, which is where the
+    # caller checked its repo out, without `path:`, so `python ... get gate` reads that repo's own
+    # binding -- never this Action's.
+    - name: Gates from the binding
+      shell: pwsh
+      run: |
+        # Empty when the step above was skipped; Split-Path refuses an empty path, and under the
+        # error preference a pwsh step runs with, prepending it unguarded ends the step before the
+        # loop. Unpinned, the runner's own python is what the loop reads the binding through.
+        $pinned = '${{ steps.python.outputs.python-path }}'
+        if ($pinned) {
+          $pinDir = Split-Path -Parent $pinned
+          $env:PATH = $pinDir + [IO.Path]::PathSeparator + $env:PATH
+          # setup-python's Windows installer already symlinks python3.exe beside python.exe; this
+          # is a guard for a runner account where that symlink could not be made.
+          if ($IsWindows -and (Split-Path -Leaf $pinned) -eq 'python.exe' -and
+              (Test-Path -LiteralPath $pinned -PathType Leaf) -and
+              -not (Test-Path -LiteralPath (Join-Path $pinDir 'python3.exe'))) {
+            Copy-Item -LiteralPath $pinned -Destination (Join-Path $pinDir 'python3.exe')
+          }
+          # On Linux the tool cache's python links its own libpython, which update-environment
+          # would put on LD_LIBRARY_PATH; with it off, the binary loads the host's libpython of
+          # another patch release, and a python child can crash with a segfault.
+          if ($IsLinux) {
+            $lib = Join-Path (Split-Path -Parent (Split-Path -Parent $pinned)) 'lib'
+            $env:LD_LIBRARY_PATH = if ($env:LD_LIBRARY_PATH) { "${lib}:$($env:LD_LIBRARY_PATH)" } else { $lib }
+          }
+        }
+
+        # GitHub's pwsh wrapper sets $ErrorActionPreference = 'Stop'; the native-exit preference
+        # below defaults to $false on the runner's pwsh and is pinned so a future default cannot
+        # turn the first non-zero gate into a terminating error.
+        $ErrorActionPreference = 'Continue'
+        $PSNativeCommandUseErrorActionPreference = $false
+
+        # This Action's own plugin root: the ouro checkout GitHub fetched to run it, resolved from
+        # its own directory rather than $PWD, which is the caller's checkout -- the repo under
+        # test, not the plugin. ouro-binding.py is read from here too, for the same reason
+        # actions/docs-freshness reads Test-DocsFreshness.ps1 from its own directory.
+        $actionPath = '${{ github.action_path }}'
+        $root = (Resolve-Path (Join-Path $actionPath '../..')).Path
+        $tool = Join-Path $root 'bin/ouro-binding.py'
+
+        # Unguarded, a missing python3 fails the read below and reaches the empty-$gates check
+        # next, reporting a binding with no [[gate]] entries rather than the missing interpreter.
+        if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) {
+          Write-Host '::error::no python3 on PATH: this Action needs python3 3.11+ to read the binding'
+          exit 1
+        }
+        $gates = @(python3 $tool get gate | ConvertFrom-Json)
+        if ($gates.Count -eq 0) { Write-Host '::error::the binding declares no [[gate]] entries'; exit 1 }
+
+        # git's own pathspec matching decides what a diff touches: diff --quiet exits 1 on a change
+        # and 0 on none, and any other exit is a diff it could not read. An empty base is caught
+        # first, because "...HEAD" reads as no change at all.
+        $toRun = $gates
+        $skipped = @()
+        if ('${{ inputs.select-by-paths }}' -eq 'true') {
+          $eventName = '${{ github.event_name }}'
+          $base = '${{ github.event.pull_request.base.sha }}'
+          $touches = {
+            param([string[]]$Spec)
+            # Started directly, by the path pwsh's lookup resolves: pwsh on Linux and macOS globs a
+            # native argument against the working directory, and git must see each entry as written;
+            # .NET there tries a bare name in that directory before PATH, and a PR can commit a git.
+            try {
+              $gitPath = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+              $psi = [System.Diagnostics.ProcessStartInfo]::new($gitPath)
+              $psi.UseShellExecute = $false
+              $psi.WorkingDirectory = (Get-Location).ProviderPath
+              foreach ($a in @('diff', '--quiet', "$base...HEAD", '--') + $Spec) { $psi.ArgumentList.Add($a) }
+              $p = [System.Diagnostics.Process]::Start($psi)
+            }
+            catch { throw "the diff against $base cannot be read (git did not start: $($_.Exception.Message))" }
+            $p.WaitForExit()
+            $code = $p.ExitCode
+            $p.Dispose()
+            if ($code -notin 0, 1) { throw "the diff against $base cannot be read (git exit $code)" }
+            $code -eq 1
+          }
+          $why = $null
+          if ($eventName -ne 'pull_request') { $why = "the event is $eventName, not pull_request" }
+          elseif (-not $base) { $why = 'the pull request has no base commit' }
+          else {
+            try {
+              if (& $touches '.claude/ouro.toml', '.github/workflows/', 'actions/gates/') {
+                $why = 'the diff touches .claude/ouro.toml, .github/workflows/ or actions/gates/'
+              }
+              else {
+                $toRun = @()
+                foreach ($g in $gates) {
+                  if (-not $g.paths -or (& $touches @($g.paths))) { $toRun += $g } else { $skipped += $g }
+                }
+              }
+            }
+            catch { $why = $_.Exception.Message }
+          }
+          if ($why) {
+            $toRun = $gates
+            $skipped = @()
+            Write-Host "select-by-paths: every gate runs: $why"
+          }
+        }
+
+        # A gate declaring ci is one whose run is wrong on a CI runner -- a dev-box wrapper such
+        # as `wsl … bash -lc`, which the Windows CI account has no bash for -- so CI runs ci in
+        # its place; a gate with no ci keeps running run, as it always has. <ouro> in either names
+        # this Action's own plugin root, above.
+        $commandOf = { param($g) $(if ($g.ci) { $g.ci } else { $g.run }).Replace('<ouro>', $root) }
+        foreach ($g in $skipped) { Write-Host "SKIP its paths are unchanged  $(& $commandOf $g)" }
+        $failed = @()
+        foreach ($g in $toRun) {
+          $run = & $commandOf $g
+          Write-Host "::group::$run"
+          Write-Host "+ $run"
+          # A gate whose command does not resolve throws rather than exiting; $code stays 1 so a
+          # missing script is a red gate, never a stale exit code inherited from the last one.
+          $code = 1
+          try { Invoke-Expression $run; $code = $LASTEXITCODE } catch { Write-Host $_ }
+          Write-Host '::endgroup::'
+          $verdict = if ($code -eq 0) { 'PASS' } else { 'FAIL' }
+          Write-Host "$verdict exit=$code  $run"
+          if ($code -ne 0) { $failed += $run }
+        }
+
+        Write-Host "--- $($toRun.Count - $failed.Count)/$($toRun.Count) gates passed, $($skipped.Count) skipped"
+        foreach ($f in $failed) { Write-Host "::error::gate failed: $f" }
+        if ($failed.Count -gt 0) { exit 1 }

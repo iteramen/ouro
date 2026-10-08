@@ -1,0 +1,156 @@
+name: No binding
+
+# This workflow runs the gates workflow's fixture suites from a vendored copy in a repo with no
+# binding -- the branch this repo's own gate list never takes, since this repo has one. It cannot be
+# a `[[gate]]` entry: no gate runs from outside this tree.
+
+on:
+  # The list mirrors the copy plan in bin/Vendor-Ouro.ps1 (its .DESCRIPTION block), plus this
+  # file and .gitattributes, which decides the bytes every checked-out file has: a change to what
+  # that script copies changes this list
+  # in the same PR. Both triggers carry the same list.
+  pull_request:
+    paths:
+      - '.github/workflows/no-binding.yml'
+      - '.gitattributes'
+      - 'bin/*.ps1'
+      - 'bin/ouro-binding.py'
+      - 'bin/apply-manifest.py'
+      - 'bin/external-audit.py'
+      - 'bin/drift-claims.py'
+      - 'bin/forbidden-tokens.py'
+      - 'bin/record-counts.py'
+      - 'tests/**'
+      - 'skills/**'
+      - '!skills/init/**'
+      - 'agents/*'
+      - 'docs/contract.md'
+      - 'docs/docs-governance.md'
+      - 'docs/binding.md'
+      - 'templates/documentation-rule.md'
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/no-binding.yml'
+      - '.gitattributes'
+      - 'bin/*.ps1'
+      - 'bin/ouro-binding.py'
+      - 'bin/apply-manifest.py'
+      - 'bin/external-audit.py'
+      - 'bin/drift-claims.py'
+      - 'bin/forbidden-tokens.py'
+      - 'bin/record-counts.py'
+      - 'tests/**'
+      - 'skills/**'
+      - '!skills/init/**'
+      - 'agents/*'
+      - 'docs/contract.md'
+      - 'docs/docs-governance.md'
+      - 'docs/binding.md'
+      - 'templates/documentation-rule.md'
+
+permissions:
+  contents: read
+
+# A newer push to a pull request replaces its earlier run, so the earlier one is cancelled instead
+# of holding a runner the whole pool shares. A push to master is grouped by its own commit, so it
+# never cancels another: every landed commit keeps its run.
+concurrency:
+  group: no-binding-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  no-binding:
+    # The fixture suites from a vendored tree in a repo that declares no binding. Both legs, on the
+    # runner selection, python pin and timeout of the repository's gates job: the suites carry rows
+    # that run on one platform only either way. No suite needs gh or the network.
+    name: no binding (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            hosted: '"ubuntu-latest"'
+            selfhosted: '["self-hosted", "ouro", "Linux"]'
+          - os: windows
+            hosted: '"windows-latest"'
+            selfhosted: '["self-hosted", "ouro", "Windows"]'
+    runs-on: ${{ fromJSON((vars.OURO_RUNNERS != '' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && matrix.hosted || matrix.selfhosted) }}
+    timeout-minutes: 45
+    steps:
+      # Nothing here reads the remote: the checkout leaves no credential behind.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Suites from a vendored tree with no binding
+        shell: pwsh
+        run: |
+          # Both preferences stop the first break while the scratch repo is built: a git call
+          # that fails must not leave the run vendoring into half a repository.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          # Everything lands under RUNNER_TEMP, cleared first.
+          $root = Join-Path $env:RUNNER_TEMP 'no-binding'
+          if (Test-Path -LiteralPath $root) { Remove-Item -Recurse -Force -LiteralPath $root -ErrorAction Stop }
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Set-Content -LiteralPath (Join-Path $root 'README.md') -Value 'A repo that vendored ouro and declares no binding.'
+          git -C $root init -q -b main
+          git -C $root add -A
+          git -C $root -c user.name=ouro -c user.email=ouro@invalid -c commit.gpgsign=false commit -q -m 'consumer'
+          # Spelled like a fork's and never contacted: with no binding to read, a gate that must
+          # name a repository looks it up through origin, and that lookup is the call the suites'
+          # gh shadows answer -- with no origin at all they go red.
+          git -C $root remote add origin https://github.com/ouro-vendored-consumer/no-binding.git
+
+          Write-Host '::group::vendor'
+          & ./bin/Vendor-Ouro.ps1 -Into $root
+          Write-Host '::endgroup::'
+
+          $isSuite = { $_.Name -like '*.Tests.ps1' -or $_.Name -like '*.Tests.py' }
+          $here = @(Get-ChildItem -Path tests -Recurse -File | Where-Object $isSuite)
+          $suites = @(Get-ChildItem -LiteralPath (Join-Path $root 'scripts/tests') -Recurse -File |
+            Where-Object $isSuite | Sort-Object Name)
+          # Two guards against a vacuous green: a run that finds none passes with nothing
+          # executed, and a copy that drops one passes without it.
+          if ($suites.Count -eq 0) { Write-Host '::error::no fixture suite in the vendored tree'; exit 1 }
+          if ($suites.Count -ne $here.Count) {
+            Write-Host "::error::the vendored tree carries $($suites.Count) suite(s), this checkout has $($here.Count)"
+            exit 1
+          }
+
+          # A red suite must not end the loop: every break is reported, then the job fails once.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Set-Location -LiteralPath $root
+
+          $failed = @()
+          $skipped = 0
+          foreach ($s in $suites) {
+            Write-Host "::group::$($s.Name)"
+            # A launcher that does not resolve throws rather than exiting; $code stays 1 so a
+            # missing pwsh or python is a red suite, never a stale exit code from the last one.
+            $code = 1
+            $out = @()
+            try {
+              & { if ($s.Extension -eq '.py') { python3 $s.FullName } else { pwsh -NoProfile -File $s.FullName } } |
+                Tee-Object -Variable out
+              $code = $LASTEXITCODE
+            } catch { Write-Host $_ }
+            Write-Host '::endgroup::'
+            # A suite that printed nothing but `skip:` lines ran no case, and a tally that counts
+            # it as a pass hides how much of the vendored layout has no subject to test.
+            $cases = @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and -not $_.StartsWith('skip:') })
+            $verdict = if ($code -ne 0) { 'FAIL' } elseif ($cases.Count) { 'PASS' } else { 'SKIP' }
+            Write-Host "$verdict exit=$code  $($s.Name)"
+            if ($code -ne 0) { $failed += $s.Name } elseif (-not $cases.Count) { $skipped++ }
+          }
+
+          Write-Host "--- $($suites.Count - $failed.Count - $skipped) ran, $skipped skipped (vendored layout), $($failed.Count) failed"
+          foreach ($f in $failed) { Write-Host "::error::suite failed in a repo with no binding: $f" }
+          if ($failed.Count -gt 0) { exit 1 }

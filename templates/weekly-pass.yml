@@ -1,0 +1,587 @@
+name: Ouro Weekly Pass
+
+# ouro template — copy to .github/workflows/ and fill the <placeholders>.
+#
+# The unattended weekly entry of the loop (docs/contract.md §9 in the ouro plugin). Report-only:
+# the deterministic gates comment on issues, the drift audit writes through `gh issue`, and the
+# intake writes nothing at all — it grades into a manifest a later step applies. Nothing here
+# edits code, merges, promotes or closes, and the only issue bodies rewritten are the rolling
+# ones named in [rolling_issues] -- report surfaces, not backlog items. One of those it will
+# file if the repo has not.
+#
+# The drift audit's allowedTools names only the `gh issue` subcommands the audit runs. That
+# narrows the session; it does not enforce its skill: a rule cannot constrain what is written
+# ahead of its literal ending, so it can add any flag before one, comment on any issue, pass
+# --edit-last or --delete-last to gh issue comment, edit any issue, and post any file the runner
+# can read through --body-file. It holds no create and no reopen: the harvest step resolves the
+# ledger, or files it, before the session starts, and hands the session its number.
+#
+# The intake is split in two for exactly that reason. It reads newly-filed issue bodies, which
+# the contract calls untrusted (§8), so the session that reads them holds nothing: no gh tool,
+# no git tool that writes a file or starts a program, and the job token cleared. It grades into
+# a manifest; the step after it applies that manifest with no model in it. What bounds the
+# intake is therefore not a permission rule over what a session writes -- which cannot be
+# written -- but the applier that reads what it wrote, whose --unattended mode refuses a whole
+# manifest that steps outside comment/edit, needs-triage/needs-ruling, and a bounded,
+# secret-free comment body.
+#
+# Residual, and named rather than claimed away: persist-credentials: false keeps both checkouts
+# from leaving a token in .git/config, but a self-hosted runner may hold a gh configuration of
+# its own (`gh auth status` says whether yours does — the source of this template ran on one
+# that did), and the ambient claude auth below is the runner's by design. Dropping either means
+# dropping the runner pin. What the grading step rests on is that it is granted no tool able to
+# reach them.
+#
+# Offset the cron from any deterministic sweep you already run so they never contend.
+#
+# Auth: the source of this template ran headless Claude Code on a self-hosted box's ambient
+# subscription auth (the runner service runs as the CLI-authenticated user). If that auth breaks
+# (logout/re-login), the probe below fails loud — a red run, never a silent skip. The alternative
+# is API billing: set ANTHROPIC_API_KEY on the two `claude -p` steps and drop the runner pin.
+#
+# The two `claude -p` steps below run at the binding's [models].weekly (default sonnet), each
+# reading it with ouro-binding.py get as the steps before them read their keys. The smoke check
+# keeps --model haiku: it tests reachability, not work.
+on:
+  schedule:
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: ouro-weekly-pass
+  cancel-in-progress: false
+
+# DRIFT_ISSUE_TITLE is resolved from the binding in the first step below, not written here.
+# The gates read [rolling_issues].drift_audit directly; a literal copy in this file would
+# disagree with them the moment a repo renames the issue -- findings would post to the new
+# title while the ledger harvest and the usage append still read the old one.
+
+jobs:
+  weekly:
+    # Pin to the machine that owns the claude auth, or drop the pin under API billing.
+    runs-on: [self-hosted, <your-runner-labels>]
+    timeout-minutes: 60
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      GH_TOKEN: ${{ github.token }}
+      # Every gh call spelled below runs after Get-RollingIssueNumber in the same pwsh process,
+      # and that assigns GH_REPO from [repo].slug -- so the deterministic steps name the binding's
+      # repository whatever this says. This is the backstop for the drift session, the one model
+      # step granted a gh tool: its skill mandates `-R <slug>` on every call, and a call that
+      # omits it reads and writes whatever repository gh picks from the working directory's clone
+      # -- the plugin is checked out at ouro/ inside this one. An explicit -R still wins.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # target selection diffs against the last-audit SHA; loop metrics walk the default branch's first-parent history
+          # Nothing in this job pushes, and the grading step below reads the tree with no token
+          # of its own: a persisted credential in .git/config would be the one it could still
+          # read. The fetch above carries the token either way.
+          persist-credentials: false
+
+      # The plugin is checked out INSIDE the repo tree so the gates (which take the repo root
+      # from the working directory) run from the root with `ouro/bin/...` paths. OURO_REF is a
+      # repo variable (a tag or SHA — pin it; a branch name drifts under you).
+      - name: Check out the ouro plugin
+        uses: actions/checkout@v7
+        with:
+          repository: iteramen/ouro
+          ref: ${{ vars.OURO_REF }}
+          path: ouro
+          persist-credentials: false   # as above: the checkout fetches with the job's own token, which must not stay in its .git/config
+
+      # A pinned OURO_REF can silently fall many releases behind the newest one, with nothing on
+      # the pass recording which ref and commit the run actually checked out. Computed once,
+      # right after the checkout it names, and exported the way the title steps below export theirs.
+      - name: Compute the ouro version stamp
+        shell: pwsh
+        run: |
+          $sha = git -C ouro rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git -C ouro rev-parse HEAD failed (exit $LASTEXITCODE): $sha" }
+          "OURO_STAMP=ouro=${{ vars.OURO_REF }}@$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "ouro stamp: ouro=${{ vars.OURO_REF }}@$sha"
+
+      - name: Validate the binding (fail loud)
+        shell: pwsh
+        run: python3 ouro/bin/ouro-binding.py check
+
+      # One source of truth for the rolling issue's title: the binding. Every later step
+      # reads $env:DRIFT_ISSUE_TITLE, so a rename lands in one place.
+      - name: Resolve the rolling-issue title from the binding
+        shell: pwsh
+        run: |
+          # Only "no such key" is undeclared; any other failed read (an invalid binding, a python
+          # below 3.11) throws with ouro-binding.py's own message, which is on stderr.
+          # ouro-binding.py prints UTF-8. Decoded with a Windows runner's OEM code page, a non-ASCII
+          # title names no issue: the ledger harvest reads nothing and the usage append posts nowhere.
+          $encoding = [Console]::OutputEncoding
+          try {
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $raw = python3 ouro/bin/ouro-binding.py get rolling_issues.drift_audit 2>&1
+          }
+          finally { [Console]::OutputEncoding = $encoding }
+          $title = ((@($raw) | Where-Object { $_ -is [string] }) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0 -and "$raw" -notmatch 'no such key') {
+            throw "ouro-binding.py get rolling_issues.drift_audit failed (exit $LASTEXITCODE): $(((@($raw) | ForEach-Object { "$_" }) -join "`n").Trim())"
+          }
+          if ($LASTEXITCODE -ne 0 -or -not $title) {
+            throw "[rolling_issues].drift_audit is not declared in .claude/ouro.toml - the weekly pass has no issue to write to"
+          }
+          "DRIFT_ISSUE_TITLE=$($title.Trim())" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "rolling issue: $($title.Trim())"
+
+      - name: Probe claude auth (fail loud, not silent)
+        shell: pwsh
+        run: |
+          $out = claude -p "reply with exactly: ok" --model haiku 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0 -or $out -notmatch 'ok') {
+            Write-Host "::error::claude CLI auth is broken on this runner - re-login as the runner user, then re-dispatch. Output: $out"
+            exit 1
+          }
+
+      # Deterministic sibling of the LLM audit: agent-ready issues whose verbatim anchors no
+      # longer grep get a comment — never a silent demotion. Findings are report-only; a
+      # failed gh call fails the step loud (all three gates below share that posture).
+      - name: Anchor gate — agent-ready issues (deterministic)
+        shell: pwsh
+        run: pwsh -NoProfile -File ouro/bin/Test-AgentReadyAnchors.ps1 -Comment
+
+      # Structural sibling of the anchor gate: parseable anchor, Size S/M, doc-impact line,
+      # triage provenance, area/type labels per the binding. Report-only in the sweep; the
+      # demoting single-issue mode belongs in a labeled-event workflow, not here.
+      - name: Shape gate — agent-ready issues (deterministic)
+        shell: pwsh
+        run: pwsh -NoProfile -File ouro/bin/Test-AgentReadyShape.ps1 -Comment
+
+      # Repo variables live in GitHub settings, not in git -- no diff-driven gate can see them
+      # change. Cross-check against the doc that tables them.
+      - name: Repo-variable doc cross-check (deterministic)
+        shell: pwsh
+        run: pwsh -NoProfile -File ouro/bin/Test-RepoVariablesDoc.ps1 -Comment -DocPath <path/to/your-variables-doc.md>
+
+      # Issue labels live in GitHub, not in git -- same blind spot as repo variables above.
+      # Deliberately not self-healing: restoring a missing state label would be safe, but
+      # choosing which of two conflicting states to drop is not a call a script can make,
+      # so all finding kinds go to a human.
+      - name: Issue state-label invariant (deterministic)
+        shell: pwsh
+        run: pwsh -NoProfile -File ouro/bin/Test-IssueLabelInvariants.ps1 -Comment
+
+      # A blocked issue's Unblocks-when trigger lives only in its own body -- no diff-driven gate
+      # sees it fire, and interactive triage is the only reader today. Comments on the blocked
+      # issue itself, deduped against what it already said, and never relabels it.
+      - name: Blocked-trigger check (deterministic)
+        shell: pwsh
+        run: pwsh -NoProfile -File ouro/bin/Test-BlockedTriggers.ps1 -Comment
+
+      # An umbrella's or architecture issue's body-listed children and its native GitHub
+      # sub-issue list can drift apart with nothing to compare them. Posts one comment on the
+      # rolling drift issue, grouped by container, only when the two disagree; no dedupe, like
+      # the other gates that post there.
+      - name: Umbrella-children check (deterministic)
+        shell: pwsh
+        run: pwsh -NoProfile -File ouro/bin/Test-UmbrellaChildren.ps1 -Comment
+
+      - name: Gate fixture tests (deterministic)
+        shell: pwsh
+        run: |
+          $failed = 0
+          Get-ChildItem ouro/tests -Recurse -Filter *.Tests.ps1 | ForEach-Object {
+            pwsh -NoProfile -File $_.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Host "::error::$($_.Name) failed"; $failed++ }
+          }
+          if ($failed) { exit 1 }
+
+      # The docs-rot sweep. Steps in this job rather than a second cron: a separate schedule
+      # would have to be offset against this one to avoid contention, and steps in one job
+      # cannot contend at all. Sweep mode adds S9 (external-URL liveness, network) and always
+      # exits 0 -- the blocking half of this gate belongs on the PR, not in a weekly report.
+      - name: Resolve the docs-freshness rolling-issue title from the binding
+        shell: pwsh
+        run: |
+          # Only "no such key" is undeclared; any other failed read throws with its own message.
+          # ouro-binding.py prints UTF-8. Decoded with a Windows runner's OEM code page, a non-ASCII
+          # title names no issue, and the report step files a second one under the garbled title.
+          $encoding = [Console]::OutputEncoding
+          try {
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $raw = python3 ouro/bin/ouro-binding.py get rolling_issues.docs_freshness 2>&1
+          }
+          finally { [Console]::OutputEncoding = $encoding }
+          $title = ((@($raw) | Where-Object { $_ -is [string] }) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0 -and "$raw" -notmatch 'no such key') {
+            throw "ouro-binding.py get rolling_issues.docs_freshness failed (exit $LASTEXITCODE): $(((@($raw) | ForEach-Object { "$_" }) -join "`n").Trim())"
+          }
+          if ($LASTEXITCODE -ne 0 -or -not $title) {
+            throw "[rolling_issues].docs_freshness is not declared in .claude/ouro.toml - the docs-freshness sweep has no issue to write to"
+          }
+          "DOCS_ISSUE_TITLE=$($title.Trim())" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "rolling issue: $($title.Trim())"
+
+      - name: Docs-freshness sweep (deterministic)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force TestResults | Out-Null
+          pwsh -NoProfile -File ouro/bin/Test-DocsFreshness.ps1 -Mode Sweep |
+            Set-Content TestResults\docs-freshness.txt -Encoding utf8
+          Get-Content TestResults\docs-freshness.txt
+
+      # This report is the rolling issue's BODY, rewritten every run -- the opposite choice from
+      # the ledger below, and for the opposite reason: a docs-rot report is current state, so
+      # last week's is noise, while the audit ledger is history and must not be overwritable.
+      # The blocking-signal sentence is GENERATED from the gate's own exported signal set minus
+      # the repo's report-only list. Never hand-written: the prose this replaces drifted into
+      # calling a blocking signal report-only, and no reader could tell.
+      - name: Write the docs-freshness report to its rolling issue
+        shell: pwsh
+        run: |
+          . ouro/bin/Test-DocsFreshness.ps1 -AsModule
+          # Undeclared docs.report_only is the ordinary case and falls back to the gate's own
+          # parameter default, which the dot-source above just bound -- the sentence must
+          # describe what the gate DID, so both halves read the one source. Any other failure
+          # is a broken binding and stops the step, as it does inside the gate -- with every
+          # output line, since ouro-binding.py's reason is on stderr and the value is not.
+          $raw = python3 ouro/bin/ouro-binding.py get docs.report_only 2>&1
+          $out = ((@($raw) | Where-Object { $_ -is [string] }) -join "`n").Trim()
+          if ($LASTEXITCODE -eq 0) { $reportOnly = @($out | ConvertFrom-Json) }
+          elseif ("$raw" -match 'no such key') { $reportOnly = $ReportOnlySignals }
+          else { throw "ouro-binding.py get docs.report_only failed (exit $LASTEXITCODE): $(((@($raw) | ForEach-Object { "$_" }) -join "`n").Trim())" }
+
+          $tick = [string][char]96
+          $body = @(
+            "Deterministic docs-rot sweep (${tick}Test-DocsFreshness.ps1 -Mode Sweep${tick}), rewritten each run ($env:OURO_STAMP).",
+            '',
+            (Get-BlockingSignalSentence -ReportOnly $reportOnly),
+            '',
+            "Run ${{ github.run_id }}:",
+            '',
+            ($tick * 3),
+            (Get-Content TestResults\docs-freshness.txt -Raw),
+            ($tick * 3)
+          ) -join "`n"
+
+          # The shared exact-title resolver, not a second copy of the search: `in:title` alone is
+          # token search and hijacks look-alike titles, and a gate carrying its own matching
+          # rule is how two of them ended up posting nowhere. It returns 0 when nothing matches.
+          . ouro/bin/Get-RollingIssue.ps1
+          # -Title skips the binding read (the step above already did it, so the title still has
+          # one source); -Key only names the key its no-match warning reports.
+          $num = Get-RollingIssueNumber -Title $env:DOCS_ISSUE_TITLE -Key rolling_issues.docs_freshness
+          if ($num) {
+            gh issue edit $num --body $body
+          } else {
+            # No such issue is not a no-op: a sweep that ran, found rot, and wrote nowhere still
+            # exits green, which is the one failure this report cannot afford. It carries
+            # `umbrella` -- a state label (ouro docs/contract.md §4), so the created issue
+            # satisfies the state-label invariant, and one outside the default working view, so
+            # a container of findings does not arrive asking to be triaged every week.
+            gh issue create --title "$env:DOCS_ISSUE_TITLE" --label umbrella --body $body
+          }
+          if ($LASTEXITCODE -ne 0) { throw "writing '$env:DOCS_ISSUE_TITLE' failed (exit $LASTEXITCODE)" }
+
+      # The audit ledger is the rolling issue's COMMENTS, not its body: comments are append-only,
+      # so a bad or truncated write cannot destroy the history around it, and each entry stays
+      # independently checkable against git. The body is rewritten every run and would take the
+      # ledger down with any bad rewrite.
+      - name: Harvest the audit ledger from the rolling issue
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force TestResults | Out-Null
+          # Shared exact-title resolver, not a second copy of the search: a gate carrying its
+          # own copy is how two of them silently posted nowhere. It returns 0 on no match.
+          . ouro/bin/Get-RollingIssue.ps1
+          $num = Get-RollingIssueNumber -Title $env:DRIFT_ISSUE_TITLE -Key rolling_issues.drift_audit
+          if ($num) {
+            # gh prints UTF-8. Decoded with a Windows runner's OEM code page, a non-ASCII doc name
+            # in a marker reaches the ledger garbled, and the selector's -ValidPaths prunes it.
+            $encoding = [Console]::OutputEncoding
+            try {
+              [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+              gh issue view $num --comments --json comments --jq '.comments[].body' |
+                Set-Content TestResults\audit-ledger.txt -Encoding utf8
+            }
+            finally { [Console]::OutputEncoding = $encoding }
+            # The newest comment's createdAt is GitHub's clock, read before the session starts: the
+            # step that appends the claim markers takes only comments created after it. An issue
+            # with no comments exports nothing, and that step then reads every comment.
+            $newest = "$(gh issue view $num --comments --json comments --jq '.comments | map(.createdAt) | max // empty')".Trim()
+            if ($LASTEXITCODE -ne 0) { throw "reading the newest comment's createdAt on #$num failed (exit $LASTEXITCODE)" }
+            if ($newest) {
+              if ($newest -notmatch '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$') { throw "the newest comment's createdAt on #$num is not a timestamp: $newest" }
+              "DRIFT_CLAIMS_SINCE=$newest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          } else {
+            # No ledger yet: the pass files it, so the session's grant holds no create verb. It
+            # carries `umbrella` alone, as the docs-freshness issue does; the session rewrites the
+            # placeholder body on its first run. The number is read from the URL gh prints.
+            $out = gh issue create --title "$env:DRIFT_ISSUE_TITLE" --label umbrella --body "Docs drift audit: the audit rewrites this body every run, and each run's ledger entry is a comment." 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "gh issue create '$env:DRIFT_ISSUE_TITLE' failed (exit $LASTEXITCODE): $out" }
+            # Only stdout is the URL: under 2>&1 stderr arrives as ErrorRecords, and a warning
+            # there can carry an issue URL of its own.
+            $url = ((@($out) | Where-Object { $_ -is [string] }) -join "`n").Trim()
+            if ($url -notmatch '^https?://\S+/issues/(\d+)$') { throw "gh issue create '$env:DRIFT_ISSUE_TITLE' printed no issue URL: $out" }
+            $num = [int]$Matches[1]
+            '' | Set-Content TestResults\audit-ledger.txt -Encoding utf8
+          }
+          # The drift session is handed this number as a literal in its prompt.
+          "DRIFT_ISSUE_NUMBER=$num" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $runs = @([regex]::Matches((Get-Content TestResults\audit-ledger.txt -Raw), 'audit-run:')).Count
+          Write-Host "harvested $runs audit-run marker(s) from #$num"
+
+      # Target selection is deterministic: the LLM never picks its own workload.
+      - name: Compute drift-audit targets
+        shell: pwsh
+        run: |
+          # Point-in-time trees come from the binding's overlays.drift, not from the script.
+          # Undeclared reads as no exclusions; any other failed read throws with its own message
+          # rather than selecting targets unconfigured.
+          $raw = python3 ouro/bin/ouro-binding.py get overlays.drift 2>&1
+          if ($LASTEXITCODE -ne 0 -and "$raw" -notmatch 'no such key') {
+            throw "ouro-binding.py get overlays.drift failed (exit $LASTEXITCODE): $(((@($raw) | ForEach-Object { "$_" }) -join "`n").Trim())"
+          }
+          $exclude = @(@($raw) | Where-Object { $_ -is [string] } | ConvertFrom-Json)
+          # In-process, not `pwsh -File`: -File hands each argument over as a separate string, so an
+          # empty list binds nothing, a second entry binds positionally to -MaxTargets, and on Linux
+          # an entry such as `docs/**` is glob-expanded into file names first.
+          & ouro/bin/Get-DriftAuditTargets.ps1 `
+            -LedgerFile TestResults\audit-ledger.txt `
+            -OutFile TestResults\drift-targets.json `
+            -ExcludePrefix $exclude
+          # The script fails by throwing; clear the exit code its tolerated git probe can leave.
+          $global:LASTEXITCODE = 0
+          Get-Content TestResults\drift-targets.json
+
+      - name: Docs drift audit (orchestrator at [models].weekly, verifiers at [models].verifier)
+        shell: pwsh
+        run: |
+          if ($env:DRIFT_ISSUE_NUMBER -notmatch '^\d+$') { throw "the harvest step exported no drift ledger number (DRIFT_ISSUE_NUMBER='$env:DRIFT_ISSUE_NUMBER')" }
+          # The binding's [models].weekly names the tier (default sonnet); any other failed read throws.
+          $model = python3 ouro/bin/ouro-binding.py get models.weekly 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            if ("$model" -notmatch 'no such key') { throw "ouro-binding.py get models.weekly failed (exit $LASTEXITCODE): $model" }
+            $model = 'sonnet'
+          }
+          $model = "$model".Trim()
+          claude -p "/ouro:drift --targets TestResults\drift-targets.json --issue $env:DRIFT_ISSUE_NUMBER --ci" `
+            --model $model `
+            --output-format json `
+            --allowedTools "Skill,Read,Grep,Glob,Agent,Task,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git ls-files:*),Bash(git grep:*),Bash(git cat-file:*),Bash(git rev-parse:*),Bash(git blame:*),Bash(gh issue list *),Bash(gh issue view *),Bash(gh issue comment *),Bash(gh issue edit *)" `
+            > TestResults\drift-audit-result.json
+          if ($LASTEXITCODE -ne 0) { throw "drift audit session failed (exit $LASTEXITCODE)" }
+
+      # The drift session posts each audited doc's report as a comment, with that doc's claim
+      # records in a `claim-records` block. This step turns this run's records into the
+      # `audit-claims` markers, in code that runs no model: the session's block is data and carries
+      # no hash, and the selector counts a marker only when every hash it stores recomputes from
+      # the tree. `ingest` reads only comments created after the harvest's newest createdAt and
+      # only blocks at the targets file's head,
+      # keeps the docs of this run's audit-run marker, drops each record that does not parse,
+      # names an untracked path or holds a range outside its file, and packs the markers into
+      # comment bodies under GitHub's cap. It reads the `verdict-records` blocks of the same
+      # comments by the same checks and writes them as one `claim-verdicts` marker, posted the
+      # same way. A run with no block posts nothing and succeeds.
+      #
+      # The tree is checked first, as in the steps below it: the drift session holds Bash, and a
+      # write it made to a plugin script would run here with the token in hand. PYTHONSAFEPATH
+      # and PYTHONNOUSERSITE keep a planted module off the python's path, as in the applying step.
+      - name: Append the claim markers (deterministic)
+        shell: pwsh
+        env:
+          PYTHONSAFEPATH: '1'
+          PYTHONNOUSERSITE: '1'
+        run: |
+          $dirty = @(git status --porcelain --untracked-files=no) + @(git -C ouro status --porcelain --untracked-files=all)
+          if ($dirty) { throw "a file changed or appeared while the drift session ran, so no plugin script runs from this checkout:`n$($dirty -join "`n")" }
+          # The resolver assigns GH_REPO from [repo].slug, so each gh call below names the
+          # binding's repository.
+          . ouro/bin/Get-RollingIssue.ps1
+          $num = Get-RollingIssueNumber -Title $env:DRIFT_ISSUE_TITLE -Key rolling_issues.drift_audit
+          if ("$num" -ne $env:DRIFT_ISSUE_NUMBER) { throw "the drift ledger resolves to #$num, not the harvest's #$env:DRIFT_ISSUE_NUMBER" }
+          $head = "$((Get-Content TestResults\drift-targets.json -Raw | ConvertFrom-Json).head)"
+          if ($head -notmatch '^[0-9a-f]{40}$') { throw "TestResults\drift-targets.json carries no head commit (head='$head')" }
+          # gh prints UTF-8; a Windows runner's OEM code page would garble a non-ASCII statement.
+          $encoding = [Console]::OutputEncoding
+          try {
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            gh issue view $env:DRIFT_ISSUE_NUMBER --comments --json comments | Set-Content TestResults/drift-comments.json -Encoding utf8
+          }
+          finally { [Console]::OutputEncoding = $encoding }
+          if ($LASTEXITCODE -ne 0) { throw "reading the comments of #$env:DRIFT_ISSUE_NUMBER failed (exit $LASTEXITCODE)" }
+          $files = @(python3 ouro/bin/drift-claims.py ingest --comments TestResults/drift-comments.json "--since=$env:DRIFT_CLAIMS_SINCE" --head $head --out-dir TestResults/claim-markers)
+          if ($LASTEXITCODE -ne 0) { throw "drift-claims.py ingest failed (exit $LASTEXITCODE)" }
+          foreach ($file in $files) {
+            gh issue comment $env:DRIFT_ISSUE_NUMBER --body-file $file
+            if ($LASTEXITCODE -ne 0) { throw "appending $file to #$env:DRIFT_ISSUE_NUMBER failed (exit $LASTEXITCODE)" }
+          }
+          Write-Host "appended $($files.Count) claim comment(s) to #$env:DRIFT_ISSUE_NUMBER"
+
+      # Target selection is deterministic here too: the LLM never picks its own workload. The
+      # 8-day window overlaps the weekly cron by a day; the selector's marker exclusion makes
+      # re-runs idempotent. The window is exported rather than computed again below -- two steps
+      # each calling Get-Date can straddle midnight and disagree about the week being graded.
+      # The script throws on a failed read and on a page that fills its limit, so a truncated
+      # window is a red step rather than a quiet week the session grades and reports as clean.
+      - name: Compute intake targets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force TestResults | Out-Null
+          $since = (Get-Date).AddDays(-8).ToString('yyyy-MM-dd')
+          "INTAKE_SINCE=$since" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          pwsh -NoProfile -File ouro/bin/Get-IntakeTargets.ps1 -NewSince $since -OutFile TestResults\intake-targets.json
+          if ($LASTEXITCODE -ne 0) { throw "intake target selection failed (exit $LASTEXITCODE)" }
+          # The counts, not the file: every target carries its body and its comments, so printing
+          # it would put the week's backlog in the log twice.
+          $t = Get-Content TestResults\intake-targets.json -Raw | ConvertFrom-Json
+          Write-Host "intake window from ${since}: $(@($t.targets).Count) target(s), $(@($t.excluded).Count) excluded, rulings queue $($t.rulingsQueue)"
+
+      # The intake is two steps: a session that grades and a program that disposes. This one
+      # reads the newly-filed issue bodies the step above selected -- untrusted input (contract
+      # §8) -- so it is handed no credential and no tool that reaches the tracker, and its whole
+      # output is the manifest the step after it applies.
+      #
+      # The grant is the read-only set the verification subagents need and nothing else: read
+      # and search the tree, `git rev-parse` for the short SHA every anchor is stamped with, and
+      # the writes that make the manifest. `git grep` and `git log` are deliberately not in it --
+      # measured here, the first runs a command (`--open-files-in-pager`) and the second writes a
+      # file (`--output=`), which is the class this step drops rather than the two names.
+      # Edit is spelled with the manifest's directory, which states the intent; measured on CLI
+      # 2.1.283 it confines to that pattern, where a Write pattern measured on 2.1.274 did not.
+      # A grant is a property of one CLI version, so the confinement this pass relies on is still
+      # the tree check in the step below plus the applier's own rule that a body file must
+      # resolve inside the manifest directory -- not this pattern alone.
+      - name: Weekly intake grading (new issues, no token)
+        shell: pwsh
+        env:
+          # The step that runs a model holds no token; the step that holds one runs no model.
+          # An empty value is how a step-level env clears the job-level one. Residual, and stated
+          # in the header: this does not unauthenticate `gh` on a runner that stores a
+          # configuration of its own. What keeps this session off the tracker is the grant above
+          # naming no gh tool at all.
+          GH_TOKEN: ''
+        run: |
+          New-Item -ItemType Directory -Force TestResults\intake-manifest | Out-Null
+          # The binding's [models].weekly names the tier (default sonnet); any other failed read throws.
+          $model = python3 ouro/bin/ouro-binding.py get models.weekly 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            if ("$model" -notmatch 'no such key') { throw "ouro-binding.py get models.weekly failed (exit $LASTEXITCODE): $model" }
+            $model = 'sonnet'
+          }
+          $model = "$model".Trim()
+          claude -p "/ouro:intake --new-since $env:INTAKE_SINCE --targets TestResults\intake-targets.json --manifest TestResults\intake-manifest" `
+            --model $model `
+            --output-format json `
+            --allowedTools "Skill,Read,Grep,Glob,Agent,Task,Edit(TestResults/**),Bash(git rev-parse:*)" `
+            > TestResults\intake-grading-result.json
+          if ($LASTEXITCODE -ne 0) { throw "intake grading failed (exit $LASTEXITCODE)" }
+          # A graded week ends in a manifest, an empty one when the window held no targets, so a
+          # missing file is a session that stopped early. That is what the old result-JSON check
+          # caught back when this step made the label edits itself.
+          if (-not (Test-Path TestResults\intake-manifest\manifest.json)) {
+            throw "intake grading wrote no manifest (TestResults\intake-manifest\manifest.json): a week with no targets still writes an empty one, so a missing file is a session that did not finish"
+          }
+
+      # The disposing half: deterministic, credentialed, no model. `--unattended` is spelled
+      # exactly -- the applier refuses --unattended=true by name rather than running unbounded --
+      # and in that mode it refuses the WHOLE manifest, before any step runs, over an op that is
+      # not comment or edit, a label that is not needs-triage or needs-ruling, a body file on an
+      # edit, a comment body over its cap or carrying a secret shape, a body file resolving
+      # outside the manifest directory, or an issue that is not a number.
+      #
+      # The tree is checked first. The grading session runs with Edit, and a write it is not
+      # supposed to make would land in a file a later credentialed step executes -- this applier,
+      # Loop metrics and Append usage among them, so the same check runs again at the top of each
+      # of those two. A tracked modification in either checkout, or an untracked file in the
+      # plugin's, means the manifest was not the only thing that session wrote, and nothing is
+      # applied; the root's untracked files are not read, since in a consumer the plugin checkout
+      # is one of them.
+      # PYTHONSAFEPATH keeps each python's own directory off sys.path, so a file planted beside the
+      # binding tool or the applier cannot shadow a module either of them imports, and
+      # PYTHONNOUSERSITE keeps the runner's user site off it, where a usercustomize module would
+      # run at each python's startup.
+      #
+      # --repo comes after that check, from the same binding the week's targets were selected against
+      # rather than from the workflow's own repository, so the apply names the repository the manifest
+      # was graded for. The applier requires it of any manifest naming an issue it does not create, and
+      # every unattended step names one.
+      - name: Apply the intake manifest (deterministic)
+        shell: pwsh
+        env:
+          PYTHONSAFEPATH: '1'
+          PYTHONNOUSERSITE: '1'
+        run: |
+          $dirty = @(git status --porcelain --untracked-files=no) + @(git -C ouro status --porcelain --untracked-files=all)
+          if ($dirty) { throw "a file changed or appeared while the grading session ran, so nothing is applied:`n$($dirty -join "`n")" }
+          $raw = python3 ouro/bin/ouro-binding.py get repo.slug 2>&1
+          $slug = ((@($raw) | Where-Object { $_ -is [string] }) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw "ouro-binding.py get repo.slug failed (exit $LASTEXITCODE): $(((@($raw) | ForEach-Object { "$_" }) -join "`n").Trim())"
+          }
+          if (-not $slug) { throw "[repo].slug is not declared in .claude/ouro.toml - the apply has no repository to name" }
+          # CI holds no private token list, so the applier's forbidden-token check cannot run here.
+          python3 ouro/bin/apply-manifest.py TestResults\intake-manifest --unattended --repo $slug --no-forbidden-check
+          if ($LASTEXITCODE -ne 0) { throw "applying the intake manifest failed (exit $LASTEXITCODE)" }
+
+      # Three numbers for the trailing week and no more: rulings answered (and the oldest open),
+      # landings, rework. Each is a git or gh read; two are claims the contract already makes --
+      # section 10's ruling velocity, section 1's land step -- while rework counts the
+      # conventional `fix` type off the landings' own subjects, so a repository that does not
+      # write conventional subjects reports zero there, and the row reads as absent, not clean.
+      # Landings walk the default branch's first-parent history, which the fetch-depth: 0
+      # checkout above provides. Appended to [rolling_issues].loop_runs as a
+      # comment, never an edit, so the history cannot be overwritten. It gates
+      # nothing: a failed read (a rate limit, a transient gh error) turns this step red without
+      # skipping any step above it, and !cancelled() still runs it when one of those failed. The
+      # step repeats the tree check at its top: on a changed tree it throws before any plugin script
+      # runs, so the step fails rather than being skipped.
+      - name: Loop metrics (deterministic)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $dirty = @(git status --porcelain --untracked-files=no) + @(git -C ouro status --porcelain --untracked-files=all)
+          if ($dirty) { throw "a file changed or appeared while the grading session ran, so no plugin script runs from this checkout:`n$($dirty -join "`n")" }
+          pwsh -NoProfile -File ouro/bin/Get-LoopMetrics.ps1 -Comment
+
+      # Report-only until three cohorts have closed their window: the per-cohort outcomes of agent-ready
+      # promotions over twelve ISO weeks, appended to the loop_runs issue on the metrics step's token
+      # and history. The binding check above already fails the pass on a python below 3.11. Same
+      # tree check, and the same python env keys as the applying step. The script also reads the
+      # Actions run list and run attempts for the flake rate, which needs the job token's
+      # `actions: read`: a copy whose `permissions:` block names permissions must include it.
+      - name: Loop outcomes (deterministic)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          PYTHONSAFEPATH: '1'
+          PYTHONNOUSERSITE: '1'
+        run: |
+          $dirty = @(git status --porcelain --untracked-files=no) + @(git -C ouro status --porcelain --untracked-files=all)
+          if ($dirty) { throw "a file changed or appeared while the grading session ran, so no plugin script runs from this checkout:`n$($dirty -join "`n")" }
+          python3 ouro/bin/loop-outcomes.py --comment
+
+      - name: Append usage to the rolling issue
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $dirty = @(git status --porcelain --untracked-files=no) + @(git -C ouro status --porcelain --untracked-files=all)
+          if ($dirty) { throw "a file changed or appeared while the grading session ran, so no plugin script runs from this checkout:`n$($dirty -join "`n")" }
+          if (-not (Test-Path TestResults\drift-audit-result.json)) { exit 0 }
+          try { $r = Get-Content TestResults\drift-audit-result.json -Raw | ConvertFrom-Json } catch { exit 0 }
+          . ouro/bin/Get-RollingIssue.ps1
+          $n = Get-RollingIssueNumber -Title $env:DRIFT_ISSUE_TITLE -Key rolling_issues.drift_audit
+          if ($n) {
+            $usage = ($r.usage | ConvertTo-Json -Compress)
+            gh issue comment $n --body "Run ${{ github.run_id }} ($env:OURO_STAMP): turns=$($r.num_turns), duration=$([math]::Round($r.duration_ms/60000,1))min, usage=$usage"
+          }
+
+      - name: Upload session results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ouro-weekly-pass-result
+          path: |
+            TestResults/drift-audit-result.json
+            TestResults/intake-grading-result.json
+            TestResults/intake-manifest/**
+          retention-days: 30
+          if-no-files-found: ignore
