@@ -38,6 +38,12 @@
 
     The LLM never chooses its own workload; this script is the only selector.
 
+    Every target also carries what step 3 of /ouro:drift reads from git history, so the CI session
+    holds no history command: `lastCommit`, the ISO 8601 commit time of the doc's last commit, and
+    `commits`, the one-line commits made since that commit under the doc's directory (the whole
+    repository for a doc at the root), newest first, the doc's own last commit left out. The list is
+    cut at -MaxCommits, and `commitsOmitted` counts what the cut left out.
+
 .NOTES
     Excludes: every -ExcludePrefix path (the binding's overlays.drift -- deliberately
     point-in-time trees), CHANGELOG*.md (append-only history), LICENSE. Gitignored trees never appear (git ls-files is the source).
@@ -59,6 +65,9 @@
     File holding the concatenated audit-run and audit-claims markers harvested from the rolling issue's comments.
     Absent or empty means a bootstrap run: every doc is never-audited.
 
+.PARAMETER MaxCommits
+    Most commits each target's `commits` list holds. Default 50.
+
 .PARAMETER AsModule
     Dot-source the function definitions without running anything. For the tests.
 
@@ -69,6 +78,7 @@ param(
     [string]$LedgerFile,
     [int]$MaxTargets = 40,
     [int]$RotationFloor = 10,
+    [int]$MaxCommits = 50,
     [string]$OutFile,
     [string[]]$ExcludePrefix = @(),
     [switch]$AsModule
@@ -350,6 +360,27 @@ function Get-ClaimRanges {
     return $found
 }
 
+# What step 3 of /ouro:drift reads for one doc: its last commit and the commits since it under its
+# directory. A sha range, so the doc's own last commit is out of the list whatever second it landed
+# on; a literal pathspec, so a directory named with a glob character names itself. A doc with no
+# commit yet has no time and no list.
+function Get-DocHistory {
+    param([string]$Doc, [string]$Head, [int]$Max)
+    try {
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $last = "$(git log -1 '--format=%H %cI' -- ":(literal)$Doc")".Trim()
+        if ($LASTEXITCODE -ne 0) { throw "git log -1 on $Doc failed (exit $LASTEXITCODE)" }
+        if (-not $last) { return @{ Time = $null; Commits = @(); Omitted = 0 } }
+        $sha, $time = $last -split ' ', 2
+        $dir = (Split-Path $Doc -Parent) -replace '\\', '/'
+        $lines = if ($dir) { @(git log --oneline --no-decorate "$sha..$Head" -- ":(literal)$dir") } else { @(git log --oneline --no-decorate "$sha..$Head") }
+        if ($LASTEXITCODE -ne 0) { throw "git log $sha..$Head on $Doc's directory failed (exit $LASTEXITCODE)" }
+        $lines = @($lines | Where-Object { $_ })
+        return @{ Time = $time; Commits = @($lines | Select-Object -First $Max); Omitted = [Math]::Max(0, $lines.Count - $Max) }
+    }
+    finally { [Console]::OutputEncoding = $encoding }
+}
+
 if ($AsModule) { return }
 
 Push-Location -LiteralPath $RepoRoot
@@ -452,6 +483,8 @@ try {
     $keep = @{}
     foreach ($t in $targets) { $keep[$t.path] = $true }
     $overflow = @($docs | Where-Object { -not $keep.ContainsKey($_) -and ($evidence.ContainsKey($_)) })
+    $history = @{}
+    foreach ($t in $targets) { $history[$t.path] = Get-DocHistory -Doc $t.path -Head $head -Max $MaxCommits }
 
     $result = [ordered]@{
         head       = $head
@@ -465,6 +498,9 @@ try {
                 weeksSinceAudit = if ($_.weeks -eq [double]::MaxValue) { $null } else { [Math]::Round($_.weeks, 1) }
                 staleClaims     = if ($claimInfo.ContainsKey($_.path)) { $claimInfo[$_.path].StaleClaims } else { 0 }
                 claims          = @(if ($claimInfo.ContainsKey($_.path)) { $claimInfo[$_.path].Claims })
+                lastCommit      = $history[$_.path].Time
+                commits         = @($history[$_.path].Commits)
+                commitsOmitted  = $history[$_.path].Omitted
             }
         })
         overflow   = $overflow

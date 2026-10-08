@@ -217,7 +217,7 @@ if ($Comment) {
     $n = if ($RollingIssueTitle) { Get-RollingIssueNumber -Title $RollingIssueTitle }
          else                     { Get-RollingIssueNumber }
     if ($n) {
-        $posted = gh issue comment $n --body $body 2>&1
+        $posted = gh issue comment $n --body (ConvertTo-InertCommentText $body) 2>&1
         if ($LASTEXITCODE -ne 0) { throw "gh issue comment $n failed (exit $LASTEXITCODE): $posted" }
     }
 }

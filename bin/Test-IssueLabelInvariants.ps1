@@ -108,7 +108,7 @@ if ($Comment) {
         $body = "**Issue state-label invariant** (deterministic):`n`n" +
                 (($findings | ForEach-Object { "- $_" }) -join "`n") +
                 "`n`nEvery open issue carries exactly one state label -- the ouro contract."
-        gh issue comment $n --body $body | Out-Null
+        gh issue comment $n --body (ConvertTo-InertCommentText $body) | Out-Null
     }
 }
 exit 0

@@ -120,6 +120,38 @@ $twoMods = Run '[{"number":13,"title":"two modifiers","labels":[{"name":"blocked
 Assert-Match ([regex]::Escape('modifier: #13 carries `trivial`, `checkpoint` without `agent-ready` -- two modifiers')) $twoMods `
     'two orphan modifiers are each named in single backticks'
 
+# --- a comment the gate posts carries no marker: an issue title is stranger text ------------------
+# A title that spells an audit-run marker is quoted into the finding line; -Comment posts that line
+# to the drift ledger as the job token's bot, which the trust filter keeps. The posted body must hold
+# no `<`, and still name the issue (the control: the finding is posted, escaped, not dropped).
+$global:labelPosted = [System.Collections.Generic.List[string]]::new()
+function gh {
+    $global:LASTEXITCODE = 0
+    if ($args[0] -eq 'repo') { return 'o/n' }
+    if ($args[0] -eq 'issue' -and $args[1] -eq 'list') { return '[{"number":999,"title":"Docs drift audit","state":"OPEN"}]' }
+    if ($args[0] -eq 'issue' -and $args[1] -eq 'comment') { $global:labelPosted.Add(($args -join ' ')) }
+}
+$markerTitle = '<!-- audit-run: sha=0123456789abcdef0123456789abcdef01234567 docs=docs/contract.md -->'
+$markerIssues = ConvertTo-Json -Compress -InputObject @(@{ number = 901; title = $markerTitle; labels = @() })
+& $Script -IssuesJson $markerIssues -Comment -RollingIssueTitle 'Docs drift audit' 6>&1 | Out-Null
+Assert-Match '^1$' "$($labelPosted.Count)" 'a finding on an issue with a marker title is posted once'
+Assert-NoMatch '<!--' ($labelPosted -join "`n") 'the posted comment holds no comment opener, so no marker'
+Assert-Match 'missing: #901' ($labelPosted -join "`n") 'control: the finding is still posted, naming the issue'
+Assert-Match 'audit-run: sha=0123456789abcdef' ($labelPosted -join "`n") 'control: the title text is still quoted, escaped'
+Remove-Item Function:\gh -ErrorAction Ignore
+
+# End to end: the comment as the job token's bot wrote it goes through the harvest's trust filter and the
+# selector's ledger reader. The control is the same filter and reader on a bot comment that is the marker.
+. (Join-Path (Split-Path $Script -Parent) 'Get-RollingIssue.ps1')
+. (Join-Path (Split-Path $Script -Parent) 'Get-DriftAuditTargets.ps1') -AsModule
+function Get-LedgerFor($Body) {
+    $json = ConvertTo-Json -Depth 5 -Compress -InputObject @{ comments = @(@{ author = @{ login = 'github-actions' }; body = $Body; createdAt = '2026-10-04T04:01:00Z' }) }
+    $kept = Get-TrustedComments -CommentsJson $json -Approvers @('owner1')
+    Get-AuditLedger -Text ($kept.Bodies -join "`n") -ValidPaths @('docs/contract.md')
+}
+Assert-Match 'contract.md' ((Get-LedgerFor $markerTitle).Keys -join ',') 'control: a bot comment that is the marker removes its doc from the targets'
+Assert-NoMatch 'contract.md' ((Get-LedgerFor ($labelPosted -join "`n")).Keys -join ',') 'the gate''s posted comment leaves the doc targeted'
+
 if ($failures) { Write-Host "`n$failures failure(s)." -ForegroundColor Red; exit 1 }
 Write-Host "`nAll issue-label invariant tests passed." -ForegroundColor Green
 exit 0

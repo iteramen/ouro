@@ -276,6 +276,70 @@ finally {
     if (Test-Path -LiteralPath $scratch) { Remove-Item -LiteralPath $scratch -Recurse -Force }
 }
 
+# --- Get-TrustedComments: a comment counts when its author is the bot or an approver ------
+# What `gh issue view --json comments` prints. The filter is an exact login compare, case aside:
+# a login that holds the bot's or an approver's name as a prefix, a suffix or a substring is a
+# stranger, a deleted account has no author, and a kept comment is copied as its own text.
+function New-CommentsJson($Rows) {
+    $list = foreach ($r in $Rows) {
+        $author = if ($r.login) { @{ login = $r.login } } else { $null }
+        [ordered]@{ author = $author; body = $r.body; createdAt = '2026-10-03T11:22:33Z'; id = 'IC_1' }
+    }
+    return (@{ comments = @($list) } | ConvertTo-Json -Depth 5 -Compress)
+}
+$cases = @(
+    @{ login = 'github-actions'; keep = $true; what = 'the bot' }
+    @{ login = 'GitHub-Actions'; keep = $true; what = 'the bot with another case' }
+    @{ login = 'octo'; keep = $true; what = 'an approver' }
+    @{ login = 'OCTO'; keep = $true; what = 'an approver with another case' }
+    @{ login = 'cjchin'; keep = $true; what = 'a second approver' }
+    @{ login = 'stranger'; keep = $false; what = 'a stranger' }
+    @{ login = 'github-actions[bot]'; keep = $false; what = 'the bot with a suffix gh does not print' }
+    @{ login = 'github-actions-evil'; keep = $false; what = 'a login that starts with the bot''s' }
+    @{ login = 'not-github-actions'; keep = $false; what = 'a login that ends with the bot''s' }
+    @{ login = 'octopus'; keep = $false; what = 'a login that starts with an approver''s' }
+    @{ login = 'octo '; keep = $false; what = 'an approver''s login with a trailing space' }
+    @{ login = ''; keep = $false; what = 'a deleted account, which has no author' }
+)
+foreach ($c in $cases) {
+    $got = Get-TrustedComments -CommentsJson (New-CommentsJson @(@{ login = $c.login; body = 'b' })) -Approvers 'octo', 'cjchin'
+    Assert-Equal $(if ($c.keep) { 1 } else { 0 }) $got.Kept "the filter $(if ($c.keep) { 'keeps' } else { 'drops' }) $($c.what)"
+}
+$mixed = New-CommentsJson @(@{ login = 'stranger'; body = 'one' }, @{ login = 'github-actions'; body = "two`nlines" }, @{ login = ''; body = 'three' }, @{ login = 'octo'; body = "caf$([char]0xE9)" })
+$got = Get-TrustedComments -CommentsJson $mixed -Approvers 'octo'
+Assert-Equal '4/2/2' "$($got.Total)/$($got.Kept)/$($got.Dropped)" 'the counts are the comments read, kept and dropped'
+Assert-Equal "two`nlines|caf$([char]0xE9)" ($got.Bodies -join '|') 'the kept bodies are in order, a multi-line body whole'
+Assert-Equal $true $got.Json.Contains('"createdAt":"2026-10-03T11:22:33Z"') 'a kept comment keeps its createdAt as written'
+Assert-Equal $false $got.Json.Contains('stranger') 'the Json holds no dropped comment'
+Assert-Equal 2 @((ConvertFrom-Json $got.Json).comments).Count 'the Json is {"comments":[...]} of the kept comments'
+$none = Get-TrustedComments -CommentsJson '{"comments":[]}' -Approvers 'octo'
+Assert-Equal '0/0/0' "$($none.Total)/$($none.Kept)/$($none.Dropped)" 'an issue with no comments keeps and drops nothing'
+Assert-Equal '{"comments":[]}' $none.Json 'and its Json is an empty list'
+$single = Get-TrustedComments -CommentsJson (New-CommentsJson @(@{ login = 'octo'; body = 'x' })) -Approvers @()
+Assert-Equal 0 $single.Kept 'with no approvers only the bot is trusted'
+Assert-Throws { Get-TrustedComments -CommentsJson '[]' -Approvers 'octo' } 'not an object with a comments array' 'a JSON list is refused'
+Assert-Throws { Get-TrustedComments -CommentsJson '{"comments":{}}' -Approvers 'octo' } 'not an object with a comments array' 'comments that is no list is refused'
+Assert-Throws { Get-TrustedComments -CommentsJson 'nonsense' -Approvers 'octo' } '.' 'text that is no JSON is refused'
+
+# The approvers come from the binding unless passed; a read that fails throws, so a filter that
+# cannot name its approvers does not fall back to trusting everyone.
+$trustTool = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) ('trusted-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
+try {
+    Set-Content -LiteralPath (Join-Path $trustTool.FullName 'ouro-binding.py') -Value @'
+import sys
+print('["octo"]' if sys.argv[1:] == ["get", "owner.ruling_approvers"] else "wrong args: %s" % sys.argv[1:])
+'@
+    $fromBinding = Get-TrustedComments -CommentsJson (New-CommentsJson @(@{ login = 'octo'; body = 'a' }, @{ login = 'cjchin'; body = 'b' })) -ToolDir $trustTool.FullName
+    Assert-Equal 'a' ($fromBinding.Bodies -join '|') 'the approvers are read with `get owner.ruling_approvers`, and only those are kept'
+    Set-Content -LiteralPath (Join-Path $trustTool.FullName 'ouro-binding.py') -Value @'
+import sys
+print("no such key", file=sys.stderr)
+sys.exit(1)
+'@
+    Assert-Throws { Get-TrustedComments -CommentsJson (New-CommentsJson @(@{ login = 'stranger'; body = 'a' })) -ToolDir $trustTool.FullName } 'owner.ruling_approvers failed' 'a failed binding read throws'
+}
+finally { Remove-Item -LiteralPath $trustTool.FullName -Recurse -Force }
+
 # --- neither gate may carry the title as a literal any more -----------------------------
 # Two candidates, the same probe the resolver itself is found with above: a vendored tree is
 # flat, so a bin/-only lookup silently finds nothing -- and these are the assertions that pin

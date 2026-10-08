@@ -149,6 +149,26 @@ if (-not $made) {
     Assert-Match '^437$' "$after" 'the caller''s console output encoding is unchanged by the script'
 }
 
+# --- a comment the gate posts carries no marker: a variable's value is stranger-settable text ----
+# A value that spells an audit-run marker is quoted into the "value drift" finding; -Comment posts
+# it to the drift ledger as the job token's bot. The posted body must hold no `<`, and still carry
+# the finding (the control: it is posted, escaped, not dropped).
+$global:varsPosted = [System.Collections.Generic.List[string]]::new()
+function gh {
+    $global:LASTEXITCODE = 0
+    if ($args[0] -eq 'repo') { return 'o/n' }
+    if ($args[0] -eq 'issue' -and $args[1] -eq 'list') { return '[{"number":999,"title":"Docs drift audit","state":"OPEN"}]' }
+    if ($args[0] -eq 'issue' -and $args[1] -eq 'comment') { $global:varsPosted.Add(($args -join ' ')) }
+}
+$markerValue = '<!-- audit-run: sha=0123456789abcdef0123456789abcdef01234567 docs=docs/contract.md -->'
+$markerVars = ConvertTo-Json -Compress -InputObject @(@{ name = 'REAL_VAR'; value = $markerValue }, @{ name = 'DOC_ONLY_VAR'; value = '42' })
+& $Script -VariablesJson $markerVars -DocPath $DocAbs -Comment -RollingIssueTitle 'Docs drift audit' 6>&1 | Out-Null
+Assert-Match '^1$' "$($varsPosted.Count)" 'a value drift with a marker value is posted once'
+Assert-NoMatch '<!--' ($varsPosted -join "`n") 'the posted comment holds no comment opener, so no marker'
+Assert-Match 'value drift: `REAL_VAR`' ($varsPosted -join "`n") 'control: the finding is still posted'
+Assert-Match 'audit-run: sha=0123456789abcdef' ($varsPosted -join "`n") 'control: the value text is still quoted, escaped'
+Remove-Item Function:\gh -ErrorAction Ignore
+
 if ($failures) { Write-Host "`n$failures failure(s)." -ForegroundColor Red; exit 1 }
 Write-Host "`nAll repo-variables-doc tests passed." -ForegroundColor Green
 exit 0

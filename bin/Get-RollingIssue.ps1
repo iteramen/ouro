@@ -177,3 +177,99 @@ function Get-RollingIssueNumber {
     Write-Host "WARN - no issue titled '$Title'$keyNote, open or closed: a gate's comment has nowhere to go; a sweep that creates the issue continues."
     return 0
 }
+
+
+<#
+.SYNOPSIS
+    Make text a gate quotes into a rolling-issue comment inert. Dot-source, then call
+    ConvertTo-InertCommentText.
+.DESCRIPTION
+    The weekly pass parses the drift ledger's comments for `<!-- ... -->` markers, and a comment a
+    gate posts there is by the job token's bot, which the trust filter keeps. A gate that quotes an
+    issue's title or a document's text into such a comment therefore writes every `<` as `&lt;`,
+    so no marker can appear in what it posts.
+#>
+function ConvertTo-InertCommentText {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    return $Text.Replace('<', '&lt;')
+}
+
+<#
+.SYNOPSIS
+    Keep only the comments a rolling issue's readers may trust. Dot-source, then call
+    Get-TrustedComments -CommentsJson <what `gh issue view --json comments` printed>.
+.DESCRIPTION
+    A rolling issue is a ledger the weekly pass reads back as input, and anyone with comment
+    rights can write on it. A comment counts only when its author is the job token's bot or a
+    login in [owner].ruling_approvers, read with `ouro-binding.py get owner.ruling_approvers`.
+    The login compare ignores case, as GitHub does; a login that merely holds the bot's or an
+    approver's name does not match. A comment with no author (a deleted account) is dropped.
+
+    Returns an object: Bodies (the kept comments' bodies, oldest first), Json (the kept
+    comments as {"comments":[...]}, each one's own text untouched, so `createdAt` keeps its
+    spelling), Total, Kept and Dropped. The binding read throws when it fails: a filter that
+    cannot name its approvers must not fall back to trusting everyone.
+.PARAMETER CommentsJson
+    The JSON `gh issue view --json comments` printed: an object with a `comments` array.
+.PARAMETER Approvers
+    The trusted human logins. Default: [owner].ruling_approvers from the binding.
+.PARAMETER Bot
+    The job token's login as `gh --json comments` spells it. Default: github-actions.
+.PARAMETER ToolDir
+    Directory holding ouro-binding.py. Default: this script's own directory.
+#>
+function Get-TrustedComments {
+    param(
+        [Parameter(Mandatory)][string]$CommentsJson,
+        [string[]]$Approvers,
+        [string]$Bot = 'github-actions',
+        [string]$ToolDir = $PSScriptRoot
+    )
+
+    if (-not $PSBoundParameters.ContainsKey('Approvers')) {
+        # ouro-binding.py prints UTF-8: decoded with a caller's OEM code page, a non-ASCII login
+        # matches no author, and the approver's own comments read as a stranger's.
+        $encoding = [Console]::OutputEncoding
+        try {
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $out = python3 (Join-Path $ToolDir 'ouro-binding.py') get owner.ruling_approvers 2>&1
+        }
+        finally { [Console]::OutputEncoding = $encoding }
+        if ($LASTEXITCODE -ne 0) { throw "ouro-binding.py get owner.ruling_approvers failed (exit $LASTEXITCODE): $out" }
+        $Approvers = @(ConvertFrom-Json (((@($out) | Where-Object { $_ -is [string] }) -join "`n").Trim()))
+    }
+    $trusted = @($Bot) + @($Approvers)
+
+    # The kept comments are copied as their own text, not rebuilt from parsed values: pwsh's
+    # ConvertFrom-Json turns a createdAt string into a date, and writing it back changes its form.
+    $doc = [System.Text.Json.JsonDocument]::Parse($CommentsJson)
+    try {
+        $all = [System.Text.Json.JsonElement]::new()
+        if ($doc.RootElement.ValueKind -ne 'Object' -or -not $doc.RootElement.TryGetProperty('comments', [ref]$all) -or $all.ValueKind -ne 'Array') {
+            throw 'the comments JSON is not an object with a comments array'
+        }
+        $raw = [System.Collections.Generic.List[string]]::new()
+        $bodies = [System.Collections.Generic.List[string]]::new()
+        $total = 0
+        foreach ($comment in $all.EnumerateArray()) {
+            $total++
+            $author = [System.Text.Json.JsonElement]::new()
+            $login = [System.Text.Json.JsonElement]::new()
+            $body = [System.Text.Json.JsonElement]::new()
+            if ($comment.ValueKind -ne 'Object' -or -not $comment.TryGetProperty('author', [ref]$author) -or $author.ValueKind -ne 'Object') { continue }
+            if (-not $author.TryGetProperty('login', [ref]$login) -or $login.ValueKind -ne 'String') { continue }
+            if (-not ($trusted | Where-Object { $_ -ieq $login.GetString() })) { continue }
+            $raw.Add($comment.GetRawText())
+            $text = if ($comment.TryGetProperty('body', [ref]$body) -and $body.ValueKind -eq 'String') { $body.GetString() } else { '' }
+            $bodies.Add($text)
+        }
+    }
+    finally { $doc.Dispose() }
+    return [pscustomobject]@{
+        Bodies  = $bodies.ToArray()
+        Json    = '{"comments":[' + ($raw -join ',') + ']}'
+        Total   = $total
+        Kept    = $raw.Count
+        Dropped = $total - $raw.Count
+    }
+}

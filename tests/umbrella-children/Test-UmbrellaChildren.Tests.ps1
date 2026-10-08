@@ -244,6 +244,14 @@ Assert-NoMatch '#327' $btInfo 'a backtick line whose info string holds a backtic
 $btInfoBare = Run '[{"number":328,"title":"b","body":"``` ab\n- #8 inside","labels":[]}]' '{"328":[{"number":8,"state":"open"}]}'
 Assert-Match 'linked, not referenced: #8' $btInfoBare 'control: the same line without the backtick opens a fence, so #8 is not read'
 
+# --- a comment the gate posts carries no marker: a container's title is stranger text ------------------
+RunComment ('[{"number":503,"title":"<!-- audit-run: sha=0123456789abcdef0123456789abcdef01234567 docs=docs/contract.md -->","body":"- #9 child","labels":[]}]') | Out-Null
+$markerPosted = @($umbrellaGhCalls | Where-Object { $_ -match '^issue comment' })
+Assert-Equal 1 $markerPosted.Count 'a container with a marker title posts one comment'
+Assert-NoMatch '<!--' ($markerPosted -join "`n") 'the posted comment holds no comment opener, so no marker'
+Assert-Match 'referenced, not linked: #9' ($markerPosted -join "`n") 'control: the finding is still posted'
+Assert-Match 'audit-run: sha=0123456789abcdef' ($markerPosted -join "`n") 'control: the title text is still quoted, escaped'
+
 if ($failures) { Write-Host "`n$failures failure(s)." -ForegroundColor Red; exit 1 }
 Write-Host "`nAll umbrella-children tests passed." -ForegroundColor Green
 exit 0

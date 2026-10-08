@@ -8,6 +8,7 @@ encode or parse the `audit-claims` marker, and turn a drift run's `claim-records
     python3 drift-claims.py parse [--kind audit-claims|claim-records|verdict-records] < text > markers.json
     python3 drift-claims.py ingest --comments <file> --since <time> --head <40-hex> --out-dir <dir>
                                    [--cwd <dir>] [--max-chars <n>]       > bodies.txt
+    python3 drift-claims.py outbox --dir <dir>                           > paths.txt
 
 A record is {"doc", "statement", "path", "start", "end"}, 1-based and inclusive; `record` adds
 "sha256", and `check` and `encode` read records that carry it. Every file is read as its git blob
@@ -81,16 +82,34 @@ ingest  Turns the claim-records blocks of one drift run into audit-claims commen
         with the strings escaped as `encode` escapes them. A marker over --max-chars is skipped
         with a warning; no verdicts means no file.
 
-Exits 0 on success, 1 on unreadable input or a git failure, and 2 on a usage error or a bad option value. stdlib only.
+outbox  --dir <dir> --targets <file>
+        Reads the directory a CI drift session wrote and prints the paths of what the workflow step after
+        it posts: the ledger body file, then the comment files in posting order, one per line. The layout
+        is body.md and comment-NNN.md (three digits), and the order is the number. It prints nothing and
+        exits 1, naming every cause, when:
+          - an entry is not a regular file directly in the directory (a subdirectory, a symlink), or its
+            name is outside the layout;
+          - there is no body.md, or no comment, or the last comment holds no audit-run marker (a session
+            that stopped early), or an audit-run marker sits in any comment but the last;
+          - a docs= entry of the last comment's marker is not the path of a targets[] entry of --targets, the
+            targets file the run was given (a file that is not that JSON refuses the directory too);
+          - a file is empty or blank, is not UTF-8, is over the applier's COMMENT_MAX characters, or
+            matches one of its SECRET_SHAPES. The cause names the file and the shape, never the text.
+        COMMENT_MAX and SECRET_SHAPES are read from the apply-manifest.py beside this script, so the
+        limits are the applier's own; without that file outbox exits 1, and no other subcommand needs it.
+
+Exits 0 on success, 1 on unreadable input, a refused directory or a git failure, and 2 on a usage error or a bad option value. stdlib only.
 """
 from __future__ import annotations
 
 import argparse
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
@@ -112,6 +131,8 @@ VERDICTS_START = re.compile(r"<!--[ \t]*verdict-records:")
 # The selector's $AuditRunPattern; the suite asserts the two are equal.
 AUDIT_RUN = re.compile(r"<!--\s*audit-run:\s*sha=([0-9a-fA-F]+)\s+docs=([^>]*?)\s*-->")
 COMMENT_CAP = 65536
+OUTBOX_BODY = "body.md"
+OUTBOX_COMMENT = re.compile(r"comment-([0-9]{3})\.md")
 
 
 def fail(message: str) -> "NoReturn":  # noqa: F821
@@ -530,12 +551,92 @@ def cmd_ingest(args) -> None:
             print(path)
 
 
+def load_applier() -> tuple[int, tuple]:
+    """COMMENT_MAX and SECRET_SHAPES from the apply-manifest.py beside this script, so the poster's
+    limits are the applier's and not a second copy. Bytecode is not written: the plugin checkout
+    must stay as the tree check left it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "apply-manifest.py")
+    if not os.path.isfile(path):
+        fail(f"{path} is not there: outbox reads the comment cap and the secret shapes from it")
+    spec = importlib.util.spec_from_file_location("apply_manifest_for_outbox", path)
+    module = importlib.util.module_from_spec(spec)
+    saved, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = saved
+    return module.COMMENT_MAX, module.SECRET_SHAPES
+
+
+def read_target_paths(path: str) -> set[str]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return {t["path"] for t in data["targets"]}
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        fail(f"cannot read the targets of {path}: {type(err).__name__}")
+
+
+def cmd_outbox(args) -> None:
+    cap, shapes = load_applier()
+    target_paths = read_target_paths(args.targets)
+    try:
+        names = sorted(os.listdir(args.dir))
+    except OSError as err:
+        fail(f"cannot read {args.dir}: {err}")
+    problems, comments, has_body = [], [], False
+    for name in names:
+        path = os.path.join(args.dir, name)
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            problems.append(f"{shown(name)} is not a regular file directly in the directory")
+        elif name == OUTBOX_BODY:
+            has_body = True
+        elif OUTBOX_COMMENT.fullmatch(name):
+            comments.append(name)
+        else:
+            problems.append(f"{shown(name)} is outside the layout: {OUTBOX_BODY} and comment-NNN.md")
+    if not has_body:
+        problems.append(f"there is no {OUTBOX_BODY}")
+    if not comments:
+        problems.append("there is no comment, so no audit-run marker closes the run")
+    texts = {}
+    for name in ([OUTBOX_BODY] if has_body else []) + comments:
+        try:
+            with open(os.path.join(args.dir, name), "rb") as handle:
+                text = handle.read().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as err:
+            problems.append(f"{name} cannot be read as UTF-8 text: {type(err).__name__}")
+            continue
+        texts[name] = text
+        if not text.strip():
+            problems.append(f"{name} is empty")
+        if len(text) > cap:
+            problems.append(f"{name} is {len(text)} characters, over the {cap}-character cap")
+        for what, shape in shapes:
+            if re.search(shape, text):
+                problems.append(f"{name} carries {what}")
+    for name in comments[:-1]:
+        if name in texts and AUDIT_RUN.search(texts[name]):
+            problems.append(f"{name}, not the last comment, carries an audit-run marker: only the last may close the run")
+    if comments and comments[-1] in texts and not AUDIT_RUN.search(texts[comments[-1]]):
+        problems.append(f"{comments[-1]}, the last comment, carries no audit-run marker: the session stopped early")
+    elif comments and comments[-1] in texts:
+        for marker in AUDIT_RUN.finditer(texts[comments[-1]]):
+            for doc in (p.strip() for p in marker.group(2).split(",") if p.strip()):
+                if doc not in target_paths:
+                    problems.append(f"{comments[-1]}'s audit-run marker names {shown(doc)}, which is not a target of this run")
+    if problems:
+        sys.exit(f"drift-claims.py: outbox refused {args.dir}, nothing to post:\n  " + "\n  ".join(problems))
+    for name in [OUTBOX_BODY] + comments:
+        print(os.path.join(args.dir, name))
+
+
 def main() -> None:
     top = argparse.ArgumentParser(prog="drift-claims.py", description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = top.add_subparsers(dest="command", required=True)
     for name, fn in (("record", cmd_record), ("check", cmd_check), ("encode", cmd_encode), ("parse", cmd_parse),
-                     ("ingest", cmd_ingest)):
+                     ("ingest", cmd_ingest), ("outbox", cmd_outbox)):
         p = sub.add_parser(name)
         p.set_defaults(fn=fn)
         if name in ("record", "check"):
@@ -547,6 +648,9 @@ def main() -> None:
             p.add_argument("--sha", required=True)
         if name == "parse":
             p.add_argument("--kind", choices=("audit-claims", "claim-records", "verdict-records"), default="audit-claims")
+        if name == "outbox":
+            p.add_argument("--dir", required=True)
+            p.add_argument("--targets", required=True)
         if name == "ingest":
             p.add_argument("--comments", required=True)
             p.add_argument("--since", required=True)

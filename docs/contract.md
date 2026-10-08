@@ -349,11 +349,20 @@ verify commands and by review.
 
 This section governs **every unattended run of an ouro skill**, not only the weekly pass. The
 unattended weekly pass (`templates/weekly-pass.yml`) is **report-only**: its deterministic gates
-comment, or write the rolling issue that holds their report; its drift audit has no write tools
-beyond `gh issue`; and its intake has none at all — it grades untrusted issue text with the job
-token cleared and no tool that reaches the tracker, writing a manifest that a later step with no
-model in it applies. The bullets below that describe that property are the pass's; the label
-moves are every unattended run's. Specifically:
+comment, or write the rolling issue that holds their report; and neither of its two model
+sessions has a write tool other than an Edit spelled with its own output directory. Its drift audit
+reads text anyone with comment rights can write, and its intake reads untrusted issue text; each
+runs with the job token cleared, no tool that reaches the tracker or runs a program, an Edit that
+names only its output directory, and `--settings` with `blockReadsOutsideWorkingDirectories`, which
+denies its Read, Grep and subagents a file outside the workspace. The drift
+audit writes the ledger's body and comments into files that a later step posts, after a poster that
+refuses a directory out of layout, over a size cap, holding a secret shape, carrying a run marker
+before its last comment, ending without one or naming a doc that is not a target, and the pass,
+reading that ledger back, counts a comment on it only when its author is the job token's bot or a
+ruling approver, a gate that quotes issue or doc text into a comment there writing every `<` as
+`&lt;`; the intake writes a manifest that a later step applies.
+Neither later step has a model in it. The bullets below that describe that property are the pass's; the label moves are every
+unattended run's. Specifically:
 
 - The pass **never** edits code, merges, closes, or promotes, and it rewrites no issue body
   but the **rolling issues named in `[rolling_issues]`** — its own report surfaces, not backlog

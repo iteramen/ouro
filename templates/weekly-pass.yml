@@ -3,34 +3,46 @@ name: Ouro Weekly Pass
 # ouro template — copy to .github/workflows/ and fill the <placeholders>.
 #
 # The unattended weekly entry of the loop (docs/contract.md §9 in the ouro plugin). Report-only:
-# the deterministic gates comment on issues, the drift audit writes through `gh issue`, and the
-# intake writes nothing at all — it grades into a manifest a later step applies. Nothing here
-# edits code, merges, promotes or closes, and the only issue bodies rewritten are the rolling
-# ones named in [rolling_issues] -- report surfaces, not backlog items. One of those it will
-# file if the repo has not.
+# the deterministic gates comment on issues, and the two model sessions write only into an output
+# directory each: the drift audit writes the ledger's body and comments into files that a later
+# step posts, and the intake grades into a manifest a later step applies. Nothing here edits code, merges,
+# promotes or closes, and the only issue bodies rewritten are the rolling ones named in
+# [rolling_issues] -- report surfaces, not backlog items. One of those it will file if the
+# repo has not.
 #
-# The drift audit's allowedTools names only the `gh issue` subcommands the audit runs. That
-# narrows the session; it does not enforce its skill: a rule cannot constrain what is written
-# ahead of its literal ending, so it can add any flag before one, comment on any issue, pass
-# --edit-last or --delete-last to gh issue comment, edit any issue, and post any file the runner
-# can read through --body-file. It holds no create and no reopen: the harvest step resolves the
-# ledger, or files it, before the session starts, and hands the session its number.
+# A permission rule cannot constrain what a session writes after its literal ending, so
+# neither session is granted anything that reaches the tracker. Each reads text the contract
+# calls untrusted (§8) -- the intake newly-filed issue bodies, the drift audit the ledger's
+# comments, issue bodies and the repository's docs -- so each holds no gh tool, no
+# git tool that writes a file or starts a program, the job token cleared, and `--settings` with
+# `blockReadsOutsideWorkingDirectories`, which denies its Read, Grep and subagents a file outside
+# the workspace. Both load the plugin from `ouro/`, the checkout of OURO_REF, by `--plugin-dir`. The drift audit
+# writes the ledger's body and one comment per audited doc into TestResults/drift-outbox; the
+# step after it, which runs no model, posts them to the ledger issue the harvest step resolved.
+# The history it would have read with `git log` is in its targets file. The intake grades into a
+# manifest; the step after it applies that manifest with no model in it. What bounds each is
+# therefore not a permission rule over what a session writes but the program that reads what it
+# wrote: the poster refuses a whole directory that is out of layout, over a size cap, holds a
+# secret shape, carries an audit-run marker before its last comment, ends without one or names a doc
+# that is not a target, and the applier's --unattended mode refuses a
+# whole manifest that steps outside comment/edit, needs-triage/needs-ruling, and a bounded
+# comment body holding none of its secret shapes.
 #
-# The intake is split in two for exactly that reason. It reads newly-filed issue bodies, which
-# the contract calls untrusted (§8), so the session that reads them holds nothing: no gh tool,
-# no git tool that writes a file or starts a program, and the job token cleared. It grades into
-# a manifest; the step after it applies that manifest with no model in it. What bounds the
-# intake is therefore not a permission rule over what a session writes -- which cannot be
-# written -- but the applier that reads what it wrote, whose --unattended mode refuses a whole
-# manifest that steps outside comment/edit, needs-triage/needs-ruling, and a bounded,
-# secret-free comment body.
+# The ledger is read back as input too: the harvest and the claims step count a comment on it only
+# when its author is the job token's bot or one of the binding's ruling approvers, and a gate that
+# quotes issue or doc text into a comment there writes every `<` as `&lt;`, so a stranger's
+# audit-run or audit-claims marker moves no target and no kept record.
 #
 # Residual, and named rather than claimed away: persist-credentials: false keeps both checkouts
 # from leaving a token in .git/config, but a self-hosted runner may hold a gh configuration of
 # its own (`gh auth status` says whether yours does — the source of this template ran on one
 # that did), and the ambient claude auth below is the runner's by design. Dropping either means
-# dropping the runner pin. What the grading step rests on is that it is granted no tool able to
-# reach them.
+# dropping the runner pin. A file the sessions could read there (the credentials and the gh hosts
+# file among them) is outside the workspace, which the read setting above denies their file tools;
+# their Bash holds only the git reads named below. Two of those reach an outside path, measured:
+# `git rev-parse --resolve-git-dir` prints the target line of a file in gitfile form, and
+# `git ls-files -X` tests a whole-line guess against a file and prints none of it; both show
+# whether the path exists. No credential file has the gitfile form.
 #
 # Offset the cron from any deterministic sweep you already run so they never contend.
 #
@@ -61,15 +73,27 @@ jobs:
     # Pin to the machine that owns the claude auth, or drop the pin under API billing.
     runs-on: [self-hosted, <your-runner-labels>]
     timeout-minutes: 60
+    # Named, not inherited: the repository's default token permission is whatever its owner last
+    # set. Both checkouts fetch (`contents: read`); the gates, the harvest, the claims step, the
+    # intake apply and the usage steps read issues and write comments and labels (`issues: write`);
+    # loop metrics and loop outcomes read pull requests (`pull-requests: read`); loop outcomes also
+    # reads the Actions run list (`actions: read`). The repo-variable cross-check reads variables,
+    # which no key here names: compare that step's output on the first run of a copy that carries
+    # this block with the run before it.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       GH_TOKEN: ${{ github.token }}
       # Every gh call spelled below runs after Get-RollingIssueNumber in the same pwsh process,
       # and that assigns GH_REPO from [repo].slug -- so the deterministic steps name the binding's
-      # repository whatever this says. This is the backstop for the drift session, the one model
-      # step granted a gh tool: its skill mandates `-R <slug>` on every call, and a call that
-      # omits it reads and writes whatever repository gh picks from the working directory's clone
-      # -- the plugin is checked out at ouro/ inside this one. An explicit -R still wins.
+      # repository whatever this says. This is the backstop for a gh call that omits `-R`, which
+      # reads and writes whatever repository gh picks from the working directory's clone -- the
+      # plugin is checked out at ouro/ inside this one. No model step holds a gh tool. An explicit
+      # -R still wins.
       GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v7
@@ -298,13 +322,27 @@ jobs:
             $encoding = [Console]::OutputEncoding
             try {
               [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-              gh issue view $num --comments --json comments --jq '.comments[].body' |
-                Set-Content TestResults\audit-ledger.txt -Encoding utf8
+              $raw = (gh issue view $num --comments --json comments) -join "`n"
             }
             finally { [Console]::OutputEncoding = $encoding }
-            # The newest comment's createdAt is GitHub's clock, read before the session starts: the
+            if ($LASTEXITCODE -ne 0) { throw "reading the comments of #$num failed (exit $LASTEXITCODE)" }
+            # Only the job token's bot and the binding's ruling approvers write the ledger this file
+            # holds, and the bot's gate comments carry no `<`. The selector reads it, so a stranger's
+            # `audit-run` marker would otherwise remove the docs it names from the next run's
+            # targets; anyone with comment rights can write on the issue, and the filter keeps what
+            # they wrote out.
+            $ledger = Get-TrustedComments -CommentsJson $raw
+            # A blank line when nothing is kept: a file with no bytes reads back as null, and the count below throws on it.
+            Set-Content TestResults\audit-ledger.txt -Value $(if ($ledger.Kept) { $ledger.Bodies } else { '' }) -Encoding utf8
+            Write-Host "ledger #${num}: kept $($ledger.Kept) of $($ledger.Total) comment(s), dropped $($ledger.Dropped) by an author who is neither the job token's bot nor a ruling approver"
+            # A ledger with comments and none kept reads as empty to the selector. A wrong bot login
+            # shows here, on the first live run, rather than as targets that quietly never narrow.
+            if ($ledger.Total -gt 0 -and $ledger.Kept -eq 0) {
+              Write-Host "::warning::none of the $($ledger.Total) comment(s) on #$num is by the job token's bot or a ruling approver, so the ledger reads empty: check the bot's login as ``gh issue view --json comments`` spells it"
+            }
+            # The newest comment's createdAt, whoever wrote it, is GitHub's clock, read before the session starts: the
             # step that appends the claim markers takes only comments created after it. An issue
-            # with no comments exports nothing, and that step then reads every comment.
+            # with no comments exports nothing, and that step then reads every comment the filter keeps.
             $newest = "$(gh issue view $num --comments --json comments --jq '.comments | map(.createdAt) | max // empty')".Trim()
             if ($LASTEXITCODE -ne 0) { throw "reading the newest comment's createdAt on #$num failed (exit $LASTEXITCODE)" }
             if ($newest) {
@@ -312,8 +350,8 @@ jobs:
               "DRIFT_CLAIMS_SINCE=$newest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
           } else {
-            # No ledger yet: the pass files it, so the session's grant holds no create verb. It
-            # carries `umbrella` alone, as the docs-freshness issue does; the session rewrites the
+            # No ledger yet: the pass files it, so no step after this one creates it. It carries
+            # `umbrella` alone, as the docs-freshness issue does; the posting step rewrites the
             # placeholder body on its first run. The number is read from the URL gh prints.
             $out = gh issue create --title "$env:DRIFT_ISSUE_TITLE" --label umbrella --body "Docs drift audit: the audit rewrites this body every run, and each run's ledger entry is a comment." 2>&1
             if ($LASTEXITCODE -ne 0) { throw "gh issue create '$env:DRIFT_ISSUE_TITLE' failed (exit $LASTEXITCODE): $out" }
@@ -324,7 +362,7 @@ jobs:
             $num = [int]$Matches[1]
             '' | Set-Content TestResults\audit-ledger.txt -Encoding utf8
           }
-          # The drift session is handed this number as a literal in its prompt.
+          # The posting step and the claims step read this number; the drift session is not handed it.
           "DRIFT_ISSUE_NUMBER=$num" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $runs = @([regex]::Matches((Get-Content TestResults\audit-ledger.txt -Raw), 'audit-run:')).Count
           Write-Host "harvested $runs audit-run marker(s) from #$num"
@@ -352,10 +390,34 @@ jobs:
           $global:LASTEXITCODE = 0
           Get-Content TestResults\drift-targets.json
 
-      - name: Docs drift audit (orchestrator at [models].weekly, verifiers at [models].verifier)
+      # The drift audit is two steps, as the intake is: a session that audits and a program that
+      # posts. The session reads the ledger's comments (in the file the harvest wrote), issue text
+      # and the repository's docs -- untrusted input (contract §8) -- so it is handed no credential
+      # and no tool that reaches the tracker, and its whole output is the files it writes into
+      # TestResults/drift-outbox, which the step after it posts.
+      #
+      # The grant is the read-only set the verification subagents need and nothing else: read and
+      # search the tree, the three git reads that run no program and write no file, and Edit,
+      # spelled with the output directory. `git grep` and `git log`, `git diff` and `git show` are
+      # deliberately not in it -- the first runs a command (`--open-files-in-pager`) and the others
+      # write a file (`--output=`), which is the class this step drops rather than the names. The
+      # history step 3 of the skill reads is in the targets file. As with the intake, a grant is a
+      # property of one CLI version: what bounds the session is the tree check in the next step plus
+      # the poster's refusal of any directory it does not recognise, not the Edit pattern alone.
+      - name: Docs drift audit (orchestrator at [models].weekly, verifiers at [models].verifier; no token)
         shell: pwsh
+        env:
+          # The step that runs a model holds no token; the step that holds one runs no model. An
+          # empty value is how a step-level env clears the job-level one, and, as for the intake,
+          # it does not unauthenticate `gh` on a runner that stores a configuration of its own:
+          # what keeps this session off the tracker is the grant above naming no gh tool.
+          GH_TOKEN: ''
         run: |
           if ($env:DRIFT_ISSUE_NUMBER -notmatch '^\d+$') { throw "the harvest step exported no drift ledger number (DRIFT_ISSUE_NUMBER='$env:DRIFT_ISSUE_NUMBER')" }
+          # Created without -Force: a directory already there is an earlier run's output, which the
+          # posting step would post as this run's.
+          New-Item -ItemType Directory -Force TestResults | Out-Null
+          New-Item -ItemType Directory TestResults\drift-outbox | Out-Null
           # The binding's [models].weekly names the tier (default sonnet); any other failed read throws.
           $model = python3 ouro/bin/ouro-binding.py get models.weekly 2>&1
           if ($LASTEXITCODE -ne 0) {
@@ -363,19 +425,61 @@ jobs:
             $model = 'sonnet'
           }
           $model = "$model".Trim()
-          claude -p "/ouro:drift --targets TestResults\drift-targets.json --issue $env:DRIFT_ISSUE_NUMBER --ci" `
+          $confine = Join-Path $env:RUNNER_TEMP 'ouro-read-confined.json'
+          Set-Content -LiteralPath $confine -Value '{"permissions":{"blockReadsOutsideWorkingDirectories":true}}' -Encoding utf8
+          claude -p "/ouro:drift --targets TestResults\drift-targets.json --ledger TestResults\audit-ledger.txt --outbox TestResults\drift-outbox --ci" `
             --model $model `
+            --plugin-dir ouro `
+            --settings $confine `
             --output-format json `
-            --allowedTools "Skill,Read,Grep,Glob,Agent,Task,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git ls-files:*),Bash(git grep:*),Bash(git cat-file:*),Bash(git rev-parse:*),Bash(git blame:*),Bash(gh issue list *),Bash(gh issue view *),Bash(gh issue comment *),Bash(gh issue edit *)" `
+            --allowedTools "Skill,Read,Grep,Glob,Agent,Task,Edit(TestResults/drift-outbox/**),Bash(git ls-files:*),Bash(git cat-file:*),Bash(git rev-parse:*)" `
             > TestResults\drift-audit-result.json
           if ($LASTEXITCODE -ne 0) { throw "drift audit session failed (exit $LASTEXITCODE)" }
 
-      # The drift session posts each audited doc's report as a comment, with that doc's claim
+      # The posting half: deterministic, credentialed, no model. `outbox` reads the directory the
+      # session wrote and prints the ledger body file and then the comment files in posting order,
+      # or refuses the whole directory (a file out of layout, a symlink, a missing body, a last
+      # comment with no audit-run marker, an earlier comment with one, a doc in the marker that is not
+      # in the targets file, a file over the applier's comment cap or holding one of
+      # its secret shapes) and prints nothing, so a refused run posts nothing and the docs it
+      # audited are targeted again next week. The session's files are the only input: this step
+      # edits the body of $env:DRIFT_ISSUE_NUMBER and comments there, and takes no issue number
+      # from any file.
+      #
+      # The tree is checked first, as in the steps below it: the drift session ran Bash, and a write
+      # it made to a plugin script would run here with the token in hand. PYTHONSAFEPATH and
+      # PYTHONNOUSERSITE keep a planted module off the python's path, as in the applying step. The
+      # ledger is resolved by title again, as in the claims step, and a mismatch with the
+      # harvest's number stops the step.
+      - name: Post the drift audit's output (deterministic)
+        shell: pwsh
+        env:
+          PYTHONSAFEPATH: '1'
+          PYTHONNOUSERSITE: '1'
+        run: |
+          $dirty = @(git status --porcelain --untracked-files=no) + @(git -C ouro status --porcelain --untracked-files=all)
+          if ($dirty) { throw "a file changed or appeared while the drift session ran, so no plugin script runs from this checkout:`n$($dirty -join "`n")" }
+          $files = @(python3 ouro/bin/drift-claims.py outbox --dir TestResults/drift-outbox --targets TestResults/drift-targets.json)
+          if ($LASTEXITCODE -ne 0) { throw "drift-claims.py outbox refused the drift session's output (exit $LASTEXITCODE): nothing is posted" }
+          # The resolver assigns GH_REPO from [repo].slug, so each gh call below names the
+          # binding's repository.
+          . ouro/bin/Get-RollingIssue.ps1
+          $num = Get-RollingIssueNumber -Title $env:DRIFT_ISSUE_TITLE -Key rolling_issues.drift_audit
+          if ("$num" -ne $env:DRIFT_ISSUE_NUMBER) { throw "the drift ledger resolves to #$num, not the harvest's #$env:DRIFT_ISSUE_NUMBER" }
+          gh issue edit $env:DRIFT_ISSUE_NUMBER --body-file $files[0]
+          if ($LASTEXITCODE -ne 0) { throw "rewriting the body of #$env:DRIFT_ISSUE_NUMBER failed (exit $LASTEXITCODE)" }
+          foreach ($file in $files | Select-Object -Skip 1) {
+            gh issue comment $env:DRIFT_ISSUE_NUMBER --body-file $file
+            if ($LASTEXITCODE -ne 0) { throw "posting $file to #$env:DRIFT_ISSUE_NUMBER failed (exit $LASTEXITCODE)" }
+          }
+          Write-Host "posted the body and $(@($files).Count - 1) comment(s) to #$env:DRIFT_ISSUE_NUMBER"
+
+      # The post step above posts each audited doc's report as a comment, with that doc's claim
       # records in a `claim-records` block. This step turns this run's records into the
       # `audit-claims` markers, in code that runs no model: the session's block is data and carries
       # no hash, and the selector counts a marker only when every hash it stores recomputes from
-      # the tree. `ingest` reads only comments created after the harvest's newest createdAt and
-      # only blocks at the targets file's head,
+      # the tree. `ingest` reads only comments by the job token's bot or a ruling approver, created
+      # after the harvest's newest createdAt, and only blocks at the targets file's head,
       # keeps the docs of this run's audit-run marker, drops each record that does not parse,
       # names an untracked path or holds a range outside its file, and packs the markers into
       # comment bodies under GitHub's cap. It reads the `verdict-records` blocks of the same
@@ -404,10 +508,15 @@ jobs:
           $encoding = [Console]::OutputEncoding
           try {
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-            gh issue view $env:DRIFT_ISSUE_NUMBER --comments --json comments | Set-Content TestResults/drift-comments.json -Encoding utf8
+            $raw = (gh issue view $env:DRIFT_ISSUE_NUMBER --comments --json comments) -join "`n"
           }
           finally { [Console]::OutputEncoding = $encoding }
           if ($LASTEXITCODE -ne 0) { throw "reading the comments of #$env:DRIFT_ISSUE_NUMBER failed (exit $LASTEXITCODE)" }
+          # The harvest's filter, applied before `ingest` reads the file: a stranger who comments
+          # while the session runs would otherwise choose which docs' records are kept.
+          $trusted = Get-TrustedComments -CommentsJson $raw
+          Set-Content TestResults/drift-comments.json -Value $trusted.Json -Encoding utf8
+          Write-Host "claims: kept $($trusted.Kept) of $($trusted.Total) comment(s), dropped $($trusted.Dropped) by an author who is neither the job token's bot nor a ruling approver"
           $files = @(python3 ouro/bin/drift-claims.py ingest --comments TestResults/drift-comments.json "--since=$env:DRIFT_CLAIMS_SINCE" --head $head --out-dir TestResults/claim-markers)
           if ($LASTEXITCODE -ne 0) { throw "drift-claims.py ingest failed (exit $LASTEXITCODE)" }
           foreach ($file in $files) {
@@ -468,10 +577,14 @@ jobs:
             $model = 'sonnet'
           }
           $model = "$model".Trim()
+          $confine = Join-Path $env:RUNNER_TEMP 'ouro-read-confined.json'
+          Set-Content -LiteralPath $confine -Value '{"permissions":{"blockReadsOutsideWorkingDirectories":true}}' -Encoding utf8
           claude -p "/ouro:intake --new-since $env:INTAKE_SINCE --targets TestResults\intake-targets.json --manifest TestResults\intake-manifest" `
             --model $model `
+            --plugin-dir ouro `
+            --settings $confine `
             --output-format json `
-            --allowedTools "Skill,Read,Grep,Glob,Agent,Task,Edit(TestResults/**),Bash(git rev-parse:*)" `
+            --allowedTools "Skill,Read,Grep,Glob,Agent,Task,Edit(TestResults/intake-manifest/**),Bash(git rev-parse:*)" `
             > TestResults\intake-grading-result.json
           if ($LASTEXITCODE -ne 0) { throw "intake grading failed (exit $LASTEXITCODE)" }
           # A graded week ends in a manifest, an empty one when the window held no targets, so a
@@ -570,8 +683,8 @@ jobs:
           . ouro/bin/Get-RollingIssue.ps1
           $n = Get-RollingIssueNumber -Title $env:DRIFT_ISSUE_TITLE -Key rolling_issues.drift_audit
           if ($n) {
-            $usage = ($r.usage | ConvertTo-Json -Compress)
-            gh issue comment $n --body "Run ${{ github.run_id }} ($env:OURO_STAMP): turns=$($r.num_turns), duration=$([math]::Round($r.duration_ms/60000,1))min, usage=$usage"
+            $usage = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens' | ForEach-Object { "$_=$([long]$r.usage.$_)" }) -join ', '
+            gh issue comment $n --body "Run ${{ github.run_id }} ($env:OURO_STAMP): turns=$([int]$r.num_turns), duration=$([math]::Round([double]$r.duration_ms/60000,1))min, usage: $usage"
           }
 
       - name: Upload session results
@@ -583,5 +696,6 @@ jobs:
             TestResults/drift-audit-result.json
             TestResults/intake-grading-result.json
             TestResults/intake-manifest/**
+            TestResults/drift-outbox/**
           retention-days: 30
           if-no-files-found: ignore

@@ -702,6 +702,202 @@ cfile.write_text(json.dumps({"comments": [report(good), comment_at(RUN, T2)]}), 
 code, out, err = run("ingest", "--comments", str(cfile), "--since", T0, "--head", ing_head, "--cwd", str(ing), "--out-dir", str(PARENT_TMP / "o-obj"))
 check("the comments file may be gh's own object, {\"comments\": [...]}", code == 0 and out.count("\n") == 1)
 
+# --- outbox ---------------------------------------------------------------------------------
+# The poster's reader: one directory the drift session wrote, printed as the ledger body file and
+# then the comment files in posting order, or refused whole. Every refusal prints nothing on stdout
+# and exits nonzero; each has a control, the clean directory beside it, that prints.
+OB_RUN = "<!-- audit-run: sha=" + "a" * 40 + " docs=docs/a.md -->"
+OB_REPORT = "docs/a.md\n\nno findings\n"
+GH_TOKEN = "ghp_" + "A1b2C3d4E5" * 4
+APPLIER = SCRIPT.parent / "apply-manifest.py"
+ob_count = 0
+TARGETS = PARENT_TMP / "outbox-targets.json"
+TARGETS.write_text(json.dumps({"head": "a" * 40, "targets": [{"path": "docs/a.md"}, {"path": "docs/b.md"}]}), encoding="utf-8")
+
+
+def outbox_dir(files):
+    """A new directory holding files (name -> str or bytes), and its path."""
+    global ob_count
+    ob_count += 1
+    d = PARENT_TMP / f"outbox{ob_count}"
+    d.mkdir()
+    for name, content in files.items():
+        (d / name).write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+    return d
+
+
+def outbox(d, targets=None, **kw):
+    return run("outbox", "--dir", str(d), "--targets", str(targets or TARGETS), **kw)
+
+
+def clean(**over):
+    return {"body.md": "## Findings\n\nnone\n", "comment-001.md": OB_REPORT, "comment-002.md": OB_RUN, **over}
+
+
+d = outbox_dir(clean())
+code, out, err = outbox(d)
+check("outbox on a clean directory exits 0 and prints the body, then the comments in order",
+      code == 0 and [pathlib.Path(x).name for x in out.splitlines()] == ["body.md", "comment-001.md", "comment-002.md"]
+      and all(pathlib.Path(x).parent == d for x in out.splitlines()))
+d = outbox_dir({"comment-010.md": OB_RUN, "body.md": "b\n", "comment-002.md": OB_REPORT, "comment-001.md": OB_REPORT})
+code, out, err = outbox(d)
+check("the comments come in numeric order, whatever order the files were written in",
+      code == 0 and [pathlib.Path(x).name for x in out.splitlines()] == ["body.md", "comment-001.md", "comment-002.md", "comment-010.md"])
+check("an audit-run marker on the last comment alone is enough: no other comment needs one",
+      outbox(outbox_dir({"body.md": "b\n", "comment-001.md": OB_RUN}))[0] == 0)
+
+
+def refused(what, files, *, stderr_has=None, stderr_lacks=None):
+    code, out, err = outbox(outbox_dir(files))
+    check(f"outbox refuses {what}: exit nonzero, nothing printed",
+          code != 0 and out == "" and (stderr_has is None or stderr_has in err) and (stderr_lacks is None or stderr_lacks not in err))
+
+
+refused("a directory with no body file", {k: v for k, v in clean().items() if k != "body.md"}, stderr_has="body.md")
+refused("a directory with a body and no comment", {"body.md": "b\n"}, stderr_has="audit-run")
+refused("a last comment with no audit-run marker (a session that stopped early)",
+        clean(**{"comment-002.md": OB_REPORT}), stderr_has="comment-002.md")
+refused("a marker only on a comment that is not the last", {"body.md": "b\n", "comment-001.md": OB_RUN, "comment-002.md": OB_REPORT},
+        stderr_has="comment-002.md")
+refused("a last comment whose marker is the near miss (no docs= key)",
+        clean(**{"comment-002.md": "<!-- audit-run: sha=" + "a" * 40 + " -->"}), stderr_has="audit-run")
+refused("a last comment whose marker is the near miss (a different key)",
+        clean(**{"comment-002.md": "<!-- audit-runs: sha=" + "a" * 40 + " docs=docs/a.md -->"}), stderr_has="audit-run")
+check("a marker with an empty docs= is a marker (control: a zero-target run ends in one)",
+      outbox(outbox_dir(clean(**{"comment-002.md": "<!-- audit-run: sha=" + "a" * 40 + " docs= -->"})))[0] == 0)
+# A marker closes a run once: only the last comment may spell one.
+refused("an audit-run marker on a comment that is not the last", clean(**{"comment-001.md": OB_RUN}), stderr_has="comment-001.md")
+refused("an audit-run marker beside a report on a comment that is not the last",
+        clean(**{"comment-001.md": OB_REPORT + OB_RUN + "\n"}), stderr_has="not the last")
+check("a comment that is not the last may name a marker kind that is not audit-run (control)",
+      outbox(outbox_dir(clean(**{"comment-001.md": "<!-- audit-claims: sha=" + "a" * 40 + ' doc="docs/a.md"\n-->'})))[0] == 0)
+# The marker's docs= are the run's targets.
+refused("a marker naming a doc that is not a target", clean(**{"comment-002.md": "<!-- audit-run: sha=" + "a" * 40 + " docs=docs/a.md,docs/zzz.md -->"}),
+        stderr_has="docs/zzz.md")
+refused("a marker naming a target with a case variant", clean(**{"comment-002.md": "<!-- audit-run: sha=" + "a" * 40 + " docs=docs/A.md -->"}),
+        stderr_has="docs/A.md")
+refused("a marker naming a target with a trailing dot-slash", clean(**{"comment-002.md": "<!-- audit-run: sha=" + "a" * 40 + " docs=./docs/a.md -->"}),
+        stderr_has="./docs/a.md")
+refused("a second marker in the last comment naming a doc that is not a target",
+        clean(**{"comment-002.md": OB_RUN + "\n<!-- audit-run: sha=" + "a" * 40 + " docs=docs/zzz.md -->"}), stderr_has="docs/zzz.md")
+check("a marker naming two of the targets passes (control)",
+      outbox(outbox_dir(clean(**{"comment-002.md": "<!-- audit-run: sha=" + "a" * 40 + " docs=docs/a.md, docs/b.md -->"})))[0] == 0)
+for what, content in (("a targets file that is not JSON", "{"), ("a targets file with no targets list", "{}"),
+                      ("a targets entry with no path", '{"targets": [{}]}')):
+    bad = PARENT_TMP / "outbox-bad-targets.json"
+    bad.write_text(content, encoding="utf-8")
+    code, out, err = outbox(outbox_dir(clean()), targets=bad)
+    check(f"outbox refuses {what}: exit nonzero, nothing printed", code != 0 and out == "" and "targets" in err)
+code, out, err = run("outbox", "--dir", str(outbox_dir(clean())))
+check("outbox without --targets is a usage error, nothing printed", code == 2 and out == "")
+code, out, err = outbox(outbox_dir(clean()), targets=PARENT_TMP / "no-such-targets.json")
+check("outbox with a targets file that is not there exits nonzero and prints nothing", code != 0 and out == "")
+refused("a body that is empty", clean(**{"body.md": ""}), stderr_has="body.md")
+refused("a body of blank lines alone", clean(**{"body.md": "\n \n\t\n"}), stderr_has="body.md")
+refused("a comment that is empty", clean(**{"comment-001.md": ""}), stderr_has="comment-001.md")
+
+for name in ("notes.txt", "comment-1.md", "comment-0001.md", "Comment-001.md", "comment-001.MD", "BODY.md", "body.md.bak",
+             "comment-00a.md", "comment-001.md.bak", "comment-" + "".join(map(chr, (0x661, 0x662, 0x663))) + ".md", ".hidden", "body"):
+    others = {k: v for k, v in clean().items() if k.lower() != name.lower()}
+    refused(f"a file named {ascii(name)}, outside the layout", {**others, name: "x\n"}, stderr_has="layout")
+
+sub = outbox_dir(clean())
+(sub / "nested").mkdir()
+(sub / "nested" / "comment-009.md").write_text(OB_RUN, encoding="utf-8")
+code, out, err = outbox(sub)
+check("outbox refuses a subdirectory, whatever it holds: exit nonzero, nothing printed", code != 0 and out == "" and "nested" in err)
+sub = outbox_dir(clean())
+(sub / "comment-003.md").mkdir()
+code, out, err = outbox(sub)
+check("outbox refuses a subdirectory spelled as a comment name: exit nonzero, nothing printed", code != 0 and out == "")
+
+outside = PARENT_TMP / "outbox-target.md"
+outside.write_text(OB_RUN, encoding="utf-8")
+link_dir = outbox_dir(clean())
+try:
+    (link_dir / "comment-002.md").unlink()
+    os.symlink(outside, link_dir / "comment-002.md")
+    linked = True
+except (OSError, NotImplementedError):
+    linked = False
+if linked:
+    code, out, err = outbox(link_dir)
+    check("outbox refuses a symlink to a clean file outside the directory: exit nonzero, nothing printed",
+          code != 0 and out == "" and "comment-002.md" in err)
+elif sys.platform.startswith("linux"):
+    check("on Linux the symlink row runs: a symlink can always be made there", False)
+else:
+    print("  skip: this account cannot create a symbolic link; the symlink row did not run")
+
+check("outbox on a directory that is not there exits nonzero and prints nothing",
+      outbox(PARENT_TMP / "no-such-outbox")[0] != 0 and outbox(PARENT_TMP / "no-such-outbox")[1] == "")
+as_file = PARENT_TMP / "outbox-a-file"
+as_file.write_text("x", encoding="utf-8")
+check("outbox on a path that is a file exits nonzero and prints nothing", outbox(as_file)[0] != 0 and outbox(as_file)[1] == "")
+
+refused("a comment that is not UTF-8", clean(**{"comment-001.md": b"report \xc3\x28 end\n"}), stderr_has="comment-001.md")
+refused("a body that is not UTF-8", clean(**{"body.md": b"\xff\xfe\x00b\n"}), stderr_has="body.md")
+check("a comment of UTF-8 text beyond ASCII is read (control)", outbox(outbox_dir(clean(**{"comment-001.md": "café — \U0001f600\n"})))[0] == 0)
+
+# The cap counts characters, as the applier's own check does: 20000 two-byte characters pass, 20001 do not.
+refused("a comment one character over the cap", clean(**{"comment-001.md": "x" * 20001}), stderr_has="comment-001.md")
+refused("a body one character over the cap", clean(**{"body.md": "x" * 20001}), stderr_has="body.md")
+check("a comment of exactly the cap passes (control)", outbox(outbox_dir(clean(**{"comment-001.md": "x" * 20000})))[0] == 0)
+check("a body of exactly the cap passes (control)", outbox(outbox_dir(clean(**{"body.md": "x" * 20000})))[0] == 0)
+check("a comment of 20000 two-byte characters passes: the cap is characters, not bytes (control)",
+      outbox(outbox_dir(clean(**{"comment-001.md": "é" * 20000})))[0] == 0)
+refused("a last comment over the cap, its marker included", clean(**{"comment-002.md": OB_RUN + "x" * 20000}), stderr_has="comment-002.md")
+
+refused("a comment carrying a GitHub token", clean(**{"comment-001.md": f"leaked {GH_TOKEN} here\n"}),
+        stderr_has="a GitHub token", stderr_lacks=GH_TOKEN)
+refused("a body carrying a GitHub token", clean(**{"body.md": f"leaked {GH_TOKEN} here\n"}), stderr_has="body.md", stderr_lacks=GH_TOKEN)
+refused("a last comment carrying a private key block", clean(**{"comment-002.md": OB_RUN + "\n-----BEGIN RSA PRIVATE KEY-----\n"}),
+        stderr_has="a private key block")
+refused("a comment carrying an Anthropic key", clean(**{"comment-001.md": "sk-ant-" + "a1B2c3D4" * 3 + "\n"}), stderr_has="an Anthropic API key")
+check("a token one character short of its shape passes (near miss)",
+      outbox(outbox_dir(clean(**{"comment-001.md": "ghp_" + "A" * 19 + "\n"})))[0] == 0)
+check("a token prefix that is another family's passes (near miss)",
+      outbox(outbox_dir(clean(**{"comment-001.md": "ghx_" + "A" * 40 + "\n"})))[0] == 0)
+
+# The cap and the shapes are the applier's, read from the file beside the script, never copied: a copy
+# of both scripts whose applier has a smaller cap and one more shape refuses what the original passes.
+mod_dir = PARENT_TMP / "outbox-bin"
+mod_dir.mkdir()
+applier_text = APPLIER.read_text(encoding="utf-8")
+anchor_cap, anchor_shape = "COMMENT_MAX = 20000", '    ("a Slack token", r"xox[baprs]-[A-Za-z0-9-]{10,}"),\n'
+check("the applier holds the cap and shape lines the copy row edits", anchor_cap in applier_text and anchor_shape in applier_text)
+(mod_dir / "apply-manifest.py").write_text(applier_text.replace(anchor_cap, "COMMENT_MAX = 120")
+                                           .replace(anchor_shape, anchor_shape + '    ("a canary", r"CANARY-[0-9]+"),\n'), encoding="utf-8")
+(mod_dir / "drift-claims.py").write_bytes(SCRIPT.read_bytes())
+
+
+def outbox_copy(files):
+    d = outbox_dir(files)
+    proc = subprocess.run([sys.executable, str(mod_dir / "drift-claims.py"), "outbox", "--dir", str(d), "--targets", str(TARGETS)], capture_output=True, env=ENV)
+    return proc.returncode, proc.stdout.decode("utf-8"), proc.stderr.decode("utf-8")
+
+
+check("a copy whose applier caps at 120 passes a 120-character comment", outbox_copy(clean(**{"comment-001.md": "x" * 120}))[0] == 0)
+code, out, err = outbox_copy(clean(**{"comment-001.md": "x" * 121}))
+check("and refuses a 121-character one: the cap is read from the applier beside the script", code != 0 and out == "")
+code, out, err = outbox_copy(clean(**{"comment-001.md": "see CANARY-77\n"}))
+check("and refuses the shape the applier alone gained: the shapes are read from it too", code != 0 and out == "" and "a canary" in err)
+
+lone = PARENT_TMP / "outbox-lone"
+lone.mkdir()
+(lone / "drift-claims.py").write_bytes(SCRIPT.read_bytes())
+d = outbox_dir(clean())
+proc = subprocess.run([sys.executable, str(lone / "drift-claims.py"), "outbox", "--dir", str(d), "--targets", str(TARGETS)], capture_output=True, env=ENV)
+check("with no apply-manifest.py beside it, outbox exits nonzero, prints nothing and names the file in a message, not a traceback",
+      proc.returncode != 0 and proc.stdout == b"" and b"apply-manifest.py" in proc.stderr and b"Traceback" not in proc.stderr)
+proc = subprocess.run([sys.executable, str(lone / "drift-claims.py"), "parse"], input=b"", capture_output=True, env=ENV)
+check("and the other subcommands still run there (control)", proc.returncode == 0)
+
+# Importing the applier must leave nothing in the plugin checkout, where the next step's tree check would find it.
+env_cache = {k: v for k, v in ENV.items() if k != "PYTHONDONTWRITEBYTECODE"}
+subprocess.run([sys.executable, str(mod_dir / "drift-claims.py"), "outbox", "--dir", str(outbox_dir(clean())), "--targets", str(TARGETS)], capture_output=True, env=env_cache)
+check("outbox leaves no __pycache__ beside the applier it imported", not (mod_dir / "__pycache__").exists())
+
 print()
 if failures:
     print(f"{failures} FAILED")

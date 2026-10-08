@@ -110,7 +110,7 @@ if ($Comment) {
          else                     { Get-RollingIssueNumber }
     if ($n) {
         $body = "**Repo-variable cross-check** (deterministic):`n`n" + (($findings | ForEach-Object { "- $_" }) -join "`n")
-        gh issue comment $n --body $body | Out-Null
+        gh issue comment $n --body (ConvertTo-InertCommentText $body) | Out-Null
     }
 }
 exit 0

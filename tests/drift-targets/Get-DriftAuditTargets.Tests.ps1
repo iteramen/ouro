@@ -485,6 +485,77 @@ if ($claimSkip) {
     Assert-Equal 1 @($badWarned).Count 'and says so in one warning line'
 }
 
+# --- the history each target carries ------------------------------------------------------
+# The drift session holds no git history command, so the selector writes what step 3 of /ouro:drift
+# reads: the doc's last commit time and the one-line commits since it under the doc's directory,
+# the doc's own last commit left out. Real git, a small repo, so a commit landing on the same second
+# as the doc's own is not told apart by its time.
+$histRepo = Join-Path ([IO.Path]::GetTempPath()) ('drift-history-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $histRepo | Out-Null
+$callerEncoding = [Console]::OutputEncoding
+Push-Location -LiteralPath $histRepo
+try {
+    git init -q . 2>$null
+    function Add-HistCommit($Message, [hashtable]$Files) {
+        foreach ($k in $Files.Keys) {
+            $p = Join-Path $histRepo $k
+            New-Item -ItemType Directory -Force -Path (Split-Path $p -Parent) | Out-Null
+            [IO.File]::WriteAllText($p, $Files[$k])
+        }
+        git add -A 2>$null; git -c user.email=t@t -c user.name=t commit -q -m $Message 2>$null
+        return (git rev-parse HEAD).Trim()
+    }
+    $h1 = Add-HistCommit 'base' @{ 'docs/a.md' = "# a`n"; 'docs/b.md' = "# b`n"; 'top.md' = "# top`n"; 'src/x.txt' = "1`n"; 'g[1]/n.md' = "# n`n" }
+    $null = Add-HistCommit "code $([char]0xE9) change" @{ 'src/x.txt' = "2`n" }
+    $null = Add-HistCommit 'docs sibling' @{ 'docs/c.txt' = "c`n" }
+    $h4 = Add-HistCommit 'b edited' @{ 'docs/b.md' = "# b`nedited`n" }
+    $null = Add-HistCommit 'in g1' @{ 'g1' = "z`n" }
+    $null = Add-HistCommit 'in g[1]' @{ 'g[1]/y.txt' = "y`n" }
+    $iso1 = (git log -1 --format=%cI $h1).Trim(); $iso4 = (git log -1 --format=%cI $h4).Trim()
+    [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(437)
+    # A user's log.decorate = full would put "(HEAD -> main)" into every one-line commit.
+    $env:GIT_CONFIG_COUNT = '1'; $env:GIT_CONFIG_KEY_0 = 'log.decorate'; $env:GIT_CONFIG_VALUE_0 = 'full'
+    try { $histJson = & $Selector | Out-String }
+    finally { Remove-Item Env:GIT_CONFIG_COUNT, Env:GIT_CONFIG_KEY_0, Env:GIT_CONFIG_VALUE_0 }
+    [Console]::OutputEncoding = $callerEncoding
+    $hist = @{}; foreach ($t in ($histJson | ConvertFrom-Json).targets) { $hist[$t.path] = $t }
+    $asDate = { param($iso) ("{`"d`":`"$iso`"}" | ConvertFrom-Json).d }
+    $hSubjects = { param($t) (@($t.commits) | ForEach-Object { $_ -replace '^[0-9a-f]+ ', '' }) -join '|' }
+}
+finally {
+    [Console]::OutputEncoding = $callerEncoding
+    Pop-Location
+    Remove-Item -LiteralPath $histRepo -Recurse -Force
+}
+Assert-Equal (& $asDate $iso1) (& $asDate $hist['docs/a.md'].lastCommit) 'a target carries its doc''s last commit time'
+Assert-Equal $true $histJson.Contains("`"lastCommit`": `"$iso1`"") 'in the ISO 8601 form git prints for %cI, text and all'
+Assert-Equal (& $asDate $iso4) (& $asDate $hist['docs/b.md'].lastCommit) 'and it is that doc''s own, not the repository''s newest'
+Assert-Equal 'b edited|docs sibling' (& $hSubjects $hist['docs/a.md']) 'its commits are the ones since, under the doc''s directory, newest first'
+Assert-Equal $true (@($hist['docs/a.md'].commits)[0] -match '^[0-9a-f]{7,} b edited$') 'each commit is a one-line abbreviated sha and subject'
+Assert-Equal "in g[1]|in g1|b edited|docs sibling|code $([char]0xE9) change" (& $hSubjects $hist['top.md']) 'a doc at the root takes every commit since, a non-ASCII subject intact under code page 437'
+Assert-Equal 'in g[1]' (& $hSubjects $hist['g[1]/n.md']) 'a directory named with glob characters is matched literally, not as the file it would glob to'
+Assert-Equal 0 @($hist['docs/b.md'].commits).Count 'a doc with no commit since its last touch carries an empty list'
+Assert-Equal $true ($null -ne $hist['docs/b.md'].commits) 'and the list is present, not absent'
+Assert-Equal 0 $hist['docs/a.md'].commitsOmitted 'a list under the cap omits none'
+
+# Over the cap the list is cut and the count of what was left out is said.
+$capRepo = Join-Path ([IO.Path]::GetTempPath()) ('drift-histcap-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path $capRepo | Out-Null
+Push-Location -LiteralPath $capRepo
+try {
+    git init -q . 2>$null
+    [IO.File]::WriteAllText((Join-Path $capRepo 'only.md'), "# only`n")
+    git add -A 2>$null; git -c user.email=t@t -c user.name=t commit -q -m base 2>$null
+    1..4 | ForEach-Object {
+        [IO.File]::WriteAllText((Join-Path $capRepo 'f.txt'), "$_`n")
+        git add -A 2>$null; git -c user.email=t@t -c user.name=t commit -q -m "change $_" 2>$null
+    }
+    $capped = (& $Selector -MaxCommits 3 | Out-String | ConvertFrom-Json).targets | Where-Object { $_.path -eq 'only.md' }
+}
+finally { Pop-Location; Remove-Item -LiteralPath $capRepo -Recurse -Force }
+Assert-Equal 'change 4|change 3|change 2' ((@($capped.commits) | ForEach-Object { $_ -replace '^[0-9a-f]+ ', '' }) -join '|') 'a list over -MaxCommits keeps the newest'
+Assert-Equal 1 $capped.commitsOmitted 'and commitsOmitted counts the one left out'
+
 # Without python3 on PATH the real seam throws, and the selector's reading degrades to the file-level key.
 $savedPath = $env:PATH
 $emptyDir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('drift-nopy-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
@@ -499,6 +570,45 @@ finally {
 Assert-Equal 0 $script:nopy.Count 'with no python3 on PATH no doc gets a claim key'
 Assert-Equal 1 $nopyWarned.Count 'with no python3 on PATH the selector prints one warning line'
 Assert-Equal $true ("$nopyWarned" -match 'python3 is not on PATH') 'and the warning names python3'
+
+# --- the ledger harvest's author filter, through the selector ------------------------------
+# The harvest writes the kept bodies of the ledger's comments to the file the selector reads. A
+# comment holding an audit-run marker removes the docs it names from the targets, so who may write
+# one is the property: the same comment from a stranger leaves the doc targeted, and from the bot
+# or an approver skips it. Driven through the real filter and the real selector, in a repo of two
+# untouched docs and a cap of one: the doc a marker names ranks below the one it does not.
+$trustLib = @((Join-Path $Base 'Get-RollingIssue.ps1'), (Join-Path $Base 'bin/Get-RollingIssue.ps1')) |
+    Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $trustLib) { throw "Get-RollingIssue.ps1 not found under $Base" }
+. $trustLib
+$trustRepo = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('drift-trust-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
+Push-Location -LiteralPath $trustRepo.FullName
+try {
+    Set-Content -LiteralPath 'a.md' -Value @('# A', 'plain prose') -Encoding utf8
+    Set-Content -LiteralPath 'b.md' -Value @('# B', 'plain prose') -Encoding utf8
+    git init -q . 2>$null
+    git add -A 2>$null; git -c user.email=t@t -c user.name=t commit -q -m base 2>$null
+    $trustHead = (git rev-parse HEAD).Trim()
+    $marker = "<!-- audit-run: sha=$trustHead docs=a.md -->"
+    $trustComments = {
+        param($login)
+        (@{ comments = @(@{ author = @{ login = $login }; body = $marker; createdAt = '2026-10-03T11:22:33Z' }) } | ConvertTo-Json -Depth 5 -Compress)
+    }
+    $targetsFor = {
+        param($login)
+        $kept = Get-TrustedComments -CommentsJson (& $trustComments $login) -Approvers 'Approver1'
+        Set-Content -LiteralPath 'ledger.txt' -Value $(if ($kept.Kept) { $kept.Bodies } else { '' }) -Encoding utf8
+        ,@((& $Selector -LedgerFile 'ledger.txt' -RotationFloor 0 -MaxTargets 1 | Out-String | ConvertFrom-Json).targets | ForEach-Object { $_.path })
+    }
+    Assert-Equal 'a.md' ((& $targetsFor 'stranger') -join ',') 'a stranger''s audit-run marker leaves the doc it names targeted'
+    Assert-Equal 'a.md' ((& $targetsFor 'github-actions-evil') -join ',') 'a login that only starts with the bot''s name leaves the doc targeted'
+    Assert-Equal 'b.md' ((& $targetsFor 'github-actions') -join ',') 'the same marker from the bot skips the doc it names'
+    Assert-Equal 'b.md' ((& $targetsFor 'approver1') -join ',') 'the same marker from an approver, whatever the login''s case, skips the doc it names'
+}
+finally {
+    Pop-Location
+    Remove-Item -LiteralPath $trustRepo.FullName -Recurse -Force
+}
 
 if ($failures -gt 0) { Write-Host "`n$failures assertion(s) failed" -ForegroundColor Red; exit 1 }
 Write-Host "`nAll assertions passed" -ForegroundColor Green

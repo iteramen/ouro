@@ -75,13 +75,19 @@ sections rot into misinformation. History is safe exactly once it cannot outrank
 ## Why the automation is report-only
 
 The weekly pass is where the unattended LLM grading runs: deterministic gates first, then two
-LLM passes that write in two different ways. The drift audit comments on and rewrites the drift
-ledger, which the pass, not the session, reopens or files, with `umbrella` alone; its tool
-grant narrows it to those `gh issue` subcommands without holding it to its skill. The intake
-writes nothing at all: it proposes a comment and `needs-triage` / `needs-ruling` in a manifest,
-its grant names no `gh` and its step carries no token, because the session that reads untrusted
-issue text holds nothing — a later step with no model in it applies what the applier's
-unattended bounds allow. An
+LLM passes that propose in two different ways. The drift audit proposes a rewrite of the drift
+ledger's body and a comment per audited doc, in files; the pass, not the session, reopens or files
+the ledger, with `umbrella` alone, and a later step with no model in it posts the files after a
+poster refuses any directory out of layout, over a size cap, holding a secret shape, carrying a
+run marker before its last comment, ending without one or naming a doc that is not a target. The intake proposes a comment and `needs-triage` / `needs-ruling` in a
+manifest, which a later step with no model in it applies within the applier's unattended bounds.
+Neither session writes to the tracker: each reads text anyone can write, so its grant names no
+`gh` and no git command that runs a program or writes a file, and its step carries no token. A
+permission rule cannot constrain what a session writes after its literal ending, so the bound on
+what it writes is the program that reads what the session wrote, not a narrower grant, and the bound
+on what it reads is a setting that confines its file tools to the workspace, with a Bash grant of
+three git reads; of those, `git rev-parse --resolve-git-dir` prints the target line of an outside
+file in gitfile form, and `git ls-files -X` tests a whole-line guess against one. An
 unattended `/ouro:execute` run's only label move is the demotion §9 enumerates. The pass's
 LLM never picks its own workload — a deterministic script selects targets — and never
 promotes, closes, edits code, or merges. Promotion, `trivial`, and every merge are
