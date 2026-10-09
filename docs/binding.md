@@ -135,7 +135,9 @@ drift = ["docs/incidents/**"]            # point-in-time paths the drift audit s
 [owner]
 role = "loop owner"                      # the role the contract calls "the owner"
 ruling_approvers = ["BoJl4apa"]          # logins whose comment closes a needs-ruling, and who
-                                         # convert an architecture issue
+                                         # convert an architecture issue; only these logins' (and
+                                         # the job token's bot's) **Triage** comments are
+                                         # provenance, so list every login that runs /ouro:triage
 ```
 
 ### Choosing `ship.review`

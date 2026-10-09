@@ -64,6 +64,7 @@ def manifest_dir(steps, files):
 
 TRIAGE = "**Triage**\n\nPROMOTE (Size S).\n"
 PLAIN = "Just a note, no provenance marker.\n"
+INTAKE = "**Intake triage** (automated)\n\nNEEDS-RULING (Size S).\n"  # the only first line an unattended comment may open with
 
 # --- the order check ---------------------------------------------------------------
 d = manifest_dir(
@@ -309,8 +310,24 @@ class Repo:
 slept = []  # the seconds each stubbed time.sleep was asked for in the last apply()
 
 
+def targets_file(steps, numbers=None):
+    """The intake's targets file for an unattended run: the JSON object Get-IntakeTargets.ps1
+    writes, its targets rows the issues the steps name unless numbers says otherwise (a list; None
+    is the default; any other value is the file's text, written as it is)."""
+    if numbers is None:
+        numbers = sorted({int(s["issue"]) for s in (steps if isinstance(steps, list) else []) if isinstance(s, dict)
+                          and (type(s.get("issue")) is int and s["issue"] >= 1
+                               or isinstance(s.get("issue"), str) and s["issue"].isascii() and s["issue"].isdecimal()
+                               and 0 < len(s["issue"]) < 10 and int(s["issue"]) >= 1)})
+    path = pathlib.Path(tempfile.mkdtemp(prefix="targets-", dir=PARENT_TMP)) / "intake-targets.json"
+    path.write_text(numbers if isinstance(numbers, str) else json.dumps(
+        {"newSince": "2026-10-01", "rulingsQueue": 0, "targets": [{"number": n, "title": "t"} for n in numbers],
+         "excluded": []}), encoding="utf-8")
+    return path
+
+
 def apply(steps, files, dry=False, labels=(), repo=None, unattended=False, named_repo="owner/name", forbidden=False,
-          binding=None, overlay=None):
+          binding=None, overlay=None, targets=None):
     """Run main() over a manifest with gh and time.sleep stubbed; return the dir, the gh commands,
     the output and the refusal (None when it ran through; any other exception main() raises is the
     refusal too, as its type and message). A create answers issue 101, each labels read the next
@@ -320,7 +337,9 @@ def apply(steps, files, dry=False, labels=(), repo=None, unattended=False, named
     standing for what the binding answered. Every run passes --no-forbidden-check, as CI holds no
     list; with forbidden, the check runs. With forbidden or a binding, the run is from a fresh git
     repository of its own holding binding as its .claude/ouro.toml and overlay as its
-    ouro.local.toml, or no binding when binding is None."""
+    ouro.local.toml, or no binding when binding is None. Unattended, the run is handed a targets
+    file naming the issues the steps name; targets is a list of numbers, or the file's text, or
+    False for no --targets at all."""
     d, calls, out, refused, labels = manifest_dir(steps, files), [], io.StringIO(), None, list(labels)
     slept.clear()
     saved_cwd = os.getcwd()
@@ -345,11 +364,13 @@ def apply(steps, files, dry=False, labels=(), repo=None, unattended=False, named
         return Ran(BEFORE if "view" in cmd else "")
 
     saved = (sys.argv, getattr(applier, "DRY", False), applier.REPO, applier.subprocess.run, time.sleep,
-             applier.UNATTENDED)
+             applier.UNATTENDED, applier.TARGETS)
     applier.DRY, applier.subprocess.run, time.sleep = dry, run, slept.append
     applier.UNATTENDED = unattended
+    applier.TARGETS = str(targets_file(steps, targets)) if unattended and targets is not False else None
     sys.argv = (["apply-manifest.py", str(d)] + ([] if named_repo is None else ["--repo", named_repo])
-                + (["--dry-run"] if dry else []) + ([] if forbidden else ["--no-forbidden-check"]))
+                + (["--dry-run"] if dry else []) + ([] if forbidden else ["--no-forbidden-check"])
+                + (["--unattended"] if unattended else []) + (["--targets", applier.TARGETS] if applier.TARGETS else []))
     try:
         # As the bottom of the script does, in its order: check_args before the repository is
         # resolved, then resolve_repo reading --repo's own value, "owner/name" standing in for the
@@ -364,7 +385,7 @@ def apply(steps, files, dry=False, labels=(), repo=None, unattended=False, named
     except Exception as e:
         refused = f"{type(e).__name__}: {e}"
     finally:
-        sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, time.sleep, applier.UNATTENDED = saved
+        sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, time.sleep, applier.UNATTENDED, applier.TARGETS = saved
         os.chdir(saved_cwd)
     return d, calls, out.getvalue(), refused
 
@@ -511,7 +532,7 @@ for what, step, field in (
         ("an edit carrying a field no op reads",
          {"op": "edit", "issue": 9, "add_labels": ["needs-ruling"], "frobnicate": 1}, "frobnicate")):
     for mode in (False, True):
-        d, calls, out, refused = apply([step], {"v.md": "A note.\n"}, unattended=mode)
+        d, calls, out, refused = apply([step], {"v.md": INTAKE if mode else "A note.\n"}, unattended=mode)
         check(f"{what} is refused by step, field and op, nothing applied{' (unattended)' if mode else ''}",
               refused_by_name(refused, 1, field) and f"{field!r} is not a field {step['op']} reads" in (refused or "")
               and calls == [])
@@ -593,13 +614,14 @@ def unwritable(steps, files, prepare=None, unattended=False):
     slept.clear()
     if prepare:
         prepare(d)
-    saved = (sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, applier.UNATTENDED, time.sleep)
+    saved = (sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, applier.UNATTENDED, time.sleep, applier.TARGETS)
     applier.DRY, applier.REPO, applier.UNATTENDED = False, "owner/name", unattended
+    applier.TARGETS = str(targets_file(steps)) if unattended else None
     applier.subprocess.run = lambda cmd, **k: calls.append(cmd) or Ran(
         "https://github.com/owner/name/issues/101" if "create" in cmd else "")
     time.sleep = slept.append  # a create reaches the post-apply re-read, which waits out the stamp
     sys.argv = (["apply-manifest.py", str(d), "--repo", "owner/name", "--no-forbidden-check"]
-                + (["--unattended"] if unattended else []))
+                + (["--unattended", "--targets", applier.TARGETS] if unattended else []))
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             applier.main()
@@ -610,7 +632,7 @@ def unwritable(steps, files, prepare=None, unattended=False):
         return d, calls, f"{type(e).__name__}: {e}"
     finally:
         (sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, applier.UNATTENDED,
-         time.sleep) = saved
+         time.sleep, applier.TARGETS) = saved
 
 
 def a_directory(d):
@@ -629,7 +651,7 @@ def read_only(d, name="rendered-c.md"):
 
 for mode in (False, True):
     tail = " (unattended)" if mode else ""
-    d, calls, refused = unwritable(APPLIES_FIRST, {"c.md": PLAIN}, a_directory, unattended=mode)
+    d, calls, refused = unwritable(APPLIES_FIRST, {"c.md": INTAKE if mode else PLAIN}, a_directory, unattended=mode)
     check(f"a directory at the rendered copy's path is refused by step and name, not a traceback{tail}",
           refused_by_name(refused, 2, "rendered-c.md") and d.name not in refused)
     check(f"and the step before it has not applied{tail}", calls == [])
@@ -657,7 +679,7 @@ except OSError:
 if denied:
     for mode in (False, True):
         tail = " (unattended)" if mode else ""
-        d, calls, refused = unwritable(COMMENT, {"c.md": TRIAGE}, read_only, unattended=mode)
+        d, calls, refused = unwritable(COMMENT, {"c.md": INTAKE if mode else TRIAGE}, read_only, unattended=mode)
         check(f"a read-only file at the rendered copy's path is refused the same way{tail}",
               refused_by_name(refused, 1, "rendered-c.md") and d.name not in refused and calls == [])
         check(f"and the rendered copy it would have overwritten is untouched{tail}",
@@ -684,7 +706,7 @@ if sys.platform == "win32":
     for what, bits in (("a hidden", stat.FILE_ATTRIBUTE_HIDDEN), ("a system", stat.FILE_ATTRIBUTE_SYSTEM)):
         for mode in (False, True):
             tail = " (unattended)" if mode else ""
-            d, calls, refused = unwritable(APPLIES_FIRST, {"c.md": PLAIN}, attributed(bits), unattended=mode)
+            d, calls, refused = unwritable(APPLIES_FIRST, {"c.md": INTAKE if mode else PLAIN}, attributed(bits), unattended=mode)
             check(f"{what} file at the rendered copy's path, which the append-open opens, is refused "
                   f"in words{tail}",
                   refused_by_name(refused, 2, "rendered-c.md")
@@ -730,7 +752,7 @@ for what, exc, expected in (
 # Unattended, the mode's own pre-flight runs first and refuses outright: a manifest it will not
 # apply is not a manifest to report render's output paths on.
 d, calls, refused = unwritable([{"op": "create", "key": "c", "title": "A child", "body_file": "c.md"}],
-                               {"c.md": TRIAGE}, a_directory, unattended=True)
+                               {"c.md": INTAKE}, a_directory, unattended=True)
 check("unattended, the mode's own refusal still comes first",
       refused is not None and "op create is not one of" in refused
       and "rendered-c.md" not in refused and calls == [])
@@ -869,7 +891,7 @@ def refused_unreadable(refused, found):
 
 for mode in (False, True):
     d, calls, out, refused = apply(
-        [VALID], {"v.md": "A note.\n", "manifest.json": b"\xef\xbb\xbf" + json.dumps([VALID]).encode("utf-8")},
+        [VALID], {"v.md": INTAKE if mode else "A note.\n", "manifest.json": b"\xef\xbb\xbf" + json.dumps([VALID]).encode("utf-8")},
         unattended=mode)
     check(f"a manifest written with a byte-order mark applies{' (unattended)' if mode else ''}",
           refused is None and any("comment" in c for c in calls))
@@ -955,7 +977,7 @@ for name in ("rendered-x.md", "RENDERED-x.md"):
     check(f"a body_file {name} is refused by name before the run",
           refused_by_name(refused, 2, name) and calls == [])
     d, calls, out, refused = apply([{"op": "comment", "issue": 42, "body_file": name}],
-                                   {name: TRIAGE}, unattended=True)
+                                   {name: INTAKE}, unattended=True)
     check(f"unattended, a body_file {name} is refused by name before the run",
           refused_by_name(refused, 1, name) and calls == [])
 
@@ -1015,7 +1037,7 @@ for name in ("C:x.md", "a:b.md", "ab:c.md", ":b.md", "b.md:", "."):
 # only there does the same spelling reach that file.
 for name in ("a/../b.md",) + (("a\\..\\b.md",) if pathlib.PurePath(".\\x").name == "x" else ()):
     d, calls, out, refused = apply([{"op": "comment", "issue": 42, "body_file": name}],
-                                   {"b.md": TRIAGE}, unattended=True)
+                                   {"b.md": INTAKE}, unattended=True)
     check(f"unattended, a body_file {name} is refused by name before the run",
           refused_by_name(refused, 1, name) and BARE in (refused or "") and calls == [])
 
@@ -1036,7 +1058,7 @@ for name in ("b .md", "a.b.md", ".hidden.md"):
 # refusal is the bare name on both, with no gh call.
 for name in ("b.md ", "b.md."):
     d, calls, out, refused = apply([{"op": "comment", "issue": 42, "body_file": name}],
-                                   {"b.md": TRIAGE, name: TRIAGE}, unattended=True)
+                                   {"b.md": INTAKE, name: INTAKE}, unattended=True)
     check(f"unattended, a body_file {name!r} is refused by name before the run",
           refused_by_name(refused, 1, name) and BARE in (refused or "") and calls == [])
 # Every refusal this mode reaches with a body_file name quotes it, so the trailing character shows
@@ -1196,7 +1218,7 @@ d, calls, out, refused = apply([{"op": "edit", "issue": 42, "add_labels": ["agen
                                 {"op": "comment", "issue": "²", "body_file": "t.md"}], {"t.md": TRIAGE})
 check("an issue '²' beside an edits-first violation leaves the order refusal named, not a ValueError",
       refused is not None and refused.startswith("manifest order") and calls == [])
-d, calls, out, refused = apply([{"op": "comment", "issue": "²", "body_file": "t.md"}], {"t.md": TRIAGE}, unattended=True)
+d, calls, out, refused = apply([{"op": "comment", "issue": "²", "body_file": "t.md"}], {"t.md": INTAKE}, unattended=True)
 check("unattended, an issue '²' is refused by name, not admitted to crash mid-run",
       refused is not None and "unattended mode refuses" in refused and calls == [])
 
@@ -2080,7 +2102,7 @@ check("an Agent-Ready addition reads the labels first, is re-checked past a late
 # see the manifest's own files, below.)
 # Everything that would otherwise raise mid-run, with earlier steps already posted, is refused up
 # front too -- "before any step runs" has to hold for the whole mode, not just for the label rules.
-GRADED = {"t.md": TRIAGE, "b.md": BEFORE, "p.md": TRIAGE + "See #{{child}} for the split.\n",
+GRADED = {"t.md": INTAKE, "b.md": BEFORE, "p.md": INTAKE + "See #{{child}} for the split.\n",
           "u16.md": UTF16}
 for what, steps, cause in (
     ("a create step", [{"op": "create", "key": "c", "title": "child", "body_file": "b.md"}], "op create"),
@@ -2159,7 +2181,7 @@ repo = Repo(LOOP, {58: ["needs-triage"]})
 d, calls, out, refused = apply(
     [{"op": "comment", "issue": 58, "body_file": "t.md"},
      {"op": "edit", "issue": 58, "add_labels": ["Needs-Ruling"], "remove_labels": ["Needs-Triage"]}],
-    {"t.md": TRIAGE}, unattended=True, repo=repo)
+    {"t.md": INTAKE}, unattended=True, repo=repo)
 check("unattended: a permitted label spelled Needs-Ruling is permitted, as gh matches it",
       refused is None and repo.issues[58] == ["needs-ruling"])
 
@@ -2167,13 +2189,136 @@ d, calls, out, refused = apply([{"op": "edit", "issue": 42, "add_labels": ["Agen
 check("and a forbidden one spelled Agent-Ready is still refused",
       refused is not None and "Agent-Ready" in refused and calls == [])
 
+# --- where an unattended step goes, and what its comment claims to be -----------------
+# The job token posts under the bot, which the ledgers and the gates trust, so a manifest a
+# planted issue body steered can neither post on an issue the run did not target nor open its
+# comment with another component's marker (**Triage** is the shape gate's provenance,
+# **Checkpoint finding** stops a checkpoint as delivered). The targets file is the intake's own:
+# the grading session's Edit grant does not name it and the weekly pass hash-checks it, so it
+# bounds the manifest from outside.
+ON = lambda n, body="t.md": [{"op": "comment", "issue": n, "body_file": body}]
+
+d, calls, out, refused = apply(ON(42), GRADED, unattended=True, targets=[42, 43])
+check("unattended: a comment on a target, opening with the intake's marker, is applied",
+      refused is None and any(c[1:3] == ["issue", "comment"] for c in calls))
+d, calls, out, refused = apply(ON("42"), GRADED, unattended=True, targets=[42, 43])
+check("unattended: and so is one naming that target as a string", refused is None and calls != [])
+
+for what, steps in (
+    ("a comment on an issue the run did not target", ON(44)),
+    ("an edit on an issue the run did not target",
+     [{"op": "edit", "issue": 44, "add_labels": ["needs-triage"]}]),
+    ("one non-target step among targeted ones", ON(42) + ON(44)),
+    ("a target's number as a string of another issue", ON("420")),
+):
+    d, calls, out, refused = apply(steps, GRADED, unattended=True, targets=[42, 43])
+    check(f"unattended: {what} is refused, nothing applied",
+          refused is not None and "unattended mode refuses" in refused and "not one of the targets" in refused
+          and calls == [])
+d, calls, out, refused = apply(ON(42) + ON(44), GRADED, unattended=True, targets=[42, 43])
+check("and the refusal names the step that went off the list, not the one on it",
+      "step 2" in (refused or "") and "step 1 " not in (refused or ""))
+
+# A targets file the applier cannot use refuses the whole manifest, whatever it names.
+for what, text, cause in (
+    ("no --targets at all", False, "needs --targets"),
+    ("a targets file that is not JSON", "not json", "cannot be read as JSON"),
+    ("a targets file that is not an object", "[42]", "no targets array"),
+    ("a targets file with no targets array", '{"newSince": "2026-10-01"}', "no targets array"),
+    ("a targets file whose targets is not a list", '{"targets": {"number": 42}}', "no targets array"),
+):
+    d, calls, out, refused = apply(ON(42), GRADED, unattended=True, targets=text)
+    check(f"unattended: {what} is refused, nothing applied",
+          refused is not None and "unattended mode refuses" in refused and cause in refused and calls == [])
+applier_targets = applier.TARGETS
+applier.TARGETS = str(PARENT_TMP / "no-such-targets.json")
+numbers, why = applier.target_numbers()
+check("unattended: a targets file that is not there names nobody and says it cannot be read",
+      numbers is None and "cannot be read as JSON" in (why or ""))
+applier.TARGETS = applier_targets
+
+d, calls, out, refused = apply(ON(42), GRADED, unattended=True, targets="\ufeff" + '{"targets": [{"number": 42}]}')
+check("unattended: a targets file written with a byte-order mark (Windows PowerShell 5.1) is read",
+      refused is None and calls != [])
+
+# Rows that name no issue count for nothing: a target needs a number that is an integer.
+for what, rows in (("an empty targets list", "[]"),
+                   ("a row with its number as a string", '[{"number": "42"}]'),
+                   ("a row with no number", '[{"title": "t"}]'),
+                   ("a row that is not an object", "[42]"),
+                   ("a row whose number is true", '[{"number": true}]')):
+    d, calls, out, refused = apply(ON(42), GRADED, unattended=True, targets='{"targets": ' + rows + "}")
+    check(f"unattended: {what} names no target, so a step on 42 is refused",
+          refused is not None and "not one of the targets" in refused and calls == [])
+# true == 1 in Python: a boolean row must not make issue 1 a target.
+d, calls, out, refused = apply(ON(1), GRADED, unattended=True, targets='{"targets": [{"number": true}]}')
+check("unattended: a row whose number is true does not make issue 1 a target",
+      refused is not None and "not one of the targets" in refused and calls == [])
+
+# --targets is the unattended intake's file: outside --unattended it is refused, by check_args.
+for argv in (["some-dir", "--targets", "f.json"], ["some-dir", "--repo", "owner/name", "--targets", "f.json", "--dry-run"]):
+    try:
+        applier.check_args(argv)
+        refused = None
+    except SystemExit as e:
+        refused = str(e)
+    check(f"--targets without --unattended is refused: {' '.join(argv[1:3])}",
+          refused is not None and "not --unattended" in refused and "usage:" in refused)
+check("and with --unattended it is accepted",
+      applier.check_args(["some-dir", "--unattended", "--targets", "f.json"]) == "some-dir")
+for argv in (["some-dir", "--unattended", "--targets"], ["some-dir", "--unattended", "--targets", "--dry-run"]):
+    try:
+        applier.check_args(argv)
+        refused = None
+    except SystemExit as e:
+        refused = str(e)
+    check(f"--targets with no file is refused: {argv[2:]}", refused is not None and "--targets needs a file" in refused)
+check("the usage line names --targets", "--targets <file>" in applier.USAGE)
+
+# The comment opens with the intake's marker, as posted: any other first line is refused,
+# **Triage** and **Checkpoint finding** among them, and so is a near miss of the marker.
+OTHER_MARKERS = (
+    ("a comment opening with **Triage**", TRIAGE),
+    ("a comment opening with **Checkpoint finding**", "**Checkpoint finding**\n\nThe analysis.\n"),
+    ("a comment opening with the blocked check's marker", "**Blocked check** (automated):\n\nFired.\n"),
+    ("a comment with no marker", PLAIN),
+    ("a marker without (automated)", "**Intake triage**\n\nNEEDS-RULING.\n"),
+    ("a marker in another case", "**intake triage** (automated)\n\nNEEDS-RULING.\n"),
+    ("a marker with text after it on its line", "**Intake triage** (automated) and more\n\nNEEDS-RULING.\n"),
+    ("a marker on the second line", "Note.\n**Intake triage** (automated)\n\nNEEDS-RULING.\n"),
+    ("a marker after a blank line", "\n**Intake triage** (automated)\n\nNEEDS-RULING.\n"),
+    ("a marker behind U+001C",
+     "\x1c**Intake triage** (automated)\n\nNEEDS-RULING.\n"),
+    ("a marker behind U+001F", "\x1f**Intake triage** (automated)\n\nNEEDS-RULING.\n"),
+    ("an empty comment", ""),
+)
+for what, text in OTHER_MARKERS:
+    d, calls, out, refused = apply(ON(42), {"t.md": text}, unattended=True, targets=[42])
+    check(f"unattended: {what} is refused, naming the step and the marker, nothing applied",
+          refused is not None and "step 1" in refused and "an unattended comment opens with the line" in refused
+          and "**Intake triage** (automated)" in refused and calls == [])
+    d, calls, out, refused = apply(ON(42), {"t.md": text})
+    check(f"without the flag {what} is not this mode's business",
+          "unattended mode refuses" not in (refused or ""))
+
+# The rule reads the text the step posts, not the bytes on disk, and the marker line alone is
+# the mark: a byte-order mark before it, a CRLF after it and trailing blanks on it are the
+# marker still. The comment posted is the intake's, character for character.
+for what, text in (("a byte-order mark before the marker", "﻿" + INTAKE),
+                   ("a CRLF line ending after the marker", INTAKE.replace("\n", "\r\n")),
+                   ("trailing blanks on the marker line", INTAKE.replace("(automated)", "(automated)  ", 1)),
+                   ("the marker alone in the file", "**Intake triage** (automated)")):
+    d, calls, out, refused = apply(ON(42), {"t.md": text}, unattended=True, targets=[42])
+    check(f"unattended: {what} is the marker still, and applies",
+          refused is None and any(c[1:3] == ["issue", "comment"] for c in calls))
+
 # --- the post-apply correction, unattended -----------------------------------------
 # Ruled: unattended it may clear only the intake's own two labels. It still clears the late stamp it
 # exists for, but the manifest steers it by choosing the issue and the state that survives, so a
 # promotion or a human-ready beside that state is reported and left to the label-invariants gate.
 SWAP = ([{"op": "comment", "issue": 55, "body_file": "t.md"},
          {"op": "edit", "issue": 55, "add_labels": ["needs-ruling"], "remove_labels": ["needs-triage"]}],
-        {"t.md": TRIAGE})
+        {"t.md": INTAKE})
 
 repo = Repo(LOOP, {55: ["agent-ready", "trivial", "needs-triage"]})
 d, calls, out, refused = apply(*SWAP, unattended=True, repo=repo)
@@ -2190,7 +2335,7 @@ repo = Repo(LOOP, {77: ["human-ready"]})
 d, calls, out, refused = apply(
     [{"op": "comment", "issue": 77, "body_file": "t.md"},
      {"op": "edit", "issue": 77, "add_labels": ["needs-triage"]}],
-    {"t.md": TRIAGE}, unattended=True, repo=repo)
+    {"t.md": INTAKE}, unattended=True, repo=repo)
 check("unattended: stamping needs-triage on an issue carrying human-ready strips nothing",
       refused is None and repo.issues[77] == ["human-ready", "needs-triage"]
       and not any("--remove-label" in c for c in calls))
@@ -2199,7 +2344,7 @@ repo = Repo(LOOP, {66: []}, stamp=66)
 d, calls, out, refused = apply(
     [{"op": "comment", "issue": 66, "body_file": "t.md"},
      {"op": "edit", "issue": 66, "add_labels": ["needs-ruling"]}],
-    {"t.md": TRIAGE}, unattended=True, repo=repo)
+    {"t.md": INTAKE}, unattended=True, repo=repo)
 check("unattended: the needs-triage an automation stamps after the edit's read is still removed, "
       "which is what the re-check exists for",
       refused is None and repo.issues[66] == ["needs-ruling"]
@@ -2336,8 +2481,9 @@ if looped:
 
     for mode in (False, True):
         calls.clear()
-        saved_loop = (sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, applier.UNATTENDED)
+        saved_loop = (sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, applier.UNATTENDED, applier.TARGETS)
         applier.DRY, applier.REPO, applier.UNATTENDED = False, "owner/name", mode
+        applier.TARGETS = str(targets_file([{"issue": 9}])) if mode else None
         applier.subprocess.run = record
         sys.argv = ["apply-manifest.py", str(loop), "--repo", "owner/name", "--no-forbidden-check"]
         try:
@@ -2349,7 +2495,7 @@ if looped:
         except Exception as e:
             refused = f"{type(e).__name__}: {e}"
         finally:
-            sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, applier.UNATTENDED = saved_loop
+            sys.argv, applier.DRY, applier.REPO, applier.subprocess.run, applier.UNATTENDED, applier.TARGETS = saved_loop
         check("a symlink loop among the body files is refused by step, name and strerror"
               f"{' (unattended)' if mode else ''}, not a traceback",
               refused_by_name(refused, 1, "loop.md") and "symbolic links" in (refused or "")
@@ -2515,12 +2661,12 @@ check(f"a RuntimeError resolving the manifest directory itself is refused as a l
 # --- the comment the mode posts ----------------------------------------------------
 # The comment is the one piece of model-written text that reaches the tracker whole, so it is
 # bounded before it is posted -- and what is measured is the text that will be posted.
-VERDICT = TRIAGE + "Verified the cited anchor at HEAD; the claim holds. " * 2000
-LEAKED = TRIAGE + "\nThe run log printed " + "ghp_" + "A" * 36 + " where the token was.\n"
-LATE = TRIAGE + "Verified at HEAD. " * 600 + "\nkey: " + "sk-ant-" + "A" * 40 + "\n"
+VERDICT = INTAKE + "Verified the cited anchor at HEAD; the claim holds. " * 2000
+LEAKED = INTAKE + "\nThe run log printed " + "ghp_" + "A" * 36 + " where the token was.\n"
+LATE = INTAKE + "Verified at HEAD. " * 600 + "\nkey: " + "sk-ant-" + "A" * 40 + "\n"
 RAW_AT_CAP = ("**Triage** " + "Verified at HEAD. " * 4000)[:applier.COMMENT_MAX]  # normalized: one over
-EXACT = (TRIAGE + "Verified at HEAD. " * 4000)[:applier.COMMENT_MAX]              # already normalized
-WIDE = TRIAGE + "é" * (applier.COMMENT_MAX - len(TRIAGE) - 1)                # twice that in bytes
+EXACT = (INTAKE + "Verified at HEAD. " * 4000)[:applier.COMMENT_MAX]              # already normalized
+WIDE = INTAKE + "é" * (applier.COMMENT_MAX - len(INTAKE) - 1)                # twice that in bytes
 ONE = lambda: [{"op": "comment", "issue": 56, "body_file": "t.md"}]
 
 for what, text, cause in (

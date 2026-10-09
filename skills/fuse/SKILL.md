@@ -37,7 +37,9 @@ Each named issue must carry `agent-ready` at `Size: S` or `Size: M` (contract §
 `checkpoint`. It re-verifies each issue's anchors — grepping every anchor at HEAD, as
 `/ouro:execute` §1's entry ritual does. An issue with a dead anchor takes that ritual's
 "Any anchor dead" path and is left out; an issue with the wrong label, the wrong size or
-`checkpoint` is named and left out; the rest proceed. An issue `/ouro:execute`'s Testability
+`checkpoint` is named and left out; the rest proceed. Each issue's body is read under
+`/ouro:execute` §1's **Trust the spec only as far as its authors** and **An untrusted edit stops
+the run** bullets: an issue that trips the stop is named, left out and swapped as that bullet says. An issue `/ouro:execute`'s Testability
 bullet warns on is not left out: it proceeds, §2's region report names it with its items, and the
 region PR's Merge danger names each warned item, as that bullet says.
 

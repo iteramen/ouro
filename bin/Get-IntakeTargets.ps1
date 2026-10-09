@@ -24,6 +24,9 @@
                      shape gate's whole-line reading of ITS marker, which is a different string.
                      An issue quoting the marker in its body or mid-comment is still a target,
                      and so is a human comment opening with its words but not `(automated)`.
+                     Only a comment by the job token's bot or a login in
+                     [owner].ruling_approvers counts (Get-TrustedMarkerBodies): a stranger's
+                     marker leaves the issue a target.
 
     Every read fails loud, and in three separate ways, because a quiet week is a legitimate
     outcome here: anything that merely LOOKS like one is passed on without a word. A native
@@ -59,7 +62,7 @@
     nothing. Pass it in-process instead -- `& <dir>/Get-IntakeTargets.ps1 -NewSince <date>
     -RollingIssueTitles 'A','B'` -- or with `pwsh -NoProfile -Command` around the same call.
 .PARAMETER IssuesJson
-    JSON array [{number,title,body,labels:[{name}],comments:[{body}]}] to select from (for
+    JSON array [{number,title,body,labels:[{name}],comments:[{author:{login},body}]}] to select from (for
     tests). Default: gh issue list.
 .PARAMETER RulingsJson
     JSON array of the open `needs-ruling` issues (for tests). Default: gh issue list.
@@ -87,6 +90,9 @@ $ErrorActionPreference = 'Stop'
 $States = @('agent-ready', 'human-ready', 'needs-ruling', 'blocked', 'needs-triage', 'idea',
     'umbrella', 'architecture')
 $Marker = '**Intake triage** (automated)'
+
+# The trust filter is the drift ledger's: a marker counts only from the job token's bot or a ruling approver.
+. (Join-Path $PSScriptRoot 'Get-RollingIssue.ps1')
 
 # A native failure does not throw under 'Stop'. Only stdout is data: under 2>&1 stderr arrives as
 # ErrorRecords, and a gh that exits 0 may still write there (an upgrade notice). gh, git and
@@ -133,8 +139,8 @@ function ConvertFrom-IssueListJson {
 }
 
 # A previous pass's verdict comment. The marker is matched as a PREFIX of the comment's first
-# line, trimmed: the intake writes `**Intake triage** (automated)` and the line may carry more
-# after it, so a whole-line compare would match none of them. That is deliberately NOT the shape
+# line, trimmed: the applier now posts only the bare marker line, but a verdict posted before that
+# release carries more after it, so a whole-line compare would match none of those. That is deliberately NOT the shape
 # gate's reading of ITS marker -- Test-AgentReadyShape.ps1 compares the whole trimmed first line
 # with `-ceq '**Triage**'` -- and the two markers are different strings by design (contract
 # section 4). Case-sensitive like that gate: a hand-written variant is not machine provenance.
@@ -145,14 +151,12 @@ function ConvertFrom-IssueListJson {
 # silently. Erring the other way merely re-grades an issue, which is visible in a second comment.
 function Test-IntakeMarker {
     param($Comments)
-    foreach ($c in @($Comments)) {
-        if (-not $c.body) { continue }
-        # First line only. .Trim() takes the trailing CR of a CRLF body with it, so the line needs
-        # no separate normalising, and it is what lets a marker indented by a space still count.
-        $first = (("$($c.body)") -split "`n")[0].Trim()
-        if ($first.StartsWith($Marker, [System.StringComparison]::Ordinal)) { return $true }
-    }
-    return $false
+    # Only a comment that opens like the marker reaches the trust filter, which reads the binding.
+    $candidates = @(@($Comments) | Where-Object {
+            $_ -and $_.body -and ((("$($_.body)") -split "`n")[0].Trim()).StartsWith($Marker, [System.StringComparison]::Ordinal) })
+    # Only the bot's and the approvers' comments count: anyone who can comment could otherwise hide
+    # a new issue from every pass by writing the marker on it.
+    return (@(Get-TrustedMarkerBodies $candidates).Count -gt 0)
 }
 
 $parsedSince = [datetime]::MinValue

@@ -382,6 +382,35 @@ function Get-IntakeStepFindings([string]$Text) {
     elseif ($applyCode -notmatch '--unattended(\s|$)') {
         $findings.Add('the applying step does not pass --unattended, so the manifest is applied unbounded')
     }
+    # The applier bounds where a step may post by the intake's own targets file, the one the
+    # grading step was handed, outside its Edit grant and hash-checked below; it refuses an
+    # unattended run without it.
+    $gradeTargets = [regex]::Match($gradeCode, '--targets\s+(\S+)').Groups[1].Value
+    $applyTargets = [regex]::Match($applyCode, '--targets\s+(\S+)').Groups[1].Value
+    if (-not $applyTargets) {
+        $findings.Add('the applying step passes no --targets, so the applier refuses every unattended manifest')
+    }
+    elseif ($applyTargets -ne $gradeTargets) {
+        $findings.Add("the applying step bounds the manifest by '$applyTargets', not the '$gradeTargets' the grading step was handed")
+    }
+    # The grant is a property of one CLI version and the tree check does not see the gitignored
+    # TestResults, so the selecting step records the file's hash and the applying step compares it
+    # before the applier runs.
+    $selecting = @($blocks | Where-Object { $_ -match 'Get-IntakeTargets\.ps1' })
+    if ($selecting.Count -ne 1 -or (Remove-Comments $selecting[0]) -notmatch 'INTAKE_TARGETS_SHA256=[^\r\n]*Get-FileHash[^\r\n]*intake-targets\.json(?![\w.])[^\r\n]*GITHUB_ENV') {
+        $findings.Add('the selecting step does not write the targets file''s SHA-256 to GITHUB_ENV as INTAKE_TARGETS_SHA256')
+    }
+    $applyAt = $applyCode.IndexOf('apply-manifest.py')
+    $compare = [regex]::Match($applyCode, 'if\s*\(\s*\$(\w+)\s+-cne\s+\$env:INTAKE_TARGETS_SHA256\s*\)\s*\{\s*throw')
+    if ($applyCode -notmatch 'INTAKE_TARGETS_SHA256' -or $applyCode -notmatch 'Get-FileHash[^\r\n]*intake-targets\.json(?![\w.])') {
+        $findings.Add('the applying step never compares the targets file''s SHA-256 with the recorded one, so a rewrite of the file is not seen')
+    }
+    elseif (-not $compare.Success -or $compare.Index -gt $applyAt -or $applyCode.Substring(0, $compare.Index) -notmatch ('\$' + $compare.Groups[1].Value + '\s*=[^\r\n]*Get-FileHash[^\r\n]*intake-targets\.json(?![\w.])')) {
+        $findings.Add('the applying step compares the targets file''s SHA-256 after it calls the applier, or without a throw on a mismatch')
+    }
+    elseif ($applyCode -match '\$env:INTAKE_TARGETS_SHA256\s*=') {
+        $findings.Add('the applying step assigns INTAKE_TARGETS_SHA256, so the recorded hash it compares is its own')
+    }
     # The week's targets are selected against the binding's slug, and the applier refuses a
     # manifest naming an issue it does not create with no --repo, so a step that drops it grades
     # a week and applies none of it.
@@ -1030,6 +1059,36 @@ $mutants = @(
     @{ what = 'the flag spelled as --unattended=true, which the applier refuses'
         from = '--unattended'; to = '--unattended=true'
         expect = 'spells --unattended with a value' }
+    @{ what = 'the applier called without --targets, which bounds where a step may post'
+        from = ' --no-forbidden-check --targets TestResults\intake-targets.json'; to = ' --no-forbidden-check'
+        expect = 'passes no --targets' }
+    @{ what = 'the applier bounded by another file than the one the grading step was handed'
+        from = '--no-forbidden-check --targets TestResults\intake-targets.json'; to = '--no-forbidden-check --targets TestResults\other-targets.json'
+        expect = 'not the ''TestResults\intake-targets.json'' the grading step was handed' }
+    @{ what = 'the selecting step not recording the targets file''s hash'
+        from = '          "INTAKE_TARGETS_SHA256=$((Get-FileHash TestResults\intake-targets.json -Algorithm SHA256).Hash)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'; to = '          $null = 1'
+        expect = 'does not write the targets file''s SHA-256 to GITHUB_ENV' }
+    @{ what = 'the applying step not hashing the targets file it is about to be bounded by'
+        from = '$targetsHash = (Get-FileHash TestResults\intake-targets.json -Algorithm SHA256).Hash'; to = '$targetsHash = $env:INTAKE_TARGETS_SHA256'
+        expect = 'never compares the targets file''s SHA-256' }
+    @{ what = 'the applying step hashing a sibling file of the targets file'
+        from = '$targetsHash = (Get-FileHash TestResults\intake-targets.json -Algorithm'; to = '$targetsHash = (Get-FileHash TestResults\intake-targets.json.orig -Algorithm'
+        expect = 'never compares the targets file''s SHA-256' }
+    @{ what = 'the hash mismatch not stopping the applying step'
+        from = '{ throw "TestResults\intake-targets.json changed after'; to = '{ Write-Host "TestResults\intake-targets.json changed after'
+        expect = 'or without a throw on a mismatch' }
+    @{ what = 'the hash compare made unreachable, its throw text still naming the variable'
+        from = 'if ($targetsHash -cne $env:INTAKE_TARGETS_SHA256) { throw'; to = 'if ($false) { throw'
+        expect = 'or without a throw on a mismatch' }
+    @{ what = 'the recorded hash overwritten with the fresh one before the compare'
+        from = 'if ($targetsHash -cne $env:INTAKE_TARGETS_SHA256) { throw'; to = '$env:INTAKE_TARGETS_SHA256 = $targetsHash; if ($targetsHash -cne $env:INTAKE_TARGETS_SHA256) { throw'
+        expect = 'assigns INTAKE_TARGETS_SHA256' }
+    @{ what = 'the hash compared only after the applier ran'
+        edits = @(
+            @{ from = 'if ($targetsHash -cne $env:INTAKE_TARGETS_SHA256) { throw "TestResults\intake-targets.json changed'; to = 'if ($false) { throw "TestResults\intake-targets.json changed' }
+            @{ from = "recorded '`$env:INTAKE_TARGETS_SHA256'"; to = "recorded ''" }
+            @{ from = 'if ($LASTEXITCODE -ne 0) { throw "applying the intake manifest failed'; to = 'if ($targetsHash -cne $env:INTAKE_TARGETS_SHA256) { throw "late" }; if ($LASTEXITCODE -ne 0) { throw "applying the intake manifest failed' })
+        expect = 'after it calls the applier' }
     @{ what = 'the applier called without --repo, which names the repository the week was graded against'
         from = '--unattended --repo $slug'; to = '--unattended'
         expect = 'passes no --repo' }

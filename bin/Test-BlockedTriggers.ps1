@@ -27,7 +27,8 @@
     With -Comment the gate posts one comment per finding on the blocked issue itself. The
     comment's first line is the finding's fingerprint: the literal marker
     `**Blocked check** (automated):` followed by the kind and, for a fired trigger, its
-    references in ascending order. Among the issue's own comments, the newest one whose first
+    references in ascending order. Among the issue's own comments by the job token's bot or a
+    login in [owner].ruling_approvers (Get-TrustedMarkerBodies), the newest one whose first
     line starts with that marker is the last thing said; when it equals, character for
     character, the line this run would post, the run stays silent on that issue. A marker
     found anywhere but a comment's first line does not count. The gate changes no label and
@@ -36,7 +37,7 @@
     The issues are those of the repository the binding's [repo].slug names, or else of the one
     origin names (Get-RepoSlug.ps1). With neither, the gate reports that and reads nothing.
 .PARAMETER IssuesJson
-    JSON array [{number,title,body,comments:[{body}]}] of blocked issues to check (for tests).
+    JSON array [{number,title,body,comments:[{author:{login},body}]}] of blocked issues to check (for tests).
     Default: gh issue list --label blocked.
 .PARAMETER ReferenceStatesJson
     JSON object {"<number>":"open"|"closed", ...} of referenced issues' states (for tests, used
@@ -56,6 +57,8 @@ $ErrorActionPreference = 'Stop'
 
 # The repository every gh call below names, shared with the gates that read the same backlog.
 . (Join-Path $PSScriptRoot 'Get-RepoSlug.ps1')
+# The trust filter is the drift ledger's: a marker counts only from the job token's bot or a ruling approver.
+. (Join-Path $PSScriptRoot 'Get-RollingIssue.ps1')
 
 # gh writes UTF-8. PowerShell decodes a native command's stdout with [Console]::OutputEncoding,
 # which on a Windows runner is the OEM code page, so without this every non-ASCII character in
@@ -148,12 +151,13 @@ foreach ($f in $findings) {
 
     $fingerprint = if ($f.Kind -eq 'fired') { "$CommentMarker fired $refText" } else { "$CommentMarker no trigger line" }
 
-    # Already said: the newest comment whose first line starts with the marker.
+    # Already said: the newest comment whose first line starts with the marker, by the bot or a
+    # ruling approver. A stranger's comment cannot pre-empt the notice.
+    $candidates = @(@($f.Issue.comments) | Where-Object {
+            $_ -and $_.body -and ((((("$($_.body)") -replace "`r`n", "`n") -split "`n")[0]).Trim()).StartsWith($CommentMarker, [System.StringComparison]::Ordinal) })
     $newest = $null
-    foreach ($c in @($f.Issue.comments)) {
-        if (-not $c.body) { continue }
-        $cFirst = ((("$($c.body)") -replace "`r`n", "`n") -split "`n")[0].Trim()
-        if ($cFirst.StartsWith($CommentMarker, [System.StringComparison]::Ordinal)) { $newest = $cFirst }
+    foreach ($b in @(Get-TrustedMarkerBodies $candidates)) {
+        $newest = ((("$b") -replace "`r`n", "`n") -split "`n")[0].Trim()
     }
     if ($newest -ceq $fingerprint) {
         Write-Host "  #$($f.Issue.number): already said, staying silent" -ForegroundColor DarkGray

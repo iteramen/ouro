@@ -15,6 +15,55 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v0.4.0] - 2026-10-09
+
+- `bin/apply-manifest.py`, `templates/weekly-pass.yml`, `skills/intake/SKILL.md`,
+  `docs/contract.md`: the unattended applier posts only the intake's own verdict, and only on the
+  run's targets. Under `--unattended` it requires `--targets <file>`, the JSON the intake's
+  selector wrote, and refuses a step whose issue is not the `number` of one of that file's
+  `targets` rows (a file it cannot read, or one with no `targets` array, refuses too); it refuses
+  a comment whose first line, as posted, is not `**Intake triage** (automated)`, so a manifest
+  steered by a planted issue body cannot post under the job token's bot on an issue outside the
+  run's targets file or open with `**Triage**`, `**Checkpoint finding**` or the blocked check's
+  marker; and it refuses `--targets` outside `--unattended`. The marker line is compared with only
+  spaces, tabs and CRs trimmed, characters the selector's trim also drops, so a comment the applier admits is one the selector counts. The "Compute intake targets" step records
+  the targets file's SHA-256 in `INTAKE_TARGETS_SHA256`, and the apply step throws before the
+  applier runs when the file's hash differs. The weekly-pass suite checks that the apply step
+  passes the file the grading step was handed and compares the hash. **Consumer contract:** the old form is the apply step
+  `python3 ouro/bin/apply-manifest.py TestResults\intake-manifest --unattended --repo $slug
+  --no-forbidden-check`, which the applier now refuses; the new form is that line with `--targets
+  TestResults\intake-targets.json` added; the migration is to add `--targets
+  TestResults\intake-targets.json` to the copied apply step, and to copy the template's hash
+  line in "Compute intake targets" and the hash comparison before the applier runs.
+
+- `skills/execute/SKILL.md`, `skills/fuse/SKILL.md`, `bin/Test-AgentReadyShape.ps1`,
+  `docs/contract.md`, `docs/binding.md`: the spec
+  `/ouro:execute` builds is the body as the newest trusted `**Triage**` comment left it, and only a
+  trusted author (the job token's bot or a login in `[owner].ruling_approvers`) amends it by
+  comment. The entry ritual reads the issue's comments with their authors and the body's edit
+  history, and stops with `**Stop:** open decision`, swapping the issue to `needs-ruling`, when an
+  untrusted editor changed the body after that comment. The shape gate counts a `**Triage**`
+  comment as provenance only from a trusted author, through `Get-TrustedComments`; a repo with no
+  `.claude/ouro.toml`, or a vendored copy without `ouro-binding.py`, skips the author check with
+  an INFO line and counts any author's comment as before. The gate takes a new optional
+  `-Approvers` parameter (for tests) and dot-sources `Get-RollingIssue.ps1`, which a vendored copy
+  carries beside it. `/ouro:fuse` reads each issue under the same two rules and leaves out one that
+  trips the stop. A shape finding for a `**Triage**` comment by an author who does not count names
+  that author. Migration: list every login that runs `/ouro:triage` in `[owner].ruling_approvers`;
+  a `**Triage**` comment by anyone else no longer counts, so the sweep comments on that promotion,
+  `-Demote` demotes it and execute stops.
+
+- `bin/Get-IntakeTargets.ps1`, `bin/Test-BlockedTriggers.ps1`, `bin/Get-RollingIssue.ps1`,
+  `docs/contract.md`, `skills/intake/SKILL.md`: the intake's selector and the blocked check count a
+  marker comment only when its author is the job token's bot or a login in
+  `[owner].ruling_approvers`, so a stranger can no longer hide a new issue from the unattended
+  intake or pre-empt the notice that a blocked issue's trigger has fired. Both read the comments'
+  authors through the new `Get-TrustedMarkerBodies`, which uses `Get-TrustedComments`; a repo with
+  no `.claude/ouro.toml` trusts only the bot there and prints an INFO line, and a binding that is
+  there and cannot be read fails the gate. A vendored copy with no `ouro-binding.py` beside the
+  library does the same bot-only read with its own INFO line. A vendored copy needs
+  `Get-RollingIssue.ps1` beside the selector and the blocked gate, so a consumer re-vendors.
+
 ## [v0.3.0] - 2026-10-08
 
 - `templates/weekly-pass.yml`, `skills/drift/SKILL.md`, `agents/verifier.md`, `docs/contract.md`,

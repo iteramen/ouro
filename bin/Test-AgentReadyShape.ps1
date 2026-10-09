@@ -16,8 +16,13 @@
       doc-impact -- a `Doc impact on close:` body line; the `### Doc impact on close`
                     heading the issue form renders counts too.
       provenance -- a comment whose first line is exactly **Triage** (the interactive triage
-                    skill's marker); a hand-promotion that skipped the skill has none, and
-                    the unattended intake's marker is different by design.
+                    skill's marker) by the job token's bot or a login in
+                    [owner].ruling_approvers (Get-TrustedComments); a hand-promotion that
+                    skipped the skill has none, a stranger's comment does not count, and the
+                    unattended intake's marker is different by design. A repo with no
+                    .claude/ouro.toml, or a vendored copy without ouro-binding.py beside it, has
+                    no approvers to read: the author check is skipped with an INFO line and any
+                    author's **Triage** comment counts.
       labels     -- at least one area label and exactly one type label, sets read from the binding's
                     [labels] via ouro-binding.py; an empty or undeclared set skips its check
                     (a binding that declares no type set gets no type finding, for instance), and a
@@ -45,8 +50,12 @@
 .PARAMETER Demote
     With -Issue only: swap agent-ready -> needs-triage and comment the findings.
 .PARAMETER IssuesJson
-    JSON array [{number,title,body,labels:[{name}],comments:[{body}]}] to check (for
+    JSON array [{number,title,body,labels:[{name}],comments:[{author:{login},body}]}] to check (for
     tests). Default: gh issue list / gh issue view.
+.PARAMETER Approvers
+    The trusted comment authors besides the job token's bot (for tests). Default:
+    [owner].ruling_approvers from the binding. Passing it applies the author check even where
+    the binding is absent.
 .PARAMETER AreaLabels
     Area label set (for tests). Default: `ouro-binding.py get labels.area`.
 .PARAMETER TypeLabels
@@ -61,7 +70,8 @@ param(
     [switch]$Demote,
     [string]$IssuesJson = '',
     [string[]]$AreaLabels,
-    [string[]]$TypeLabels
+    [string[]]$TypeLabels,
+    [string[]]$Approvers
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,6 +90,8 @@ $RepoRoot = $RepoRoot.Trim()
 . (Join-Path $PSScriptRoot 'Get-AnchorFindings.ps1')
 # The repository every gh call below names, shared with the gates that read the same backlog.
 . (Join-Path $PSScriptRoot 'Get-RepoSlug.ps1')
+# The trusted-author filter is shared with the gates that read markers: one copy of the trusted set.
+. (Join-Path $PSScriptRoot 'Get-RollingIssue.ps1')
 
 # Label sets come from the binding unless a test injected them. A missing key means the
 # repo declared no such set (skip, like an empty set); any other failure throws -- a broken
@@ -109,6 +121,18 @@ function Get-BindingLabelSet {
 
 Push-Location -LiteralPath $RepoRoot
 try {
+    # Whose **Triage** comment counts needs the binding's approvers: with none to read (no binding,
+    # or no tool beside this script) the author check is skipped, like the label checks.
+    $authorCheck = $true
+    if (-not $PSBoundParameters.ContainsKey('Approvers')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'ouro-binding.py'))) {
+            $authorCheck = $false
+            Write-Host 'INFO - no ouro-binding.py beside this script: the provenance author check is skipped, any author''s **Triage** comment counts'
+        } elseif (-not (Test-Path -LiteralPath (Join-Path $RepoRoot '.claude/ouro.toml') -PathType Leaf)) {
+            $authorCheck = $false
+            Write-Host 'INFO - no .claude/ouro.toml: the provenance author check is skipped, any author''s **Triage** comment counts'
+        }
+    }
     if (-not $PSBoundParameters.ContainsKey('AreaLabels')) { $AreaLabels = Get-BindingLabelSet 'labels.area' }
     if (-not $PSBoundParameters.ContainsKey('TypeLabels')) { $TypeLabels = Get-BindingLabelSet 'labels.type' }
 
@@ -186,11 +210,32 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "gh issue view $($i.number) failed (exit $LASTEXITCODE)" }
             $comments = ($raw | ConvertFrom-Json).comments
         }
-        $hasTriageMark = @($comments) | Where-Object {
-            $_.body -and (($_.body -replace "`r`n", "`n") -split "`n")[0].Trim() -ceq '**Triage**'
+        # Only the bot's or an approver's comment is provenance. Where no approvers can be read the
+        # author check is skipped, as the label checks are, and says so once.
+        $candidates = @($comments | Where-Object { $_ })
+        if ($authorCheck -and $candidates.Count -gt 0) {
+            $json = '{"comments":' + (ConvertTo-Json -InputObject $candidates -Depth 10 -Compress) + '}'
+            $keep = @{}
+            if ($PSBoundParameters.ContainsKey('Approvers')) { $keep.Approvers = $Approvers }
+            $trusted = @((Get-TrustedComments -CommentsJson $json @keep).Bodies)
+        } else {
+            $trusted = @($candidates | ForEach-Object { $_.body })
+        }
+        $hasTriageMark = $trusted | Where-Object {
+            $_ -and (($_ -replace "`r`n", "`n") -split "`n")[0].Trim() -ceq '**Triage**'
         }
         if (-not $hasTriageMark) {
-            $findings += 'provenance: no comment starting with the literal line **Triage** - the promotion skipped interactive triage'
+            $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $untrusted = @($candidates | Where-Object {
+                $_.body -and (($_.body -replace "`r`n", "`n") -split "`n")[0].Trim() -ceq '**Triage**'
+            } | ForEach-Object { if ($_.author.login) { $_.author.login } else { '(no author)' } } |
+                Where-Object { $seen.Add($_) })
+            $findings += if ($untrusted.Count -gt 0) {
+                $who = if ($untrusted.Count -eq 1) { "one by $($untrusted[0]) does" } else { "those by $($untrusted -join ', ') do" }
+                "provenance: no **Triage** comment by the job token's bot or a ruling approver ($who not count)"
+            } else {
+                'provenance: no comment starting with the literal line **Triage** - the promotion skipped interactive triage'
+            }
         }
 
         # Area labels select gates, so a change spanning areas carries each; a type is one classification.

@@ -8,7 +8,9 @@ on:
   # The list mirrors the copy plan in bin/Vendor-Ouro.ps1 (its .DESCRIPTION block), plus this
   # file and .gitattributes, which decides the bytes every checked-out file has: a change to what
   # that script copies changes this list
-  # in the same PR. Both triggers carry the same list.
+  # in the same PR. The pull_request and master triggers carry the same list. A pushed `v*` tag runs
+  # whatever paths its commit touches (GitHub does not evaluate `paths` for a tag), so a release
+  # that changes none of the listed paths still gets a run.
   pull_request:
     paths:
       - '.github/workflows/no-binding.yml'
@@ -30,6 +32,7 @@ on:
       - 'templates/documentation-rule.md'
   push:
     branches: [master]
+    tags: ['v*']
     paths:
       - '.github/workflows/no-binding.yml'
       - '.gitattributes'
@@ -53,10 +56,12 @@ permissions:
   contents: read
 
 # A newer push to a pull request replaces its earlier run, so the earlier one is cancelled instead
-# of holding a runner the whole pool shares. A push to master is grouped by its own commit, so it
-# never cancels another: every landed commit keeps its run.
+# of holding a runner the whole pool shares. A push to master or of a tag is grouped by its commit
+# and its ref, so it never cancels another: every landed commit keeps its run, and the tag run of
+# a release commit and the master run of the same commit, which the export pushes together, both
+# finish.
 concurrency:
-  group: no-binding-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: no-binding-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.sha, github.ref) }}
   cancel-in-progress: true
 
 jobs:

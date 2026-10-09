@@ -273,3 +273,35 @@ function Get-TrustedComments {
         Dropped = $total - $raw.Count
     }
 }
+
+<#
+.SYNOPSIS
+    The bodies of the comments a marker reader may trust. Dot-source, then call
+    Get-TrustedMarkerBodies -Comments <the comment objects `gh --json comments` printed>.
+.DESCRIPTION
+    A gate that acts on a marker comment (the intake's, the blocked check's) counts it only when
+    Get-TrustedComments keeps it: the job token's bot or a [owner].ruling_approvers login. Where
+    the working directory's repo has no .claude/ouro.toml there are no approvers to read, so only
+    the bot counts and an INFO line says so, and so it does where ouro-binding.py is not beside
+    this script (a vendored copy); a binding that is there and cannot be read throws.
+.PARAMETER Comments
+    Comment objects carrying author.login and body, as `gh --json comments` prints them.
+#>
+function Get-TrustedMarkerBodies {
+    param($Comments)
+    $list = @($Comments | Where-Object { $_ })
+    if ($list.Count -eq 0) { return @() }
+    $json = '{"comments":' + (ConvertTo-Json -InputObject $list -Depth 10 -Compress) + '}'
+    $keep = @{}
+    $top = (git rev-parse --show-toplevel 2>$null)
+    $why = if (-not $top -or -not (Test-Path -LiteralPath (Join-Path "$top".Trim() '.claude/ouro.toml') -PathType Leaf)) { 'no .claude/ouro.toml' }
+           elseif (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'ouro-binding.py'))) { 'no ouro-binding.py beside this script' }
+    if ($why) {
+        $keep.Approvers = @()
+        if (-not $script:botOnlyShown) {
+            Write-Host "INFO - ${why}: a marker comment counts only from the job token's bot"
+            $script:botOnlyShown = $true
+        }
+    }
+    return @((Get-TrustedComments -CommentsJson $json @keep).Bodies)
+}

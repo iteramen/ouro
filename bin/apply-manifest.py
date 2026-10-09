@@ -6,7 +6,7 @@ binding (repo.slug) or --repo, and --repo is required of a manifest naming an is
 create -- see check_repo. A manifest referencing only the issues it creates still takes the
 binding's.
 
-usage: python3 apply-manifest.py <manifest-dir> [--repo owner/name] [--dry-run] [--unattended] [--no-forbidden-check]
+usage: python3 apply-manifest.py <manifest-dir> [--repo owner/name] [--dry-run] [--unattended --targets <file>] [--no-forbidden-check]
 --repo is required when a step's issue, child or parent is an issue the manifest does not create.
 Before any step runs, dry runs included, every body file a step posts (placeholders {{key}}
 unfilled, as the check runs before rendering) and every create title is piped, one call each, to
@@ -68,7 +68,10 @@ needs-triage and needs-ruling among an edit's additions and removals, an edit ca
 ISSUE_DIGITS of them, written as a string or as a JSON integer -- or that resolves below 1, a
 comment step with no body file or one that is not a string or cannot be read (this mode opens the
 file before check_fields types it), and a comment body carrying a placeholder, over COMMENT_MAX
-characters or carrying a secret-shaped string -- see check_unattended. In that mode an edit also
+characters or carrying a secret-shaped string -- see check_unattended. It requires --targets
+<file>, the JSON object Get-IntakeTargets.ps1 wrote (its `targets` rows each carry a `number`), and
+refuses a step whose issue is not one of those numbers, and a comment whose posted first line is not
+`**Intake triage** (automated)`; --targets outside --unattended is refused. In that mode an edit also
 sends exactly the removals it declares: an allowlist over declared labels bounds nothing while the
 applier synthesizes removals on top of them. The one-state invariant is then not this script's job
 in that mode, and the label-invariants gate reports a second state label every week.
@@ -116,7 +119,8 @@ HELPER_TIMEOUT = 30  # seconds, per matcher call and per binding read
 MATCH_RUN = subprocess.run  # bound at import: a caller that replaces subprocess.run to stand in for gh leaves the matcher and check_off's binding read real
 REPO = None  # --repo, resolved at the bottom, before main() runs
 UNATTENDED = False  # --unattended, resolved at the bottom
-USAGE = ("usage: python3 apply-manifest.py <manifest-dir> [--repo owner/name] [--dry-run] [--unattended] [--no-forbidden-check]\n"
+TARGETS = None  # --targets <file>, resolved at the bottom: the intake's own targets file
+USAGE = ("usage: python3 apply-manifest.py <manifest-dir> [--repo owner/name] [--dry-run] [--unattended --targets <file>] [--no-forbidden-check]\n"
          "--repo is required when a step's issue, child or parent is an issue the manifest does not create.")
 # --repo's value: an owner and a name, one slash, no whitespace, and never the next flag.
 # check_repo tests for the token, so a blank value satisfies it and reaches gh as `-R ''`, which
@@ -132,6 +136,7 @@ STATES = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage
           "umbrella", "architecture")
 MODIFIERS = ("trivial", "checkpoint")  # ride only on agent-ready
 MARKER = "**Triage**"
+INTAKE_MARKER = "**Intake triage** (automated)"  # the one first line an unattended comment may open with
 # ponytail: a fixed wait, not a poll for the stamp. Ceiling: an intake job queued longer than
 # this stamps after the re-read, and only the label-invariant sweep sees that.
 INTAKE_WAIT = 20  # seconds from the last `create` to the post-apply state re-read
@@ -210,12 +215,18 @@ def check_args(argv):
             v = rest.pop(0) if rest else ""
             if not REPO_SLUG.fullmatch(v):
                 raise SystemExit(f"--repo needs an owner/name value, got {v!r}\n" + USAGE)
+        elif a == "--targets":
+            v = rest.pop(0) if rest else ""
+            if not v or v.startswith("-"):
+                raise SystemExit(f"--targets needs a file, got {v!r}\n" + USAGE)
         elif a in ("--dry-run", "--unattended", "--no-forbidden-check"):
             continue
         elif a.startswith("-"):
             raise SystemExit(f"unknown argument {a}, nothing applied.\n" + USAGE)
         else:
             dirs.append(a)
+    if "--targets" in argv and "--unattended" not in argv:
+        raise SystemExit("--targets is the unattended intake's file, and this run is not --unattended, nothing applied.\n" + USAGE)
     if len(dirs) != 1:
         raise SystemExit(f"expected one manifest directory, got {len(dirs)}: {', '.join(dirs) or 'none'}\n" + USAGE)
     return dirs[0]
@@ -303,6 +314,25 @@ def check_repo(steps):
             "was drafted for.")
 
 
+def target_numbers():
+    """The issue numbers the intake's targets file names, or the reason it cannot be used.
+
+    The file is the JSON object Get-IntakeTargets.ps1 writes: a `targets` array whose rows each
+    carry a `number`. The grading session's Edit names only the manifest directory, and the
+    weekly pass compares the file's SHA-256 before it calls this applier, so the file is what
+    bounds where an unattended step may go. A row without an integer number names no issue."""
+    if not TARGETS:
+        return None, "--unattended needs --targets <file>: the intake's own targets file bounds where a step may post"
+    try:
+        doc = json.loads(pathlib.Path(TARGETS).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, RecursionError) as e:
+        return None, f"the targets file cannot be read as JSON: {e.strerror if isinstance(e, OSError) else e}"
+    rows = doc.get("targets") if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        return None, "the targets file has no targets array"
+    return {r["number"] for r in rows if isinstance(r, dict) and type(r.get("number")) is int}, None
+
+
 def check_unattended(d, steps):
     """Refuse, before any step runs, a manifest --unattended must not be able to apply.
 
@@ -311,7 +341,10 @@ def check_unattended(d, steps):
     any label but needs-triage and needs-ruling among an edit's additions and removals, and so is an
     edit carrying a body file -- the intake never rewrites a body. The comment body is bounded too,
     being the one piece of model-written text that reaches the tracker whole: over COMMENT_MAX
-    characters, or carrying a secret-shaped string, it is refused rather than posted. The cap and
+    characters, or carrying a secret-shaped string, it is refused rather than posted. A step must
+    name an issue the --targets file lists, and a comment must open with INTAKE_MARKER, the only
+    marker the intake writes: neither is left to the model-written manifest, which a planted issue
+    body may steer. The cap and
     the scan read the text the comment step will post -- normalize_triage rewrites the marker line,
     and that rewrite is what lands -- not the bytes on disk.
     Refused here too is everything that would otherwise raise mid-run, with earlier steps already
@@ -329,6 +362,9 @@ def check_unattended(d, steps):
     """
     if not UNATTENDED:
         return
+    numbers, why = target_numbers()
+    if why:
+        raise SystemExit("unattended mode refuses this manifest, nothing applied:\n  " + why)
     bad = []
     for i, s in enumerate(steps, 1):
         op = s.get("op")
@@ -346,6 +382,8 @@ def check_unattended(d, steps):
             bad.append(f"{at}: issue {issue!r} resolves to {int(issue)}, and no issue is numbered below 1")
         elif len(str(issue)) > ISSUE_DIGITS:  # an int: is_issue_number bounds a string's own digits
             bad.append(not_a_number)
+        elif int(issue) not in numbers:  # where a step goes: only an issue this run was handed
+            bad.append(f"{at}: issue {issue!r} is not one of the targets this run was handed")
         for f in ("add_labels", "remove_labels"):  # the allowlist reads each label, casefolded
             if not label_list(s.get(f, [])):
                 bad.append(f"{at}: {f} {s[f]!r} is not a list of strings")
@@ -373,6 +411,9 @@ def check_unattended(d, steps):
                            f"{e.strerror if isinstance(e, OSError) else e}")
                 continue
             posted = normalize_triage(text)  # what the step posts, not what the file holds
+            first = posted.removeprefix("\ufeff").split("\n")[0].strip(" \t\r")
+            if first != INTAKE_MARKER:
+                bad.append(f"{at}: the comment body '{name}' opens with {first[:60]!r}, and an unattended comment opens with the line {INTAKE_MARKER}")
             if placeholders(posted):
                 bad.append(f"{at}: the comment body '{name}' carries a placeholder, which only a create step resolves")
             if len(posted) > COMMENT_MAX:
@@ -1170,5 +1211,6 @@ if __name__ == "__main__":
     check_args(sys.argv[1:])  # before the binding read, so a mistyped flag is what the run reports
     DRY = "--dry-run" in sys.argv
     UNATTENDED = "--unattended" in sys.argv
+    TARGETS = sys.argv[sys.argv.index("--targets") + 1] if "--targets" in sys.argv else None
     REPO = resolve_repo()
     main()

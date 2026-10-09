@@ -45,13 +45,29 @@ function Assert-Throws($Block, $Match, $What) {
 }
 
 $Rolling = @('Docs drift audit', 'Loop runs')
+# The marker counts from the bot or a ruling approver; the binding read is stood in for here.
+$PSDefaultParameterValues['Get-TrustedComments:Approvers'] = @('Approver1')
 # The rulings queue is its own read: three open needs-ruling issues, unrelated to the window.
 $RulingsJson = '[{"number":301},{"number":302},{"number":303}]'
 
+# Run executes in a repo that has a binding: without one only the bot counts and the approver rows
+# cannot hold, which is what a vendored copy run from a repo with no binding would otherwise get.
+$bound = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('intake-bound-' + [guid]::NewGuid().ToString('N')))
+Push-Location -LiteralPath $bound.FullName
+try {
+    git init -q .
+    New-Item -ItemType Directory -Path '.claude' | Out-Null
+    Set-Content -LiteralPath '.claude/ouro.toml' -Value "[owner]`nruling_approvers = [`"Approver1`"]"
+}
+finally { Pop-Location }
 function Run {
     param([string]$Json, [hashtable]$Extra = @{})
-    (& $Script -NewSince '2026-09-09' -IssuesJson $Json -RulingsJson $RulingsJson `
-        -RollingIssueTitles $Rolling @Extra | Out-String | ConvertFrom-Json)
+    Push-Location -LiteralPath $bound.FullName
+    try {
+        (& $Script -NewSince '2026-09-09' -IssuesJson $Json -RulingsJson $RulingsJson `
+            -RollingIssueTitles $Rolling @Extra | Out-String | ConvertFrom-Json)
+    }
+    finally { Pop-Location }
 }
 # The numbers the selection kept, and the reason it recorded for one it dropped.
 function Kept($Result) { @($Result.targets | ForEach-Object { $_.number }) -join ',' }
@@ -67,7 +83,7 @@ $fixture = @'
   {"number":2,"title":"arrived with no state label","body":"body two","labels":[{"name":"bug"}],"comments":[]},
   {"number":3,"title":"Docs drift audit","body":"the ledger","labels":[{"name":"needs-triage"}],"comments":[]},
   {"number":4,"title":"waiting on an event","body":"body four","labels":[{"name":"blocked"}],"comments":[]},
-  {"number":5,"title":"graded last week","body":"body five","labels":[{"name":"needs-triage"}],"comments":[{"body":"**Intake triage** (automated)\r\n\r\nNEEDS-RULING - a question."}]}
+  {"number":5,"title":"graded last week","body":"body five","labels":[{"name":"needs-triage"}],"comments":[{"author":{"login":"github-actions"},"body":"**Intake triage** (automated)\r\n\r\nNEEDS-RULING - a question."}]}
 ]
 '@
 $got = Run $fixture
@@ -120,16 +136,97 @@ Assert-Equal 'state label: Blocked' (Reason $labelCase 30) 'the excluded label i
 $nearMarker = Run '[{"number":15,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"body":"as discussed:\n**Intake triage** (automated)\nlooks right"}]},{"number":16,"title":"t","body":"quoting **Intake triage** (automated) in the body","labels":[{"name":"needs-triage"}],"comments":[]},{"number":17,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"body":"**intake triage** (automated)\n\nlower case"}]},{"number":19,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"body":"**Intake triage** got this wrong, please re-run\n\n- the owner"}]}]'
 Assert-Equal '15,16,17,19' (Kept $nearMarker) 'a marker quoted mid-comment or in a body, one in lower case, and a human comment merely opening with its words, are not the marker'
 
-$lf = Run '[{"number":18,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"body":"**Intake triage** (automated)\n\nPROMOTE."}]}]'
+$lf = Run '[{"number":18,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"author":{"login":"github-actions"},"body":"**Intake triage** (automated)\n\nPROMOTE."}]}]'
 Assert-Equal '' (Kept $lf) 'the marker is read whether the comment arrives with LF or CRLF line breaks'
 
 # The realistic shape: the verdict is rarely the first comment. An author's note, or triage's own
 # **Triage** marker, usually precedes it.
-$second = Run '[{"number":32,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"body":"**Triage**\n\nPROMOTE - verified."},{"body":"**Intake triage** (automated)\n\nNEEDS-RULING."}]}]'
+$second = Run '[{"number":32,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"body":"**Triage**\n\nPROMOTE - verified."},{"author":{"login":"github-actions"},"body":"**Intake triage** (automated)\n\nNEEDS-RULING."}]}]'
 Assert-Equal '' (Kept $second) 'a marker in the second comment is found: every comment is read, not just the first'
 
-$indented = Run '[{"number":33,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"body":"  **Intake triage** (automated)\n\nindented by a space"}]}]'
+$indented = Run '[{"number":33,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"author":{"login":"github-actions"},"body":"  **Intake triage** (automated)\n\nindented by a space"}]}]'
 Assert-Equal '' (Kept $indented) 'a marker line indented by whitespace is still the marker'
+
+# --- the marker counts only from the bot or a ruling approver ---------------------------------
+# The control rows above (5, 18, 32, 33) are the bot's. Every row here carries the marker whole
+# and differs from them in its author alone.
+$mk = '"body":"**Intake triage** (automated)\n\nNEEDS-RULING."'
+$byAuthor = Run ('[' + ((@(
+    @{ n = 40; a = '"author":{"login":"stranger"},' },
+    @{ n = 41; a = '"author":{"login":"Approver1"},' },
+    @{ n = 42; a = '"author":{"login":"approver1"},' },
+    @{ n = 43; a = '"author":{"login":"xgithub-actions"},' },
+    @{ n = 44; a = '"author":{"login":"github-actions-x"},' },
+    @{ n = 45; a = '"author":null,' },
+    @{ n = 46; a = '' },
+    @{ n = 47; a = '"author":{"login":"GitHub-Actions"},' }) | ForEach-Object {
+        '{"number":' + $_.n + ',"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{' + $_.a + $mk + '}]}' }) -join ',') + ']')
+Assert-Equal '40,43,44,45,46' (Kept $byAuthor) 'a stranger, a login merely holding the bot''s name, a null author and a missing one do not make the marker count; an approver in either case and the bot in another case do'
+Assert-Equal 'intake marker' (Reason $byAuthor 41) 'an approver''s marker excludes, and is named as one'
+
+# A stranger's marker beside the bot's own: the bot's still counts.
+$both = Run ('[{"number":48,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"author":{"login":"stranger"},' + $mk + '},{"author":{"login":"github-actions"},' + $mk + '}]}]')
+Assert-Equal '' (Kept $both) 'a stranger''s marker does not hide the bot''s'
+
+# Without a binding there are no approvers to read: the bot alone counts, and the run says so.
+$bare = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('intake-nobinding-' + [guid]::NewGuid().ToString('N')))
+Push-Location -LiteralPath $bare.FullName
+try {
+    git init -q .
+    $bareIssues = '[' + (@(
+        ('{"number":50,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"author":{"login":"Approver1"},' + $mk + '}]}'),
+        ('{"number":51,"title":"t","body":"b","labels":[{"name":"needs-triage"}],"comments":[{"author":{"login":"github-actions"},' + $mk + '}]}')) -join ',') + ']'
+    $bareOut = & $Script -NewSince '2026-09-09' -RollingIssueTitles @() -RulingsJson $RulingsJson -IssuesJson $bareIssues 6>&1 | Out-String
+}
+finally { Pop-Location }
+Remove-Item -LiteralPath $bare.FullName -Recurse -Force
+$bareJson = $bareOut.Substring($bareOut.IndexOf('{')) | ConvertFrom-Json
+Assert-Equal $true ($bareOut -match 'INFO - no \.claude/ouro\.toml') 'a repo with no binding says only the bot counts'
+Assert-Equal '50' (Kept $bareJson) 'with no binding an approver''s marker does not count and the bot''s does'
+
+# A binding the repo has, read by a vendored copy with no ouro-binding.py beside it: the bot alone
+# counts there too, and the run says so, rather than dying on python's "can't open file".
+$repoDir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('intake-vendored-' + [guid]::NewGuid().ToString('N')))
+$vdir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('intake-notool-' + [guid]::NewGuid().ToString('N')))
+try {
+    foreach ($dep in 'Get-IntakeTargets.ps1', 'Get-RepoSlug.ps1', 'Get-RollingIssue.ps1') {
+        Copy-Item -LiteralPath (Join-Path (Split-Path $Script -Parent) $dep) -Destination $vdir.FullName
+    }
+    Push-Location -LiteralPath $repoDir.FullName
+    try {
+        git init -q .
+        New-Item -ItemType Directory -Path '.claude' | Out-Null
+        Set-Content -LiteralPath '.claude/ouro.toml' -Value '[owner]'
+        $noToolOut = & (Join-Path $vdir.FullName 'Get-IntakeTargets.ps1') -NewSince '2026-09-09' -RollingIssueTitles @() -RulingsJson $RulingsJson -IssuesJson $bareIssues 6>&1 | Out-String
+    }
+    finally { Pop-Location }
+}
+finally {
+    Remove-Item -LiteralPath $repoDir.FullName -Recurse -Force
+    Remove-Item -LiteralPath $vdir.FullName -Recurse -Force
+}
+$noToolJson = $noToolOut.Substring($noToolOut.IndexOf('{')) | ConvertFrom-Json
+Assert-Equal $true ($noToolOut -match 'INFO - no ouro-binding\.py beside this script') 'a vendored copy with no binding tool says only the bot counts'
+Assert-Equal '50' (Kept $noToolJson) 'with no binding tool an approver''s marker does not count and the bot''s does'
+
+# A binding that is there and cannot be read fails the gate: the default approvers stand-in is
+# dropped so the real read runs.
+$badDir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('intake-badtoml-' + [guid]::NewGuid().ToString('N')))
+$standIn = $PSDefaultParameterValues['Get-TrustedComments:Approvers']
+$PSDefaultParameterValues.Remove('Get-TrustedComments:Approvers')
+Push-Location -LiteralPath $badDir.FullName
+try {
+    git init -q .
+    New-Item -ItemType Directory -Path '.claude' | Out-Null
+    Set-Content -LiteralPath '.claude/ouro.toml' -Value 'this is = = not toml'
+    Assert-Throws { & $Script -NewSince '2026-09-09' -RollingIssueTitles @() -RulingsJson $RulingsJson -IssuesJson $bareIssues 6>&1 | Out-Null } `
+        'ouro-binding\.py get owner\.ruling_approvers failed' 'a binding that cannot be read fails the gate instead of trusting the bot alone'
+}
+finally {
+    Pop-Location
+    $PSDefaultParameterValues['Get-TrustedComments:Approvers'] = $standIn
+    Remove-Item -LiteralPath $badDir.FullName -Recurse -Force
+}
 
 $empty = Run '[]'
 Assert-Equal 0 @($empty.targets).Count 'an empty window selects nothing and does not throw'
@@ -230,6 +327,7 @@ Assert-Equal 1 @($ghCalls | Where-Object { $_ -match 'issue list --label needs-r
     'the rulings queue is counted by a read of its own, so the session needs no second query'
 Remove-Item Function:\gh
 
+Remove-Item -LiteralPath $bound.FullName -Recurse -Force
 if ($failures -gt 0) { Write-Host "`n$failures assertion(s) failed" -ForegroundColor Red; exit 1 }
 Write-Host "`nall intake-target cases pass" -ForegroundColor Green
 exit 0

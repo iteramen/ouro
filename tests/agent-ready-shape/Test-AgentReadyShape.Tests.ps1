@@ -30,13 +30,13 @@ function Assert-NoMatch($Pattern, $Output, $What) {
 }
 # Write-Host writes to the information stream (6), not stdout -- 2>&1 captures nothing here.
 function Run { param($json, [hashtable]$Extra = @{})
-    (& $Script -IssuesJson $json -AreaLabels @('app', 'sdk') -TypeLabels @('bug', 'feature') @Extra 6>&1 | Out-String)
+    (& $Script -IssuesJson $json -AreaLabels @('app', 'sdk') -TypeLabels @('bug', 'feature') -Approvers @('appr') @Extra 6>&1 | Out-String)
 }
 
 # A body that satisfies every check: one backticked repo path, a Size line, a doc-impact
 # line. The JSON lives here as single-quoted here-strings; \n inside is JSON's own escape.
 $cleanBody = 'See `bin/Test-AgentReadyShape.ps1` for the gate.\n\nSize: M\n\nDoc impact on close: none'
-$triage    = '{"body":"**Triage**\n\nPROMOTE - verified."}'
+$triage    = '{"author":{"login":"appr"},"body":"**Triage**\n\nPROMOTE - verified."}'
 
 # --- clean: every check satisfied -----------------------------------------------------------
 $clean = Run ('[{"number":1,"title":"a","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[' + $triage + ']}]')
@@ -48,7 +48,8 @@ $bare = Run '[{"number":2,"title":"bare","body":"just prose, promoted by hand","
 Assert-Match 'anchor: no parseable anchor'          $bare 'missing anchor is a finding'
 Assert-Match 'size: no `Size:` line'                $bare 'missing Size line is a finding'
 Assert-Match 'doc-impact: no `Doc impact on close:' $bare 'missing doc-impact line is a finding'
-Assert-Match 'provenance: no comment starting'      $bare 'missing **Triage** comment is a finding'
+Assert-Match 'provenance: no comment starting with the literal line \*\*Triage\*\*' $bare 'missing **Triage** comment is a finding, worded for none at all'
+Assert-NoMatch 'does not count' $bare 'no **Triage** comment at all names no author (control for the untrusted-author finding)'
 Assert-Match 'labels: 0 area label\(s\)'            $bare 'no area label is a finding'
 Assert-Match 'labels: 0 type label\(s\)'            $bare 'no type label is a finding'
 
@@ -121,15 +122,15 @@ $nbsp = Run-Body '\n\nSize:\u00a0M\n\nDoc impact on close: none'
 Assert-Match   '#24: OK' $nbsp 'a no-break space between the colon and the value is checked as before'
 
 # --- the intake marker is not the triage marker ---------------------------------------------
-$intake = Run ('[{"number":4,"title":"d","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"body":"**Intake triage** (automated)\n\ngraded once, unattended."}]}]')
+$intake = Run ('[{"number":4,"title":"d","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"author":{"login":"appr"},"body":"**Intake triage** (automated)\n\ngraded once, unattended."}]}]')
 Assert-Match 'provenance: no comment starting' $intake 'the unattended intake marker does not satisfy provenance'
 
 # --- **Triage** must open the comment, not appear mid-body ----------------------------------
-$midway = Run ('[{"number":5,"title":"e","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"body":"as discussed:\n**Triage**\nlooks fine"}]}]')
+$midway = Run ('[{"number":5,"title":"e","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"author":{"login":"appr"},"body":"as discussed:\n**Triage**\nlooks fine"}]}]')
 Assert-Match 'provenance: no comment starting' $midway 'a mid-comment **Triage** line does not satisfy provenance'
 
 # --- empty or undeclared label sets skip their check ----------------------------------------
-$skip = (& $Script -IssuesJson ('[{"number":6,"title":"f","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"}],"comments":[' + $triage + ']}]') -AreaLabels @() -TypeLabels @() 6>&1 | Out-String)
+$skip = (& $Script -IssuesJson ('[{"number":6,"title":"f","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"}],"comments":[' + $triage + ']}]') -AreaLabels @() -TypeLabels @() -Approvers @('appr') 6>&1 | Out-String)
 Assert-NoMatch 'labels:'  $skip 'empty label sets skip the label check'
 Assert-Match   '#6: OK'   $skip 'the issue passes on the remaining checks'
 
@@ -154,7 +155,7 @@ $heading = Run ('[{"number":12,"title":"k","body":"See `bin/Test-AgentReadyShape
 Assert-Match '#12: OK' $heading 'the issue-form heading satisfies the doc-impact check'
 
 # --- the checks are case-sensitive: the gate exists to catch hand-promotions ----------------
-$lower = Run ('[{"number":13,"title":"l","body":"See `bin/Test-AgentReadyShape.ps1`.\n\nsize: m\n\nDoc impact on close: none","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"body":"**triage**\n\nlooks good"}]}]')
+$lower = Run ('[{"number":13,"title":"l","body":"See `bin/Test-AgentReadyShape.ps1`.\n\nsize: m\n\nDoc impact on close: none","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"author":{"login":"appr"},"body":"**triage**\n\nlooks good"}]}]')
 Assert-Match 'size: no `Size:` line'           $lower 'a lowercase size line is not a Size line'
 Assert-Match 'provenance: no comment starting' $lower 'a lowercase **triage** is not the marker'
 
@@ -164,6 +165,57 @@ Assert-Match 'anchor: no parseable anchor' $placeholder 'a placeholder-only body
 $absolute = Run ('[{"number":15,"title":"n","body":"See `C:/opt/gate/gate.ps1`.\n\nSize: M\n\nDoc impact on close: none","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[' + $triage + ']}]')
 Assert-Match 'anchor: no parseable anchor' $absolute 'an absolute-path-only body has no anchor'
 
+# --- only the bot's or an approver's **Triage** comment is provenance -----------------------
+function Run-Author($login) {
+    $c = if ($login) { '{"author":{"login":"' + $login + '"},"body":"**Triage**\n\nPROMOTE - verified."}' } else { '{"body":"**Triage**\n\nPROMOTE - verified."}' }
+    Run ('[{"number":30,"title":"a","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[' + $c + ']}]')
+}
+# The finding for a **Triage** comment that exists but whose author does not count names the author.
+function Untrusted-Finding($login) {
+    'provenance: no \*\*Triage\*\* comment by the job token''s bot or a ruling approver \(one by ' + [regex]::Escape($login) + ' does not count\)(?! - )'
+}
+$byStranger = Run-Author 'mallory'
+Assert-NoMatch 'literal line' $byStranger 'an untrusted **Triage** comment does not get the text for a missing one'
+Assert-Match   (Untrusted-Finding 'mallory') $byStranger 'a stranger''s **Triage** comment is not provenance'
+Assert-NoMatch 'skipped interactive triage' $byStranger 'a stranger''s **Triage** comment does not claim the promotion skipped triage'
+$byTwo = Run ('[{"number":33,"title":"a","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"author":{"login":"mallory"},"body":"**Triage**\n\nPROMOTE."},{"author":{"login":"eve"},"body":"**Triage**\n\nPROMOTE."}]}]')
+Assert-Match   'approver \(those by mallory, eve do not count\)(?! - )' $byTwo 'two strangers'' **Triage** comments are named together'
+Assert-NoMatch 'one by' $byTwo 'two untrusted authors do not get the singular wording'
+$byRepeat = Run ('[{"number":34,"title":"a","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"author":{"login":"stranger1"},"body":"**Triage**\n\nPROMOTE."},{"author":{"login":"Stranger1"},"body":"**Triage**\n\nPROMOTE."}]}]')
+Assert-Match   'approver \(one by stranger1 does not count\)(?! - )' $byRepeat 'one stranger''s two **Triage** comments are counted once, in the first spelling seen'
+Assert-Match   'provenance: no comment starting with the literal line \*\*Triage\*\* - the promotion skipped interactive triage' $bare 'no **Triage** comment at all keeps the skipped-triage text'
+$byCase = Run-Author 'APPR'
+Assert-Match   '#30: OK' $byCase 'an approver''s login compares without regard to case, as GitHub does'
+$byNear = Run-Author 'appr-bot'
+Assert-Match   (Untrusted-Finding 'appr-bot') $byNear 'a login that merely holds an approver''s name is a stranger'
+$byNone = Run-Author $null
+Assert-Match   (Untrusted-Finding '(no author)') $byNone 'a comment with no author (a deleted account) is not provenance'
+$byApprover = Run-Author 'appr'
+Assert-Match   '#30: OK' $byApprover 'an approver''s **Triage** comment is provenance (control)'
+$byBot = Run-Author 'github-actions'
+Assert-Match   '#30: OK' $byBot 'the job token''s bot''s **Triage** comment is provenance (control)'
+$mixed = Run ('[{"number":31,"title":"a","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"author":{"login":"mallory"},"body":"**Triage**\n\nPROMOTE."},' + $triage + ']}]')
+Assert-Match   '#31: OK' $mixed 'a stranger''s **Triage** beside an approver''s does not hide the approver''s'
+
+# --- without approvers to read, the author check is skipped loudly ---------------------------
+# A scratch repo with no .claude/ouro.toml, the tool beside the script: any author's **Triage** counts.
+if (Test-Path -LiteralPath (Join-Path (Split-Path $Script -Parent) 'ouro-binding.py')) {
+    $naRepo = Join-Path ([IO.Path]::GetTempPath()) ('ouro-shape-noauthor-' + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $naRepo | Out-Null
+    Push-Location -LiteralPath $naRepo
+    try {
+        git init -q . 2>$null
+        $naJson = '[{"number":32,"title":"a","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[{"author":{"login":"mallory"},"body":"**Triage**\n\nPROMOTE."}]}]'
+        $na = try { (& $Script -IssuesJson $naJson -AreaLabels @('app', 'sdk') -TypeLabels @('bug', 'feature') 6>&1 | Out-String) } catch { "threw: $_" }
+        Assert-Match   '#32: OK' $na 'no binding: a stranger''s **Triage** comment counts, as before'
+        Assert-Match   'INFO - no .*ouro\.toml: the provenance author check is skipped' $na 'no binding: the skipped author check is announced'
+        $naOn = try { (& $Script -IssuesJson $naJson -AreaLabels @('app', 'sdk') -TypeLabels @('bug', 'feature') -Approvers @('appr') 6>&1 | Out-String) } catch { "threw: $_" }
+        Assert-Match   (Untrusted-Finding 'mallory') $naOn 'no binding but -Approvers passed: the author check applies'
+        Assert-NoMatch 'author check is skipped' $naOn 'passed approvers: nothing is announced as skipped'
+    } finally { Pop-Location; Remove-Item -LiteralPath $naRepo -Recurse -Force }
+}
+else { Write-Host '  skip: ouro-binding.py not beside the script (vendored without the tool)' -ForegroundColor DarkGray }
+
 # --- a vendored copy without ouro-binding.py skips the label checks loudly ------------------
 # The fixture is a vendored directory without the binding tool: the no-tool fallback is under test.
 $vdir = Join-Path ([IO.Path]::GetTempPath()) ('ouro-shape-vendored-' + [guid]::NewGuid().ToString('n'))
@@ -171,10 +223,15 @@ New-Item -ItemType Directory -Path $vdir | Out-Null
 try {
     Copy-Item (Join-Path (Split-Path $Script -Parent) 'Get-AnchorFindings.ps1') $vdir
     Copy-Item (Join-Path (Split-Path $Script -Parent) 'Get-RepoSlug.ps1') $vdir
+    Copy-Item (Join-Path (Split-Path $Script -Parent) 'Get-RollingIssue.ps1') $vdir
     Copy-Item $Script $vdir
     $vout = (& (Join-Path $vdir 'Test-AgentReadyShape.ps1') -IssuesJson '[{"number":14,"title":"m","body":"prose","labels":[{"name":"agent-ready"}],"comments":[]}]' 6>&1 | Out-String)
     Assert-Match   'vendored without the binding tool' $vout 'the missing tool is announced, not fatal'
     Assert-NoMatch 'labels:'                           $vout 'label checks skip without the tool'
+    Assert-Match   'INFO - no ouro-binding\.py beside this script: the provenance author check is skipped' $vout 'the skipped author check is announced without the tool'
+    $vJson = '[{"number":14,"title":"m","body":"`bin/Test-AgentReadyShape.ps1`\n\nSize: M\n\nDoc impact on close: none","labels":[{"name":"agent-ready"}],"comments":[{"author":{"login":"mallory"},"body":"**Triage**\n\nPROMOTE."}]}]'
+    $vstranger = (& (Join-Path $vdir 'Test-AgentReadyShape.ps1') -IssuesJson $vJson -AreaLabels @() -TypeLabels @() 6>&1 | Out-String)
+    Assert-Match   '#14: OK' $vstranger 'without the tool: a stranger''s **Triage** comment counts, as before'
 } finally { Remove-Item -LiteralPath $vdir -Recurse -Force }
 
 # --- a repo with no binding skips the label checks loudly, without calling python -----------
@@ -216,6 +273,12 @@ ruling_approvers = ["me"]
         $bout = try { (& $Script -IssuesJson '[{"number":17,"title":"p","body":"prose","labels":[{"name":"agent-ready"}],"comments":[]}]' 6>&1 | Out-String) } catch { "threw: $_" }
         Assert-Match   'labels: 0 area label\(s\) - the binding requires at least one of: app' $bout 'a repo with a binding still reads its label sets'
         Assert-NoMatch 'not read'                                                            $bout 'the no-binding skip does not fire in a bound repo'
+        $bJson = '[{"number":17,"title":"p","body":"`bin/Test-AgentReadyShape.ps1`\n\nSize: M\n\nDoc impact on close: none","labels":[{"name":"agent-ready"},{"name":"app"}],"comments":[{"author":{"login":"LOGIN"},"body":"**Triage**\n\nPROMOTE."}]}]'
+        $bme = (& $Script -IssuesJson $bJson.Replace('LOGIN', 'me') 6>&1 | Out-String)
+        Assert-Match   '#17: OK' $bme 'a bound repo: an approver read from the binding is trusted'
+        Assert-NoMatch 'author check is skipped' $bme 'a bound repo does not skip the author check'
+        $bnot = (& $Script -IssuesJson $bJson.Replace('LOGIN', 'mallory') 6>&1 | Out-String)
+        Assert-Match   (Untrusted-Finding 'mallory') $bnot 'a bound repo: a login outside the binding''s approvers is refused'
     } finally { Pop-Location; Remove-Item -LiteralPath $brepo -Recurse -Force }
 }
 else { Write-Host '  skip: ouro-binding.py not beside the script (vendored without the tool)' -ForegroundColor DarkGray }
@@ -306,7 +369,7 @@ New-Item -ItemType Directory -Path (Join-Path $idTree 'bin'), (Join-Path $idRoot
 Push-Location -LiteralPath (Join-Path $idRoot 'repo')
 try {
     Copy-Item -LiteralPath $Script, (Join-Path (Split-Path $Script -Parent) 'Get-AnchorFindings.ps1'),
-        (Join-Path (Split-Path $Script -Parent) 'Get-RepoSlug.ps1') -Destination (Join-Path $idTree 'bin')
+        (Join-Path (Split-Path $Script -Parent) 'Get-RepoSlug.ps1'), (Join-Path (Split-Path $Script -Parent) 'Get-RollingIssue.ps1') -Destination (Join-Path $idTree 'bin')
     git init -q . 2>$null
     # -Demote writes, so the gate names its repository first; with no binding here that is the
     # repository origin names (bin/Get-RepoSlug.ps1).

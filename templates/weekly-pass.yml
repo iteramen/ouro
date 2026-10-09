@@ -542,6 +542,7 @@ jobs:
           # The counts, not the file: every target carries its body and its comments, so printing
           # it would put the week's backlog in the log twice.
           $t = Get-Content TestResults\intake-targets.json -Raw | ConvertFrom-Json
+          "INTAKE_TARGETS_SHA256=$((Get-FileHash TestResults\intake-targets.json -Algorithm SHA256).Hash)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "intake window from ${since}: $(@($t.targets).Count) target(s), $(@($t.excluded).Count) excluded, rulings queue $($t.rulingsQueue)"
 
       # The intake is two steps: a session that grades and a program that disposes. This one
@@ -599,7 +600,11 @@ jobs:
       # and in that mode it refuses the WHOLE manifest, before any step runs, over an op that is
       # not comment or edit, a label that is not needs-triage or needs-ruling, a body file on an
       # edit, a comment body over its cap or carrying a secret shape, a body file resolving
-      # outside the manifest directory, or an issue that is not a number.
+      # outside the manifest directory, an issue that is not a number or is not one of the
+      # targets the file after --targets names, or a comment whose first line is not the intake's
+      # marker. That file is the one the grading step was handed. Its Edit grant does not name it,
+      # and the step below compares its SHA-256 with the one the selecting step recorded before it
+      # applies anything, so --targets is required here.
       #
       # The tree is checked first. The grading session runs with Edit, and a write it is not
       # supposed to make would land in a file a later credentialed step executes -- this applier,
@@ -625,6 +630,8 @@ jobs:
         run: |
           $dirty = @(git status --porcelain --untracked-files=no) + @(git -C ouro status --porcelain --untracked-files=all)
           if ($dirty) { throw "a file changed or appeared while the grading session ran, so nothing is applied:`n$($dirty -join "`n")" }
+          $targetsHash = (Get-FileHash TestResults\intake-targets.json -Algorithm SHA256).Hash
+          if ($targetsHash -cne $env:INTAKE_TARGETS_SHA256) { throw "TestResults\intake-targets.json changed after the selecting step wrote it (SHA-256 $targetsHash, recorded '$env:INTAKE_TARGETS_SHA256'), so nothing is applied" }
           $raw = python3 ouro/bin/ouro-binding.py get repo.slug 2>&1
           $slug = ((@($raw) | Where-Object { $_ -is [string] }) -join "`n").Trim()
           if ($LASTEXITCODE -ne 0) {
@@ -632,7 +639,7 @@ jobs:
           }
           if (-not $slug) { throw "[repo].slug is not declared in .claude/ouro.toml - the apply has no repository to name" }
           # CI holds no private token list, so the applier's forbidden-token check cannot run here.
-          python3 ouro/bin/apply-manifest.py TestResults\intake-manifest --unattended --repo $slug --no-forbidden-check
+          python3 ouro/bin/apply-manifest.py TestResults\intake-manifest --unattended --repo $slug --no-forbidden-check --targets TestResults\intake-targets.json
           if ($LASTEXITCODE -ne 0) { throw "applying the intake manifest failed (exit $LASTEXITCODE)" }
 
       # Three numbers for the trailing week and no more: rulings answered (and the oldest open),

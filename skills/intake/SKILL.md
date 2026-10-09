@@ -86,8 +86,9 @@ carry (a label field on a comment, a title on an edit, a key, a parent or child,
 op reads; `allow_shrink` on an edit is admitted and inert, since an unattended edit carries no
 body file), a comment step with no body file or an empty one, a body file that resolves
 outside the manifest directory, a `{{word}}` placeholder in a comment body, an `issue` that is
-not a number, or a comment body over its character cap or carrying a secret-shaped string. One
-bad verdict therefore costs the week's grading, not just its own, so:
+not a number or not one of the issues the run's targets file names, a comment whose first line
+is not `**Intake triage** (automated)`, or a comment body over its character cap or carrying a
+secret-shaped string. One bad verdict therefore costs the week's grading, not just its own, so:
 
 - **Keep each verdict well inside the cap.** A real verdict runs a couple of thousand
   characters and the cap is several times that: quote the fragment that proves the claim, not
@@ -118,8 +119,8 @@ What the file holds is the open issues created since the window's date, minus:
 - the rolling issues from `[rolling_issues]`;
 - issues that already carry a **state label other than `needs-triage`** (they have been
   graded, by a person or a previous pass);
-- issues that already carry an `**Intake triage** (automated)` comment (the idempotency
-  marker — a rerun of the same week grades nothing twice).
+- issues that already carry an `**Intake triage** (automated)` comment by the job token's bot
+  or a ruling approver (the idempotency marker — a rerun of the same week grades nothing twice).
 
 Zero targets is a normal outcome — write the empty manifest, say so in the session output and
 stop.
