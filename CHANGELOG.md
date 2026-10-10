@@ -15,6 +15,25 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v0.5.1] - 2026-10-10
+
+- `bin/loop-outcomes.py`: the `**Checkpoint finding**`, `**Stop:**` and `**Triage**` markers
+  count only from the job token's bot or a `[owner].ruling_approvers` login, compared without
+  regard to case, as the gates count them; a stop or finding from any other author is ignored:
+  it names no reason and delivers no finding. The Assisted approver compare ignores case too.
+
+- `docs/contract.md`: section 7's working-discipline block gains a bullet. A session that
+  changes state other sessions share (a host service, a CI runner's configuration, the container
+  runtime, the harness's settings, hooks or rules) proves the change with the thing that uses it,
+  such as a job on that runner, not with the symptom it set out to fix.
+
+- `/ouro:execute`: a `**Checkpoint finding**` comment stops a queued checkpoint run only from a
+  trusted author, and it is measured against the newest trusted `**Triage**` comment, so a
+  stranger's comment neither stops the run nor makes a delivered finding read as stale. A
+  finding posted by a login outside the trusted set repeats the checkpoint run; the
+  `[owner].ruling_approvers` comment in `docs/binding.md` now says to list every login that
+  runs triage, execute or fuse.
+
 ## [v0.5.0] - 2026-10-10
 
 - `templates/weekly-pass.yml`: the four native command lines that took a relative path spelled

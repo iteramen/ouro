@@ -203,7 +203,8 @@ function ConvertTo-InertCommentText {
     rights can write on it. A comment counts only when its author is the job token's bot or a
     login in [owner].ruling_approvers, read with `ouro-binding.py get owner.ruling_approvers`.
     The login compare ignores case, as GitHub does; a login that merely holds the bot's or an
-    approver's name does not match. A comment with no author (a deleted account) is dropped.
+    approver's name does not match. A comment with no author, or `ghost` (a deleted account), is
+    dropped.
 
     Returns an object: Bodies (the kept comments' bodies, oldest first), Json (the kept
     comments as {"comments":[...]}, each one's own text untouched, so `createdAt` keeps its

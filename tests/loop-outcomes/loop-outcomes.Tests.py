@@ -459,14 +459,18 @@ def anchor_rows():
 
 
 def assisted_rows():
-    def assisted(comments=(), events=(), pr_comments=()):
+    def assisted(comments=(), events=(), pr_comments=(), approvers=("owner",)):
         node = promoted(101, comments=list(comments), events=list(events))
         prn = pr(100, "Fixes #101", merged=d(12), oid=fake(100), comments=list(pr_comments))
-        res, _ = analyze([node], [prn])
+        res, _ = analyze([node], [prn], approvers=approvers)
         assert first(res, 101)["outcome"] == "landed"
         return first(res, 101)["assisted"]
     check("an approver's Ruling comment in the window assists", assisted([(d(11), "owner", "**Ruling**\nGo")]))
     check("a non-approver's does not", not assisted([(d(11), "someone", "**Ruling**\nGo")]))
+    check("an approver's login in another case assists", assisted([(d(11), "OWNER", "**Ruling**\nGo")]))
+    check("an approver listed in another case than the author's login assists",
+          assisted([(d(11), "owner", "**Ruling**\nGo")], approvers=("Owner",)))
+    check("the bot's does not", not assisted([(d(11), "github-actions", "**Ruling**\nGo")]))
     check("an approver's before the promotion does not", not assisted([(d(9), "owner", "**Ruling**\nGo")]))
     check("an approver's after the landing does not", not assisted([(d(13), "owner", "**Ruling**\nGo")]))
     check("one on the landing pull request assists", assisted(pr_comments=[(d(11), "owner", "**Ruling**\nGo")]))
@@ -509,20 +513,31 @@ def refusal_rows():
     a = refusal([(d(10, 11, 30), "owner", "**Stop:** review cap\n\ntext")])
     check("a Stop: review cap comment gives the review-cap reason", (a["outcome"], a["reason"]) == ("refused", "review cap"))
     for reason in lo.STOP_REASONS:
-        check(f"the reason {reason} is read", refusal([(d(10, 11, 30), "o", f"**Stop:** {reason}\n\nx")])["reason"] == reason)
-    check("a Triage comment gives a triage reversal", refusal([(d(10, 11, 30), "o", "**Triage**\n\nx")])["reason"] == "triage reversal")
+        check(f"the reason {reason} is read", refusal([(d(10, 11, 30), "owner", f"**Stop:** {reason}\n\nx")])["reason"] == reason)
+    check("a Triage comment gives a triage reversal", refusal([(d(10, 11, 30), "owner", "**Triage**\n\nx")])["reason"] == "triage reversal")
     check("no marker is unclassified", refusal()["reason"] == "unclassified")
+    for who in ("stranger", "o", None):
+        check(f"a Stop line from {who} does not count", refusal([(d(10, 11, 30), who, "**Stop:** review cap\n\nx")])["reason"] == "unclassified")
+        check(f"a Triage comment from {who} does not count", refusal([(d(10, 11, 30), who, "**Triage**\n\nx")])["reason"] == "unclassified")
+    check("the bot's Stop line counts", refusal([(d(10, 11, 30), "github-actions", "**Stop:** review cap\n\nx")])["reason"] == "review cap")
+    check("the bot's Triage comment counts", refusal([(d(10, 11, 30), "github-actions", "**Triage**\n\nx")])["reason"] == "triage reversal")
+    check("an approver's login in another case counts", refusal([(d(10, 11, 30), "OWNER", "**Triage**\n\nx")])["reason"] == "triage reversal")
+    check("the bot's login in another case counts", refusal([(d(10, 11, 30), "GitHub-Actions", "**Stop:** review cap\n\nx")])["reason"] == "review cap")
+    check("an approver listed in mixed case matches a lower-case login", lo.trusted("owner", {"Owner"}))
+    check("a login that only holds an approver's name is not trusted", not lo.trusted("owner2", {"owner"}))
+    check("a stranger's newer Stop line does not hide the approver's",
+          refusal([(d(10, 11, 30), "owner", "**Stop:** dead anchor\n\nx"), (d(10, 11, 40), "stranger", "**Stop:** review cap\n\nx")])["reason"] == "dead anchor")
     for what, body in (("a case variant", "**Stop:** Review cap"), ("trailing text", "**Stop:** review cap."), ("an unknown reason", "**Stop:** unknown reason"),
                        ("a second space", "**Stop:**  review cap"), ("the mark on line 2", "text\n**Stop:** review cap")):
-        check(f"{what} is unclassified", refusal([(d(10, 11, 30), "o", body)])["reason"] == "unclassified")
+        check(f"{what} is unclassified", refusal([(d(10, 11, 30), "owner", body)])["reason"] == "unclassified")
     check("a Stop line and a Triage comment in the window give the stop line's reason",
-          refusal([(d(10, 11, 40), "o", "**Triage**\n\nx"), (d(10, 11, 30), "o", "**Stop:** dead anchor\n\nx")])["reason"] == "dead anchor")
+          refusal([(d(10, 11, 40), "owner", "**Triage**\n\nx"), (d(10, 11, 30), "owner", "**Stop:** dead anchor\n\nx")])["reason"] == "dead anchor")
     check("the newest Stop comment wins",
-          refusal([(d(10, 11, 0), "o", "**Stop:** review cap\n\nx"), (d(10, 11, 30), "o", "**Stop:** open decision\n\nx")])["reason"] == "open decision")
-    check("a Stop comment 60 minutes before the removal is in the window", refusal([(d(10, 11), "o", "**Stop:** review cap\n\nx")])["reason"] == "review cap")
-    check("one 61 minutes before is not", refusal([(d(10, 10, 59), "o", "**Stop:** review cap\n\nx")])["reason"] == "unclassified")
-    check("one 10 minutes after is in the window", refusal([(d(10, 12, 10), "o", "**Stop:** review cap\n\nx")])["reason"] == "review cap")
-    check("one 11 minutes after is not", refusal([(d(10, 12, 11), "o", "**Stop:** review cap\n\nx")])["reason"] == "unclassified")
+          refusal([(d(10, 11, 0), "owner", "**Stop:** review cap\n\nx"), (d(10, 11, 30), "owner", "**Stop:** open decision\n\nx")])["reason"] == "open decision")
+    check("a Stop comment 60 minutes before the removal is in the window", refusal([(d(10, 11), "owner", "**Stop:** review cap\n\nx")])["reason"] == "review cap")
+    check("one 61 minutes before is not", refusal([(d(10, 10, 59), "owner", "**Stop:** review cap\n\nx")])["reason"] == "unclassified")
+    check("one 10 minutes after is in the window", refusal([(d(10, 12, 10), "owner", "**Stop:** review cap\n\nx")])["reason"] == "review cap")
+    check("one 11 minutes after is not", refusal([(d(10, 12, 11), "owner", "**Stop:** review cap\n\nx")])["reason"] == "unclassified")
     check("needs-triage is a refusal", refusal(after=((T, "+", "needs-triage"),))["outcome"] == "refused")
     p = refusal(after=((T, "+", "blocked"),))
     check("blocked is parked, and named", (p["outcome"], p["parked"]) == ("parked", "blocked"))
@@ -538,7 +553,7 @@ def refusal_rows():
 
 
 def precision_rows():
-    stop = lambda reason: [(d(10, 11, 30), "o", f"**Stop:** {reason}\n\nx")]
+    stop = lambda reason: [(d(10, 11, 30), "owner", f"**Stop:** {reason}\n\nx")]
     swap = [(T, "-", "agent-ready"), (T, "+", "needs-ruling")]
     again = [(d(11, 10), "+", "agent-ready")]
     iss = [
@@ -588,6 +603,12 @@ def checkpoint_rows():
     check("labeled 11 minutes after is not", not first(res, 4)["checkpoint"])
     check("a finding comment on a non-checkpoint attempt delivers nothing", first(res, 5)["outcome"] == "refused")
     check("the finding mark is exact", first(res, 6)["outcome"] == "refused")
+    who = lambda n, w: first(analyze([promoted(n, events=cp + swap, comments=[(d(10, 11), w, "**Checkpoint finding**\n\nx")])], [])[0], n)["outcome"]
+    check("an approver's finding delivers (control)", who(8, "owner") == "finding")
+    check("a stranger's finding delivers nothing", who(9, "stranger") == "refused")
+    check("a finding with no author delivers nothing", who(10, None) == "refused")
+    check("the bot's finding delivers", who(11, "github-actions") == "finding")
+    check("an approver's finding in another case delivers", who(12, "OWNER") == "finding")
     both, _ = analyze([promoted(7, events=cp, comments=finding)], [pr(7, "Fixes #7", merged=d(12), oid=fake(7))])
     check("a checkpoint that landed and posted a finding is landed", first(both, 7)["outcome"] == "landed")
     text = lo.render("o/r", res, 0, lo.utc(NOW), at("2026-08-01"))

@@ -1,8 +1,9 @@
 name: No binding
 
 # This workflow runs the gates workflow's fixture suites from a vendored copy in a repo with no
-# binding -- the branch this repo's own gate list never takes, since this repo has one. It cannot be
-# a `[[gate]]` entry: no gate runs from outside this tree.
+# binding -- the branch this repo's own gate list never takes, since this repo has one.
+# The binding runs the step locally through a runner in release/ that reads it from this file by
+# name; CI runs it here.
 
 on:
   # The list mirrors the copy plan in bin/Vendor-Ouro.ps1 (its .DESCRIPTION block), plus this

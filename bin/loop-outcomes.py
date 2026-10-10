@@ -45,17 +45,20 @@ Definitions, all UTC:
    ledger sweep child) is left out of that set; a revert still reverses. The figure is an upper
    bound: a bug's anchors cite context lines around a defect as well as the defect, and each one
    that blames to a landing charges it.
- * Assisted: a comment by an author in `[owner].ruling_approvers`, on the issue or the landing
-   pull request between the promotion and the landing, whose first line starts `**Ruling**`, or
-   that precedes an `unlabeled needs-ruling` event in that window.
+ * Assisted: a comment by an author in `[owner].ruling_approvers` (login compared without regard to
+   case; not the bot), on the issue or the landing pull request between the promotion and the
+   landing, whose first line starts `**Ruling**`, or that precedes an `unlabeled needs-ruling` event in that window.
  * Refused: the `unlabeled agent-ready` ending the attempt has a `labeled needs-ruling` or
    `labeled needs-triage` within ten minutes either side. The reason is the newest comment from 60
-   minutes before to 10 minutes after the removal whose first line, trimmed, is `**Stop:** `
+   minutes before to 10 minutes after the removal, from the job token's bot `github-actions` or an
+   approver (login compared without regard to case; any other author's comment is ignored, so
+   a stop posted by one names no reason and delivers no finding), whose first line, trimmed, is `**Stop:** `
    followed by one of `review cap`, `open decision`, `dead anchor` or `gate uncovered` (the stop
    comment of skills/execute/SKILL.md section 1); else a comment whose first line is `**Triage**`
    makes it a `triage reversal`; else `unclassified`. Parked: the removal comes with any other
    state label, or none, and counts as neither a delivery nor a refusal. Finding delivered
-   (checkpoint cohort): a comment whose first line is `**Checkpoint finding**` within the attempt.
+   (checkpoint cohort): a comment from the bot or an approver, as above, whose first line is
+   `**Checkpoint finding**` within the attempt; one from any other author is not a delivery.
    Abandoned: the issue closed within the attempt with no landing and, for a checkpoint, no
    finding. An issue closed and later reopened within the attempt still reads abandoned.
    Open: none of these yet, with its queue age in days.
@@ -110,6 +113,7 @@ REVIEW_LINE = re.compile(REVIEW_PATTERN, re.MULTILINE)
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
 RUNS_JQ = "{total: .total_count, runs: .workflow_runs}"
 RUNS_CAP = 1000
+BOT = "github-actions"  # the job token's login as GraphQL spells it, without `[bot]`
 STAMP = re.compile(r"@ ([0-9a-fA-F]{7,40})(?![0-9A-Za-z])")
 
 
@@ -410,6 +414,12 @@ class Blamer:
         return shas
 
 
+def trusted(author, approvers):
+    """The job token's bot or an approver, compared without regard to case; no author, or `ghost`
+    (a deleted account), is neither."""
+    return bool(author) and author.casefold() in {BOT, *(a.casefold() for a in approvers)}
+
+
 def sweep_child(issue):
     """A cleanup-ledger sweep child: its title holds both `sweep` and `ledger line`, in any case."""
     title = issue["title"].lower()
@@ -431,7 +441,7 @@ def reversed_by(land, commits, bugs, blamer):
 def assisted_by(attempt, issue, land, approvers, comments_of_pr):
     lo, hi = attempt["start"], land[0]
     ruled = [(t, body) for t, author, body in issue["comments"] + comments_of_pr.get(land[2], [])
-             if author in approvers and lo <= t <= hi]
+             if author and author.casefold() in {a.casefold() for a in approvers} and lo <= t <= hi]
     if any(first_line(b).startswith("**Ruling**") for _, b in ruled):
         return True
     cleared = [t for t, n in issue["unlabeled"] if n == "needs-ruling" and lo <= t <= hi]
@@ -451,7 +461,7 @@ def classify(attempt, issue, lands, now, approvers, comments_of_pr, commits, bug
         attempt["land_time"] = land[0]
         attempt["outcome"] = "landed"
         return
-    if attempt["checkpoint"] and any(first_line(b) == "**Checkpoint finding**" for c, _, b in issue["comments"] if t <= c <= limit):
+    if attempt["checkpoint"] and any(first_line(b) == "**Checkpoint finding**" for c, who, b in issue["comments"] if t <= c <= limit and trusted(who, approvers)):
         attempt["outcome"] = "finding"
         return
     end = attempt["end"]
@@ -459,7 +469,7 @@ def classify(attempt, issue, lands, now, approvers, comments_of_pr, commits, bug
         near = {n for when, n in issue["labeled"] if abs(when - end) <= timedelta(minutes=10)}
         if near & {"needs-ruling", "needs-triage"}:
             attempt["outcome"] = "refused"
-            attempt["reason"] = stop_reason(issue, end)
+            attempt["reason"] = stop_reason(issue, end, approvers)
             nxt = attempt["next"]
             attempt["resolved"] = bool(nxt) or any(c >= end for c in issue["closed"])
             attempt["unnecessary"] = bool(nxt) and body_at(issue, end).strip() == body_at(issue, nxt).strip()
@@ -474,8 +484,9 @@ def classify(attempt, issue, lands, now, approvers, comments_of_pr, commits, bug
     attempt["age"] = (now - t).days
 
 
-def stop_reason(issue, end):
-    window = [(c, b) for c, _, b in issue["comments"] if end - timedelta(minutes=60) <= c <= end + timedelta(minutes=10)]
+def stop_reason(issue, end, approvers):
+    window = [(c, b) for c, who, b in issue["comments"]
+              if end - timedelta(minutes=60) <= c <= end + timedelta(minutes=10) and trusted(who, approvers)]
     for _, body in reversed(window):
         m = STOP_LINE.fullmatch(first_line(body))
         if m:
