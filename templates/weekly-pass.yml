@@ -427,7 +427,7 @@ jobs:
           $model = "$model".Trim()
           $confine = Join-Path $env:RUNNER_TEMP 'ouro-read-confined.json'
           Set-Content -LiteralPath $confine -Value '{"permissions":{"blockReadsOutsideWorkingDirectories":true}}' -Encoding utf8
-          claude -p "/ouro:drift --targets TestResults\drift-targets.json --ledger TestResults\audit-ledger.txt --outbox TestResults\drift-outbox --ci" `
+          claude -p "/ouro:drift --targets TestResults/drift-targets.json --ledger TestResults/audit-ledger.txt --outbox TestResults/drift-outbox --ci" `
             --model $model `
             --plugin-dir ouro `
             --settings $confine `
@@ -537,7 +537,7 @@ jobs:
           New-Item -ItemType Directory -Force TestResults | Out-Null
           $since = (Get-Date).AddDays(-8).ToString('yyyy-MM-dd')
           "INTAKE_SINCE=$since" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          pwsh -NoProfile -File ouro/bin/Get-IntakeTargets.ps1 -NewSince $since -OutFile TestResults\intake-targets.json
+          pwsh -NoProfile -File ouro/bin/Get-IntakeTargets.ps1 -NewSince $since -OutFile TestResults/intake-targets.json
           if ($LASTEXITCODE -ne 0) { throw "intake target selection failed (exit $LASTEXITCODE)" }
           # The counts, not the file: every target carries its body and its comments, so printing
           # it would put the week's backlog in the log twice.
@@ -580,7 +580,7 @@ jobs:
           $model = "$model".Trim()
           $confine = Join-Path $env:RUNNER_TEMP 'ouro-read-confined.json'
           Set-Content -LiteralPath $confine -Value '{"permissions":{"blockReadsOutsideWorkingDirectories":true}}' -Encoding utf8
-          claude -p "/ouro:intake --new-since $env:INTAKE_SINCE --targets TestResults\intake-targets.json --manifest TestResults\intake-manifest" `
+          claude -p "/ouro:intake --new-since $env:INTAKE_SINCE --targets TestResults/intake-targets.json --manifest TestResults/intake-manifest" `
             --model $model `
             --plugin-dir ouro `
             --settings $confine `
@@ -639,7 +639,7 @@ jobs:
           }
           if (-not $slug) { throw "[repo].slug is not declared in .claude/ouro.toml - the apply has no repository to name" }
           # CI holds no private token list, so the applier's forbidden-token check cannot run here.
-          python3 ouro/bin/apply-manifest.py TestResults\intake-manifest --unattended --repo $slug --no-forbidden-check --targets TestResults\intake-targets.json
+          python3 ouro/bin/apply-manifest.py TestResults/intake-manifest --unattended --repo $slug --no-forbidden-check --targets TestResults/intake-targets.json
           if ($LASTEXITCODE -ne 0) { throw "applying the intake manifest failed (exit $LASTEXITCODE)" }
 
       # Three numbers for the trailing week and no more: rulings answered (and the oldest open),

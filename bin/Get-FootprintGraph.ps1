@@ -85,7 +85,9 @@ $ErrorActionPreference = 'Stop'
 # git and gh write UTF-8; PowerShell decodes a native command's output with
 # [Console]::OutputEncoding, the OEM code page on a Windows runner, which mangles a non-ASCII
 # path or title before it is compared.
+$startEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+try {
 
 class UsageError : System.Exception {
     UsageError([string]$Message) : base($Message) {}
@@ -304,3 +306,5 @@ try {
 }
 catch [UsageError] { Write-Diag "usage: $($_.Exception.Message)"; exit 2 }
 catch { Write-Diag "Get-FootprintGraph: $($_.Exception.Message)"; exit 1 }
+}
+finally { [Console]::OutputEncoding = $startEncoding }

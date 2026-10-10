@@ -279,7 +279,9 @@ function Send-LoopMetrics {
 if ($AsModule) { return }
 
 # gh writes UTF-8; a Windows runner otherwise decodes native stdout with the OEM code page.
+$startEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+try {
 
 $slug = Get-BindingValue repo.slug
 $default = Get-BindingValue repo.default_branch
@@ -314,3 +316,5 @@ if ($Comment) {
     if ($n) { Write-Host "appended to #$n" }
 }
 exit 0
+}
+finally { [Console]::OutputEncoding = $startEncoding }

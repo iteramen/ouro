@@ -502,6 +502,48 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     Assert-Match '(?m)^  #31 t31 -- agent-ready, in flight, PR #9, outside the scope$' $r.Out 'row 26: a ready child in flight and outside the scope carries both marks'
     $r = Invoke-Prog $finS @('-Intent', 'finish', '-Target', '29', '-TargetJson', $umbS, '-IssuesJson', $allS, '-BlockedJson', '[]') '[{"number":9,"body":"Fixes #31"}]'
     Assert-Match '(?m)^  #31 t31 -- agent-ready, in flight, PR #9$' $r.Out 'row 26 control: unscoped, the in-flight ready child carries only the flight mark'
+
+    # --- row 27: the script puts back the console code pages it changed -------------------------------------------------------------
+    # CreateNoWindow gives the driver a console of its own, so the run cannot change this suite's.
+    # chcp prints only the input code page and a process's own [Console]::OutputEncoding is cached,
+    # so the driver reads GetConsoleOutputCP and GetConsoleCP.
+    if ($IsWindows) {
+        $driver = Join-Path $scratch.FullName 'cp-driver.ps1'
+        [IO.File]::WriteAllText($driver, @'
+param([string]$Pwsh, [string]$Script)
+$k = Add-Type -PassThru -Name CpDriver -Namespace CpDriver -MemberDefinition '
+    [DllImport("kernel32.dll")] public static extern uint GetConsoleOutputCP();
+    [DllImport("kernel32.dll")] public static extern uint GetConsoleCP();
+    [DllImport("kernel32.dll")] public static extern bool SetConsoleOutputCP(uint cp);
+    [DllImport("kernel32.dll")] public static extern bool SetConsoleCP(uint cp);'
+[void]$k::SetConsoleOutputCP(437)
+[void]$k::SetConsoleCP(437)
+[Console]::Out.WriteLine("before out=$($k::GetConsoleOutputCP()) in=$($k::GetConsoleCP())")
+'' | & $Pwsh -NoProfile -File $Script -PrsJson '[]' -Bogus x *> $null
+[Console]::Out.WriteLine("child exit=$LASTEXITCODE")
+[Console]::Out.WriteLine("after out=$($k::GetConsoleOutputCP()) in=$($k::GetConsoleCP())")
+'@, [Text.UTF8Encoding]::new($false))
+        $psi = [System.Diagnostics.ProcessStartInfo]::new($pwshExe)
+        foreach ($a in @('-NoProfile', '-File', $driver, $pwshExe, $Script)) { $psi.ArgumentList.Add($a) }
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEndAsync()
+        $err = $p.StandardError.ReadToEndAsync()
+        $p.WaitForExit()
+        $cpOut = $out.Result
+        Assert-Equal 0 $p.ExitCode 'row 27: the driver runs'
+        Assert-Match '(?m)^before out=437 in=437\r?$' $cpOut 'row 27: the driver console starts at 437 for both (a 0 is no console, never a skip)'
+        Assert-Match '(?m)^child exit=2\r?$' $cpOut 'row 27: the script under test exits 2 on an unknown parameter'
+        $after = [regex]::Match($cpOut, '(?m)^after out=(\d+) in=(\d+)\r?$')
+        Assert-Equal '437' $after.Groups[1].Value 'row 27: the output code page after the run is the one before it'
+        Assert-Equal '437' $after.Groups[2].Value 'row 27: the input code page after the run is the one before it'
+    }
+    else {
+        Write-Host "  skip: row 27: the console code page is a Windows concept; this is $([Runtime.InteropServices.RuntimeInformation]::OSDescription)" -ForegroundColor Yellow
+    }
 }
 finally {
     Remove-Item -LiteralPath $scratch.FullName -Recurse -Force

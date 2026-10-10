@@ -63,7 +63,9 @@ $ErrorActionPreference = 'Stop'
 # gh writes UTF-8. PowerShell decodes a native command's stdout with [Console]::OutputEncoding,
 # which on a Windows runner is the OEM code page, so without this every non-ASCII character in
 # an issue body -- an em dash, most often -- is mangled before it is compared against the tree.
+$startEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+try {
 
 $TriggerMarker = '**Unblocks when:**'
 $CommentMarker = '**Blocked check** (automated):'
@@ -172,3 +174,5 @@ foreach ($f in $findings) {
     if ($LASTEXITCODE -ne 0) { throw "gh issue comment $($f.Issue.number) failed (exit $LASTEXITCODE): $posted" }
 }
 exit 0
+}
+finally { [Console]::OutputEncoding = $startEncoding }

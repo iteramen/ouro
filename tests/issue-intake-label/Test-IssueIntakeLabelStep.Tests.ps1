@@ -17,9 +17,10 @@
     non-state label that merely contains a state name (`needs-rulingx`) must still stamp --
     proving the grep is anchored to whole lines, not just that a read happened.
 
-    A bash that does not run (bin/Test-CommandBlocks.ps1's Get-WorkingBash finds one the same
-    way) skips these cases with a visible line, everywhere but Linux, where bash is always
-    present and a skip is a detection failure. A vendored tree (bin/Vendor-Ouro.ps1 copies the
+    A bash that cannot run a script given by its Windows path (the WSL launcher, which strips the
+    backslashes) is no usable bash here: Get-WorkingBash proves each candidate with such a script,
+    and the cases skip with a visible line when none passes, everywhere but Linux, where bash is
+    always present and a skip is a detection failure. A vendored tree (bin/Vendor-Ouro.ps1 copies the
     scripts flat and drops templates/) skips the whole suite, as the weekly-pass suite does.
 #>
 $ErrorActionPreference = 'Stop'
@@ -62,6 +63,9 @@ function Get-StepBlocks([string]$Text) {
 function Get-WorkingBash {
     $seen = @{}
     $working = @()
+    $probeDir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('working-bash-' + [guid]::NewGuid().ToString('N')))
+    $probe = Join-Path $probeDir.FullName 'probe.sh'
+    [System.IO.File]::WriteAllText($probe, "printf ok`n", [System.Text.UTF8Encoding]::new($false))
     foreach ($cmd in (Get-Command bash -All -ErrorAction SilentlyContinue)) {
         $path = $cmd.Source
         if (-not $path -or $seen.ContainsKey($path)) { continue }
@@ -70,13 +74,14 @@ function Get-WorkingBash {
         $ok = $false
         try {
             $ErrorActionPreference = 'Continue'
-            & $path -c 'exit 0' 2>&1 | Out-Null
-            $ok = ($LASTEXITCODE -eq 0)
+            $out = (& $path $probe 2>$null | Out-String)
+            $ok = ($LASTEXITCODE -eq 0 -and $out.Trim() -ceq 'ok')
         }
         catch { $ok = $false }
         finally { $ErrorActionPreference = $eap }
         if ($ok) { $working += $path }
     }
+    Remove-Item -LiteralPath $probeDir.FullName -Recurse -Force
     $working | Sort-Object { if ($_ -match '[\\/][Gg]it[\\/]') { 0 } else { 1 } } | Select-Object -First 1
 }
 
@@ -89,6 +94,45 @@ $runAt = [array]::FindIndex([string[]]$lines, [Predicate[string]]{ param($l) $l 
 if ($runAt -lt 0) { throw 'the stamping step has no run: | block' }
 $RunBody = (@($lines[($runAt + 1)..($lines.Count - 1)]) | ForEach-Object { $_ -replace '^ {10}', '' }) -join "`n"
 
+if ($IsWindows) {
+    $stubDir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('wsl-launcher-stub-' + [guid]::NewGuid().ToString('N')))
+    $savedPath = $env:PATH
+    try {
+        [System.IO.File]::WriteAllText((Join-Path $stubDir.FullName 'bash.cmd'), "@echo off`r`nif ""%1""==""-c"" exit /b 0`r`nexit /b 127`r`n")
+        $env:PATH = $stubDir.FullName
+        Assert-True ($null -eq (Get-WorkingBash)) 'a bash that passes -c but cannot run a script by its Windows path is not a working bash'
+    }
+    finally {
+        $env:PATH = $savedPath
+        Remove-Item -LiteralPath $stubDir.FullName -Recurse -Force
+    }
+}
+else { Write-Host 'skip: the launcher-stub row runs on Windows only' -ForegroundColor DarkGray }
+
+$gitBash = @(Get-Command bash -All -ErrorAction SilentlyContinue | ForEach-Object Source | Where-Object { $_ -match '[\\/][Gg]it[\\/]' })
+if ($gitBash.Count -gt 0) {
+    $found = Get-WorkingBash
+    Assert-True ($found -and $found -match '[\\/][Gg]it[\\/]') 'a Git bash on PATH is still found by Get-WorkingBash'
+}
+else { Write-Host 'skip: no Git bash on PATH -- the Git-bash-found row is skipped' -ForegroundColor DarkGray }
+
+if ($gitBash.Count -gt 0) {
+    $noiseDir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('bash-env-noise-' + [guid]::NewGuid().ToString('N')))
+    $savedBashEnv = $env:BASH_ENV
+    try {
+        $noise = Join-Path $noiseDir.FullName 'noise.sh'
+        [System.IO.File]::WriteAllText($noise, "echo startup-noise >&2`n", [System.Text.UTF8Encoding]::new($false))
+        $env:BASH_ENV = $noise -replace '\\', '/'
+        $found = Get-WorkingBash
+        Assert-True ($found -and $found -match '[\\/][Gg]it[\\/]') 'a bash that writes a startup warning on stderr is still a working bash'
+    }
+    finally {
+        $env:BASH_ENV = $savedBashEnv
+        Remove-Item -LiteralPath $noiseDir.FullName -Recurse -Force
+    }
+}
+else { Write-Host 'skip: no Git bash on PATH -- the stderr-noise row is skipped' -ForegroundColor DarkGray }
+
 $bash = Get-WorkingBash
 if (-not $bash) {
     if ($IsLinux) {
@@ -96,6 +140,7 @@ if (-not $bash) {
         exit 1
     }
     Write-Host 'INFO: no bash that runs is on PATH -- the run-step cases are skipped' -ForegroundColor DarkGray
+    if ($failures -gt 0) { Write-Host "`n$failures assertion(s) failed" -ForegroundColor Red; exit 1 }
     exit 0
 }
 

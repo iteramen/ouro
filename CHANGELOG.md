@@ -15,6 +15,19 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v0.5.0] - 2026-10-10
+
+- `templates/weekly-pass.yml`: the four native command lines that took a relative path spelled
+  with a backslash now spell it with forward slashes, so the apply step works on a Linux runner,
+  where a native program receives the string verbatim and no file has that name. The weekly-pass
+  suite gains a finding for a run line whose first word is `python3`, `pwsh`, `claude`, `gh` or
+  `git` and that holds a path with a backslash. **Consumer contract:** the old form is a copied
+  weekly pass whose apply step reads `python3 ouro/bin/apply-manifest.py
+  TestResults\intake-manifest ... --targets TestResults\intake-targets.json`, which finds neither
+  path on a Linux runner; the new form spells both with `/`; the migration is to re-copy four
+  lines: the apply step's `python3` line, the intake prompt's `--targets` and `--manifest`, the
+  drift prompt's `--targets`, `--ledger` and `--outbox`, and the target selection's `-OutFile`.
+
 ## [v0.4.0] - 2026-10-09
 
 - `bin/apply-manifest.py`, `templates/weekly-pass.yml`, `skills/intake/SKILL.md`,

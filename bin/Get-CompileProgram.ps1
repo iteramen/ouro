@@ -128,8 +128,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$startOutputEncoding = [Console]::OutputEncoding
+$startInputEncoding = [Console]::InputEncoding
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+try {
 
 class UsageError : System.Exception { UsageError([string]$Message) : base($Message) {} }
 class CheckError : System.Exception { CheckError([string]$Message) : base($Message) {} }
@@ -533,3 +536,8 @@ try {
 catch [UsageError] { [Console]::Error.WriteLine("usage: $($_.Exception.Message)"); exit 2 }
 catch [CheckError] { [Console]::Error.WriteLine("Get-CompileProgram: self-check failed: $($_.Exception.Message)"); exit 3 }
 catch { [Console]::Error.WriteLine("Get-CompileProgram: $($_.Exception.Message)"); exit 1 }
+}
+finally {
+    [Console]::OutputEncoding = $startOutputEncoding
+    [Console]::InputEncoding = $startInputEncoding
+}

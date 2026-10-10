@@ -69,7 +69,9 @@ $ErrorActionPreference = 'Stop'
 # gh writes UTF-8. PowerShell decodes a native command's stdout with [Console]::OutputEncoding,
 # which on a Windows runner is the OEM code page, so without this every non-ASCII character in
 # an issue body -- an em dash, most often -- is mangled before it is compared against the tree.
+$startEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+try {
 
 # A word character or a slash directly before the hash sign is a citation into another
 # repository, the same reading the anchor gate gives a cross-repo cite -- never a child.
@@ -222,3 +224,5 @@ if ($Comment) {
     }
 }
 exit 0
+}
+finally { [Console]::OutputEncoding = $startEncoding }

@@ -298,14 +298,25 @@ function Get-IntakeStepFindings([string]$Text) {
         if ($dc -cmatch '"/ouro:drift [^"]*--issue\b') {
             $findings.Add("the drift audit's prompt carries --issue, though the session posts nothing and holds no gh tool to use a number")
         }
-        if ($dc -cnotmatch '"/ouro:drift [^"]*--ledger TestResults\\audit-ledger\.txt[ "]') {
-            $findings.Add("the drift audit's prompt is handed no --ledger TestResults\audit-ledger.txt, so the session has no recorded false positives to read")
+        if ($dc -cnotmatch '"/ouro:drift [^"]*--ledger TestResults/audit-ledger\.txt[ "]') {
+            $findings.Add("the drift audit's prompt is handed no --ledger TestResults/audit-ledger.txt, so the session has no recorded false positives to read")
         }
-        if ($dc -cnotmatch '"/ouro:drift [^"]*--outbox TestResults\\drift-outbox[ "]') {
-            $findings.Add("the drift audit's prompt is handed no --outbox TestResults\drift-outbox, so the session has nowhere to write its output")
+        if ($dc -cnotmatch '"/ouro:drift [^"]*--outbox TestResults/drift-outbox[ "]') {
+            $findings.Add("the drift audit's prompt is handed no --outbox TestResults/drift-outbox, so the session has nowhere to write its output")
         }
         if ($dc -notmatch '(?m)^\s*New-Item\s+-ItemType\s+Directory\s+TestResults\\drift-outbox\s*\|\s*Out-Null\s*$') {
             $findings.Add('the drift audit step does not create its output directory TestResults\drift-outbox without -Force, so a directory left by an earlier run would be posted as this run''s')
+        }
+    }
+
+    # pwsh's own cmdlets read a backslash as a separator on Linux. A native program (python3, git, gh, claude)
+    # gets the string verbatim, so it names no file there; a child pwsh hands it on to its script, which decides.
+    # A line whose first word is one of those programs holds no backslash between two path characters.
+    foreach ($b in $blocks) {
+        foreach ($line in ((Remove-Comments $b) -split "`r?`n")) {
+            if ($line -match '^\s*(python3|pwsh|claude|gh|git)\s' -and $line -match '[\w.-]\\[\w.-]') {
+                $findings.Add("$(Get-StepName $b) passes a path with a backslash to a native command, which a Linux runner reads as one file name: $($line.Trim())")
+            }
         }
     }
 
@@ -858,16 +869,16 @@ $mutants = @(
         from = 'drift-targets.json --ledger'; to = 'drift-targets.json --issue $env:DRIFT_ISSUE_NUMBER --ledger'
         expect = 'the drift audit''s prompt carries --issue' }
     @{ what = 'the ledger file dropped from the drift audit prompt'
-        from = ' --ledger TestResults\audit-ledger.txt'; to = ''
+        from = ' --ledger TestResults/audit-ledger.txt'; to = ''
         expect = 'the drift audit''s prompt is handed no --ledger' }
     @{ what = 'the ledger file near miss in the drift audit prompt (another file name)'
-        from = '--ledger TestResults\audit-ledger.txt'; to = '--ledger TestResults\audit-ledger.txt.bak'
+        from = '--ledger TestResults/audit-ledger.txt'; to = '--ledger TestResults/audit-ledger.txt.bak'
         expect = 'the drift audit''s prompt is handed no --ledger' }
     @{ what = 'the output directory dropped from the drift audit prompt'
-        from = ' --outbox TestResults\drift-outbox'; to = ''
+        from = ' --outbox TestResults/drift-outbox'; to = ''
         expect = 'the drift audit''s prompt is handed no --outbox' }
     @{ what = 'the output directory near miss in the drift audit prompt (a sibling directory)'
-        from = '--outbox TestResults\drift-outbox'; to = '--outbox TestResults\drift-outbox-x'
+        from = '--outbox TestResults/drift-outbox'; to = '--outbox TestResults/drift-outbox-x'
         expect = 'the drift audit''s prompt is handed no --outbox' }
     @{ what = 'the drift audit step made to create its output directory with -Force'
         from = 'New-Item -ItemType Directory TestResults\drift-outbox'; to = 'New-Item -ItemType Directory -Force TestResults\drift-outbox'
@@ -1054,17 +1065,32 @@ $mutants = @(
         from = "          persist-credentials: false   # as above"; to = "          # persist-credentials: false   # as above"
         expect = 'persists its credentials' }
     @{ what = 'the applier called without --unattended'
-        from = 'TestResults\intake-manifest --unattended'; to = 'TestResults\intake-manifest'
+        from = 'TestResults/intake-manifest --unattended'; to = 'TestResults/intake-manifest'
         expect = 'does not pass --unattended' }
     @{ what = 'the flag spelled as --unattended=true, which the applier refuses'
         from = '--unattended'; to = '--unattended=true'
         expect = 'spells --unattended with a value' }
+    @{ what = 'the apply line spelling its manifest directory with a backslash again'
+        from = 'apply-manifest.py TestResults/intake-manifest --unattended'; to = 'apply-manifest.py TestResults\intake-manifest --unattended'
+        expect = 'passes a path with a backslash to a native command' }
+    @{ what = 'the apply line spelling its targets file with a backslash again'
+        from = '--no-forbidden-check --targets TestResults/intake-targets.json'; to = '--no-forbidden-check --targets TestResults\intake-targets.json'
+        expect = 'passes a path with a backslash to a native command' }
+    @{ what = 'the intake prompt spelling its manifest directory with a backslash again'
+        from = '--manifest TestResults/intake-manifest"'; to = '--manifest TestResults\intake-manifest"'
+        expect = 'passes a path with a backslash to a native command' }
+    @{ what = 'the drift prompt spelling its targets file with a backslash again'
+        from = '--targets TestResults/drift-targets.json --ledger'; to = '--targets TestResults\drift-targets.json --ledger'
+        expect = 'passes a path with a backslash to a native command' }
+    @{ what = 'the target selection spelling its out file with a backslash again'
+        from = '-OutFile TestResults/intake-targets.json'; to = '-OutFile TestResults\intake-targets.json'
+        expect = 'passes a path with a backslash to a native command' }
     @{ what = 'the applier called without --targets, which bounds where a step may post'
-        from = ' --no-forbidden-check --targets TestResults\intake-targets.json'; to = ' --no-forbidden-check'
+        from = ' --no-forbidden-check --targets TestResults/intake-targets.json'; to = ' --no-forbidden-check'
         expect = 'passes no --targets' }
     @{ what = 'the applier bounded by another file than the one the grading step was handed'
-        from = '--no-forbidden-check --targets TestResults\intake-targets.json'; to = '--no-forbidden-check --targets TestResults\other-targets.json'
-        expect = 'not the ''TestResults\intake-targets.json'' the grading step was handed' }
+        from = '--no-forbidden-check --targets TestResults/intake-targets.json'; to = '--no-forbidden-check --targets TestResults/other-targets.json'
+        expect = 'not the ''TestResults/intake-targets.json'' the grading step was handed' }
     @{ what = 'the selecting step not recording the targets file''s hash'
         from = '          "INTAKE_TARGETS_SHA256=$((Get-FileHash TestResults\intake-targets.json -Algorithm SHA256).Hash)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'; to = '          $null = 1'
         expect = 'does not write the targets file''s SHA-256 to GITHUB_ENV' }
@@ -1321,7 +1347,7 @@ $mutants = @(
         from = '          python3 ouro/bin/apply-manifest.py'; to = "          claude -p `"apply it`"`n          python3 ouro/bin/apply-manifest.py"
         expect = 'a model runs in the applying step' }
     @{ what = 'the two steps merged back into one that grades and applies'
-        from = '            > TestResults\intake-grading-result.json'; to = "            > TestResults\intake-grading-result.json`n          python3 ouro/bin/apply-manifest.py TestResults\intake-manifest --unattended"
+        from = '            > TestResults\intake-grading-result.json'; to = "            > TestResults\intake-grading-result.json`n          python3 ouro/bin/apply-manifest.py TestResults/intake-manifest --unattended"
         expect = 'the grading step applies its own manifest' }
     @{ what = 'the ouro version stamp step is dropped'
         from = $StampStepBlock; to = ''

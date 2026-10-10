@@ -71,7 +71,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # gh, git and python print UTF-8; a Windows console otherwise decodes it with the OEM code page.
+$startEncoding = [Console]::OutputEncoding
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+try {
 
 # A native call's stdout lines, its exit code, and everything it printed for a message. Only
 # stdout is data: under 2>&1 stderr arrives as ErrorRecords.
@@ -472,3 +474,5 @@ finally {
         if ($null -ne $gitVars[$name]) { [Environment]::SetEnvironmentVariable($name, $gitVars[$name]) }
     }
 }
+}
+finally { [Console]::OutputEncoding = $startEncoding }
