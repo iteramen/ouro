@@ -15,6 +15,31 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v0.5.2] - 2026-10-11
+
+- `templates/ouro.toml.example`: the `suppress_prefixes` advice gains `bin/external-audit.py`,
+  `bin/apply-manifest.py`, `bin/forbidden-tokens.py` and `bin/loop-outcomes.py`, which the
+  vendored binding and contract docs cite; `bin/Vendor-Ouro.ps1` prints the same list. The
+  `[models]` and `[docs]` notes say `[owner]` is required, and the `report_only` note says S9
+  never blocks. The `bin/ouro-binding.py` usage text notes the `warning:` line `check` may print.
+
+- `bin/Test-DocsFreshness.ps1`: the help says S9 never blocks whatever `-ReportOnlySignals` holds,
+  and describes the repo-root `.docs-freshness-ignore` file. The docs-gate and drift-process docs
+  match the code, and the steps for consuming a drift report now live in the drift skill.
+
+- `bin/Get-DriftAuditTargets.ps1`, `bin/New-OuroLabels.ps1`, `bin/Test-IssueLabelInvariants.ps1`,
+  `bin/Test-RepoVariablesDoc.ps1`, `bin/drift-claims.py`: help only, no behaviour change.
+  `Get-DriftAuditTargets.ps1` documents `-MaxTargets`, `-RotationFloor`, `-ExcludePrefix` and
+  `-OutFile`; the two gates document `-RollingIssueTitle`; the `drift-claims.py` usage line for
+  `outbox` names `--targets <file>`, which it requires. `New-OuroLabels.ps1` documents
+  `-BindingPath`.
+
+- `templates/weekly-pass.yml`: comments only, no step changes. They now say that the pass files
+  the docs_freshness, drift_audit and loop_runs issues the repo lacks, that the six gate steps
+  share the loud-failure posture, that `/ouro:compile` reads the blocked trigger line too, and
+  that the blocked-trigger check stays silent only when the newest notice on the issue from the
+  bot or a ruling approver says the same.
+
 ## [v0.5.1] - 2026-10-10
 
 - `bin/loop-outcomes.py`: the `**Checkpoint finding**`, `**Stop:**` and `**Triage**` markers

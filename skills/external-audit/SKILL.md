@@ -191,9 +191,11 @@ critic cannot.
   most likely to have over-reached.
 - **`--goal` is context, not the thing judged.** Say what the claims underpin so the reviewer
   can spot an unsound inference, and say explicitly that the plan's design is out of scope.
-- **No git call, so `--cwd` can sit above several repositories.** Name each tree in the claim
-  set. This skill still runs bound to one repository (step 0's binding read); if the claims span
-  repos, pass `--cwd` at their common parent rather than trying to run from it.
+- **Claims mode builds its subject without git, so `--cwd` can sit above several repositories.**
+  A run that starts the CLI still runs git status in that directory, which is silent outside a
+  repository. Name each tree in the claim set. This skill still runs bound to one repository (step
+  0's binding read); if the claims span repos, pass `--cwd` at their common parent rather than
+  trying to run from it.
 - **A citation you cannot find is not thereby false.** The driver tells the critic to search
   for the symbol before declaring a path absent; apply the same rule to yourself when checking
   its findings.

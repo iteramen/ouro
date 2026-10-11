@@ -26,9 +26,10 @@ Rules:
 - **Read-only Bash.** Interactively, `git log` / `git diff` / `gh` reads are allowed and
   encouraged (`git log --diff-filter=A` vs `--diff-filter=D` distinguishes planned vs deleted vs
   moved for a missing reference — checking only whether a path resolves today produces the wrong
-  fix). A CI run holds no history command and no `gh`: only `git ls-files`, `git cat-file`
-  and `git rev-parse`, which read old content (`git cat-file -p <rev>:<path>`) but
-  not a history. A claim that only history or live state could settle is AMBIGUOUS there. Never
+  fix). A CI run holds no history command and no `gh`. The drift audit's CI run holds only
+  `git ls-files`, `git cat-file` and `git rev-parse`, which read old content
+  (`git cat-file -p <rev>:<path>`) but not a history; the intake's CI run holds `git rev-parse`
+  alone. A claim that only history or live state could settle is AMBIGUOUS there. Never
   run a command that mutates anything. A dispatch creates files only where it was sent. Sub-agent,
   external builder and reviewer alike create files only inside the worktree they were handed, and
   only the files the task names; a read-only dispatch creates none inside any working tree. Every
@@ -45,8 +46,8 @@ Rules:
     which subject the doc claims before declaring its facts wrong.
   - Plausible doc claims can be overturned by live state; when a claim is about the
     environment and a read-only probe is cheap, probe. If the session's tool allowlist
-    blocks the probe (a CI run holds the three git reads above and no `gh`), report AMBIGUOUS —
-    never guess the environment.
+    blocks the probe (the drift audit's CI run holds the three git reads above and no `gh`, the
+    intake's `git rev-parse` alone), report AMBIGUOUS — never guess the environment.
   - A comment is not an artifact. When a doc's claim is about behavior, verify it against
     the code that ENFORCES the behavior, not against a comment describing it — least of all
     the comment the doc itself cites. A cited comment that agrees with the doc confirms

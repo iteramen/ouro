@@ -10,8 +10,9 @@ the same way it copies `templates/documentation-rule.md` into `.claude/rules/` s
 are in front of an agent while it edits markdown.
 
 Where this document says the gate is *configured*, that configuration lives in the repo's
-binding, not here. Signal names and meanings are stable; key names are not restated in this file,
-so it cannot promise a schema the validator has not learned.
+binding, not here. Signal names and meanings are stable; the schema lives in `docs/binding.md`,
+and a key named here points to it rather than restating it, so this file cannot promise a schema the
+validator has not learned.
 
 ---
 
@@ -112,20 +113,21 @@ trigger that would reopen it, is current state. Its execution plan is not — th
 ## 8. The signals, and how to clear each
 
 The deterministic gate reports these. Which of them block is per-repo — a report-only list names
-the ones that never fail a build — so a repo can adopt the gate before it is clean and narrow the
-list as it ratchets. The shipped default is the cautious one: the signals with the widest
-false-positive surface report rather than block until a repo says otherwise.
+the ones that never fail a build, and S9 never blocks whatever the list holds — so a repo can adopt
+the gate before it is clean and narrow the list as it ratchets. The shipped default is the cautious
+one: the signals with the widest false-positive surface report rather than block until a repo says
+otherwise.
 
 | | What fired | How to clear it |
 |---|---|---|
 | **S1** | A markdown link, or a relative `href` in an in-scope HTML page, whose target does not resolve. A markdown link starting with a single `/` resolves from the repository root; an `href` starting with a single `/` is a site root and is skipped; a target starting with `//` is skipped in both. | §5 — establish *why* first. On a markdown link: fix the path, reword the claim, or mark it `(planned)`. On an HTML page's `href`, `(planned)` clears nothing — fix the target, or add a `suppress_prefixes` entry. |
 | **S2** | A link's `#anchor` names no heading in the target document. | Headings changed. Re-read the target's current headings rather than guessing the old slug. One case has no correct answer: where a document repeats a heading, the renderer disambiguates with a `-1` suffix the slugger does not model, so a *correct* link to the second one reports. Exempt the file rather than "fixing" the anchor to point at the first. |
-| **S3** | A path in a code span — a backtick span in markdown, a `<code>` span in an in-scope HTML page — that does not resolve. | §5. A token the gate cannot verify is skipped rather than reported: a scheme- or drive-qualified path, a home-relative one, a parent-relative one that resolves outside the repo root (one that resolves inside it, against the doc's own directory, is checked), a UNC share, and a path that is gitignored by design (it can never appear in a tracked-files index, so it would be unclearable). Everything else carrying a slash and a known extension is checked. |
+| **S3** | A path in a code span — a backtick span in markdown, a `<code>` span in an in-scope HTML page — that does not resolve. | §5. A token the gate cannot verify is skipped rather than reported: a scheme- or drive-qualified path, a home-relative one, a rooted one starting with a single slash, a parent-relative one that resolves outside the repo root (one that resolves inside it, against the doc's own directory, is checked), a UNC share, and a path that is gitignored by design (it can never appear in a tracked-files index, so it would be unclearable). A token is also skipped when it starts with `http:` or `https:`, a star or a dollar sign, holds a space or one of the characters star, angle bracket, brace, colon or ellipsis, or ends in a slash, so a placeholder or a glob is never checked. Everything else carrying a slash and a known extension is checked. |
 | **S4a** | The doc index lists an entry resolving to no file. An entry may name a markdown doc or an HTML page, and a page resolves only when `html_globs` brings it into scope. | The doc moved or was deleted; update or drop the index entry. Armed by declaring the index path and the indexed trees together. |
 | **S4b** | A doc, or an in-scope HTML page, in an indexed tree is absent from the index. | Add its entry, or exempt its path class when the whole class is out of scope. Armed by the same two declarations as S4a. |
-| **S7** | A code fence was opened and never closed. | Close it. Everything after an unclosed fence is invisible to every signal except S7 and S8, so this one hides other findings. |
+| **S7** | A code fence was opened and never closed. | Close it. Everything after an unclosed fence is invisible to every signal except S4, S7 and S8, so this one hides other findings. |
 | **S8** | A reference to something known dead, named in the banned table with its reason. | The reason says what replaced it. Zero false positives by construction, which is why it blocks — but note it is a raw-line scan with **no suppression path**: it sees fences and comments too, so the reason for a ban belongs in the binding, never quoted in prose. |
-| **S9** | An external URL is definitively dead — 404/410, or DNS failure. | Report-only by default: external sites break for reasons that are not yours. Inconclusive — never findings — are 403, 405, 429, 5xx, timeouts, **and a 404 from `github.com` itself**, since anonymous requests to a private repo 404 by design. |
+| **S9** | An external URL is definitively dead — 404/410, or DNS failure. | Never blocks, whatever the report-only list holds: only the sweep probes the network, and external sites break for reasons that are not yours. Inconclusive — never findings — are 403, 405, 429, 5xx, timeouts, **and a 404 from `github.com` itself**, since anonymous requests to a private repo 404 by design. |
 | **S10** | Work-remaining content in a doc: a section heading naming undone work, or a checkbox list. | §2 — distill it into an issue with verified claims, then delete the section in the same pass. A *procedural* checklist run per release or per test pass is not undone work: declare its path as a planning path. |
 
 ### Suppressions

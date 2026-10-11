@@ -65,9 +65,22 @@
     File holding the concatenated audit-run and audit-claims markers harvested from the rolling issue's comments.
     Absent or empty means a bootstrap run: every doc is never-audited.
 
+.PARAMETER MaxTargets
+    Most docs the run returns as targets. Default 40.
+
+.PARAMETER RotationFloor
+    How many of those slots go to the longest-unaudited docs whether or not they have evidence
+    (capped at -MaxTargets). Default 10.
+
 .PARAMETER MaxCommits
     Most commits each target's `commits` list holds. Default 50.
 
+.PARAMETER OutFile
+    File the JSON result is written to, as UTF-8. Default: the JSON goes to the output stream.
+
+.PARAMETER ExcludePrefix
+    Path prefixes whose docs are left out of the ranking; a trailing `/**` is read as `/`. The
+    caller passes the binding's overlays.drift here. Default: none.
 .PARAMETER AsModule
     Dot-source the function definitions without running anything. For the tests.
 

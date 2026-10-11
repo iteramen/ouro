@@ -8,7 +8,7 @@ encode or parse the `audit-claims` marker, and turn a drift run's `claim-records
     python3 drift-claims.py parse [--kind audit-claims|claim-records|verdict-records] < text > markers.json
     python3 drift-claims.py ingest --comments <file> --since <time> --head <40-hex> --out-dir <dir>
                                    [--cwd <dir>] [--max-chars <n>]       > bodies.txt
-    python3 drift-claims.py outbox --dir <dir>                           > paths.txt
+    python3 drift-claims.py outbox --dir <dir> --targets <file>          > paths.txt
 
 A record is {"doc", "statement", "path", "start", "end"}, 1-based and inclusive; `record` adds
 "sha256", and `check` and `encode` read records that carry it. Every file is read as its git blob

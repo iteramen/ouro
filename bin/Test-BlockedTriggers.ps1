@@ -3,10 +3,10 @@
     Reports a blocked issue whose Unblocks-when trigger has fired, or that carries none.
 .DESCRIPTION
     A blocked issue opens with an Unblocks-when line naming what it waits on (ouro
-    docs/contract.md sec4). Nothing unattended reads that line -- the only reader is
-    interactive triage's one-line check -- so an issue stays blocked long after its trigger
-    closed, and a blocked issue with no trigger line at all goes unnoticed. This gate reads
-    every open `blocked` issue and reports both.
+    docs/contract.md sec4). Without this gate, only interactive triage's one-line check and
+    /ouro:compile would read that line, so an issue would stay blocked long after its trigger
+    closed, and a blocked issue with no trigger line at all would go unnoticed.
+    This gate reads every open `blocked` issue and reports both.
 
     The trigger line is the body's first line, after a byte-order mark and surrounding
     whitespace are stripped: it is a trigger line only when it starts, case-sensitively, with
@@ -44,8 +44,8 @@
     only alongside -IssuesJson). A number absent from it is unreadable. Default: gh api per
     reference.
 .PARAMETER Comment
-    Post one comment per finding on the blocked issue it is about, deduped against that
-    issue's own comments.
+    Post one comment per finding on the blocked issue it is about, unless that issue's newest
+    trusted notice already says the same.
 #>
 param(
     [string]$IssuesJson = '',

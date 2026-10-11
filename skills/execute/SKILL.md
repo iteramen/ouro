@@ -457,9 +457,11 @@ declares (`/ouro:land` step 0), with branch delete (`Fixes #<N>` closes the issu
 stop-at-PR flow above if: the limit passes, any review finding is declined rather than fixed, a
 review fix is itself non-trivial, the review names an untested vector nothing covers, the
 landing would rewrite a branch origin already has (`/ouro:land` step 2's rebase or step 10's
-compression, contract §5), or the implementation surfaced anything the label's bar excludes
-(behavior change beyond gate/test coverage, new API, workflow edits). Unsure means not trivial —
-say so in the report and stop at the PR.
+compression, contract §5), the implementation surfaced anything the label's bar excludes
+(behavior change beyond gate/test coverage, new API), or the diff edits tests beyond additions or
+touches migrations, flag defaults, authorization or workflows. Unsure means not trivial. A
+demotion is stated in the PR body, in one sentence giving its reason (edit the body with
+`--body-file`), and again in the report; then stop at the PR.
 
 **Exception — the issue carries `checkpoint`:** there is no branch and no PR. The
 deliverable is a **finding**, and the run is **read-only** — no `Edit`/`Write` to the

@@ -7,8 +7,8 @@ name: Ouro Weekly Pass
 # directory each: the drift audit writes the ledger's body and comments into files that a later
 # step posts, and the intake grades into a manifest a later step applies. Nothing here edits code, merges,
 # promotes or closes, and the only issue bodies rewritten are the rolling ones named in
-# [rolling_issues] -- report surfaces, not backlog items. One of those it will file if the
-# repo has not.
+# [rolling_issues] -- report surfaces, not backlog items. It files the docs_freshness,
+# drift_audit and loop_runs issues the repo has not.
 #
 # A permission rule cannot constrain what a session writes after its literal ending, so
 # neither session is granted anything that reaches the tracker. Each reads text the contract
@@ -166,7 +166,8 @@ jobs:
 
       # Deterministic sibling of the LLM audit: agent-ready issues whose verbatim anchors no
       # longer grep get a comment — never a silent demotion. Findings are report-only; a
-      # failed gh call fails the step loud (all three gates below share that posture).
+      # failed gh list or variable read fails the step loud (the six gate steps below share that
+      # posture; the two that look up a referenced issue's state count an unreadable one as open).
       - name: Anchor gate — agent-ready issues (deterministic)
         shell: pwsh
         run: pwsh -NoProfile -File ouro/bin/Test-AgentReadyAnchors.ps1 -Comment
@@ -193,8 +194,9 @@ jobs:
         run: pwsh -NoProfile -File ouro/bin/Test-IssueLabelInvariants.ps1 -Comment
 
       # A blocked issue's Unblocks-when trigger lives only in its own body -- no diff-driven gate
-      # sees it fire, and interactive triage is the only reader today. Comments on the blocked
-      # issue itself, deduped against what it already said, and never relabels it.
+      # sees it fire, and the interactive readers today are triage and /ouro:compile. Comments on
+      # the blocked issue itself, silent when the newest notice there from the bot or a
+      # ruling approver already says the same, and never relabels it.
       - name: Blocked-trigger check (deterministic)
         shell: pwsh
         run: pwsh -NoProfile -File ouro/bin/Test-BlockedTriggers.ps1 -Comment

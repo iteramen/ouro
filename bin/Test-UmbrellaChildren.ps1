@@ -23,9 +23,10 @@
       every child closed     -- the union of both lists is not empty and every issue in it is
                                  closed.
     There is no descent: a child that is itself a container counts by its own open or closed
-    state and is named as a container in the finding, and no read is made of its own children on
-    the parent's behalf. A child reference that resolves to nothing is unreadable and counts as
-    open.
+    state, and is named as a container in the finding only when it is itself one of the open
+    umbrella or architecture issues this scan read (a closed container child is named as a plain
+    issue); no read is made of its own children on the parent's behalf. A child reference that
+    resolves to nothing is unreadable and counts as open.
 
     With -Comment the gate posts one comment, grouped by container, on the rolling issue named
     by [rolling_issues].drift_audit -- only when there is a finding. No dedupe: like the other

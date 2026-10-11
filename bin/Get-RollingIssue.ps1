@@ -25,9 +25,11 @@
     the title silently posts nowhere the moment a repo renames the issue, and the two
     gates that did this were byte-identical and both wrong.
 
-    Six outcomes, deliberately distinguishable -- the whole defect being fixed here is
+    Seven outcomes, deliberately distinguishable -- the whole defect being fixed here is
     that they used to look alike:
 
+      - no ouro-binding.py beside this script and no -Title -> WARN and return 0, naming -Title
+        (the tree was assembled by hand; there is no safe default title to guess).
       - the repo has no .claude/ouro.toml at all          -> INFO and return 0, without
         calling python: pwsh and git are enough for a repo with no binding. Outside a git
         work tree there is no root to look in, and the read throws.

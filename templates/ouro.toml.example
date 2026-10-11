@@ -29,8 +29,8 @@ review = "adversarial-review"
 landing = "merge-squash"
 
 [models]
-# Optional, like every table below. Absent means each role runs the reading skill's own
-# default -- builder sonnet, builder_trivial sonnet, reviewer opus, verifier opus, weekly
+# Optional, like every table below but [owner]. Absent means each role runs the reading
+# skill's own default -- builder sonnet, builder_trivial sonnet, reviewer opus, verifier opus, weekly
 # sonnet. Values: opus | sonnet | haiku | fable. Table: ouro/docs/binding.md.
 # builder = "sonnet"
 # builder_trivial = "sonnet"
@@ -44,12 +44,12 @@ loop_runs = "Loop runs"
 docs_freshness = "Docs freshness"
 # comments_freshness = "Comments freshness"
 
-# Optional, like every table below. Absent means the docs gate runs on its own defaults, which
-# name no repository. Schema and the regex-vs-prefix distinction: ouro/docs/binding.md.
+# Optional, like every table below but [owner]. Absent means the docs gate runs on its own
+# defaults, which name no repository. Schema and the regex-vs-prefix distinction: ouro/docs/binding.md.
 # Every key but `exclude` is COMMENTED OUT on purpose. An empty list here means
 # EMPTY, not "use the default" -- `extensions = []` disables the backticked-path check
 # outright, `exclude = []` scans node_modules, and `report_only = []` makes every signal
-# block. Uncomment further keys only as this repo needs them.
+# block (S9 never does). Uncomment further keys only as this repo needs them.
 [docs]
 # extensions = [".md", ".rs"]
 # The gate's shipped defaults plus /tests/docs-freshness/fixtures/: Vendor-Ouro.ps1 copies the
@@ -58,11 +58,12 @@ docs_freshness = "Docs freshness"
 exclude = ["node_modules/", "/vendor/", "/_site/", ".claude/", "/tests/docs-freshness/fixtures/"]
 # Uncomment after vendoring (bin/Vendor-Ouro.ps1), and only then: the vendored contract,
 # governance and binding docs cite plugin paths (bin/Get-RollingIssue.ps1,
-# bin/Test-AgentReadyAnchors.ps1, bin/Test-AgentReadyShape.ps1, docs/contract.md,
+# bin/Test-AgentReadyAnchors.ps1, bin/Test-AgentReadyShape.ps1, bin/external-audit.py,
+# bin/apply-manifest.py, bin/forbidden-tokens.py, bin/loop-outcomes.py, docs/contract.md,
 # docs/binding.md, templates/) this repo does not have. suppress_prefixes is a prefix test on
 # every link and backticked path (S1, S2, S3), global to this repo's own docs -- live in a repo
 # that only installs the plugin, it hides real findings under those prefixes.
-# suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "docs/contract.md", "docs/binding.md", "templates/"]
+# suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "bin/external-audit.py", "bin/apply-manifest.py", "bin/forbidden-tokens.py", "bin/loop-outcomes.py", "docs/contract.md", "docs/binding.md", "templates/"]
 # generated_pattern = "api/generated/"
 # html_globs = ["site/*.html"]
 # index_path = "docs/index.md"

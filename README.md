@@ -27,7 +27,7 @@ is signed in, creates the labels on the repository the binding names — the con
 the binding's declared `[labels]` scope, area and type, only the ones missing there and never
 with `--force`, since those are the team's, not the contract's. `-Review` sets
 `ship.review` (`copilot`, `adversarial-review`, `external-audit` or `none`; default
-`adversarial-review`; `external-audit` also needs `-ExternalCli`) and `-Landing` sets
+`adversarial-review`; `external-audit` also needs `-ExternalCli`, and `copilot` also needs `-CopilotBotId`) and `-Landing` sets
 `ship.landing` (`merge-squash`, `rebase-squash`,
 `rebase-merge` or `merge-merge`; default `merge-squash`), each written into a new binding only.
 `-DocsFreshness` also copies the docs-freshness workflow. `-CI` copies the CI gate-loop workflow,
@@ -90,7 +90,7 @@ re-opens.
 | `/ouro:land-batch` | Several reviewed PRs, one validated composition — the composed tree is checked, not each PR; each PR then lands through GitHub's squash-merge, checked against its local squash, or in one push when GitHub cannot reproduce the set. |
 | `/ouro:fuse <N> <N>…` | Build several `agent-ready` issues that share files together: regions by shared files, one brief per region and one commit per issue, review split by file cluster, one PR per region landed through `/ouro:land`. |
 | `/ouro:compile` | Read-only queue planner: runs the footprint analyzer and prints, in chat, which `agent-ready` issues can run at once, which `/ouro:fuse` sets to build together, which rulings hold blocked issues and what ready work their build would collide with, and what an umbrella or area still needs. Writes nothing and runs no work; the owner names what runs. |
-| `/ouro:drift` | LLM audit of doc claims against artifacts. Report-only, append-only ledger. |
+| `/ouro:drift` | LLM audit of doc claims against artifacts. Report-only; the ledger's entries are append-only comments. |
 | `/ouro:seam` | Adversarial review of a contract seam — both sides locally right, the defect in the gap. |
 | `/ouro:review` | Adversarial second reviewer. Light mode for a diff that changes only documentation, skill text, rules or comments; probe format, REJECTED ledger mandatory, for every other diff. |
 | `/ouro:external-audit` | The `ship.review = "external-audit"` reader: a repo-reading, JSON-verdict adversarial review, over a CLI adapter `ship.external_cli` names (`grok`, `claude`, `codex`, `copilot` shipped), capped at two rounds. Diff mode judges a change against a goal; claims mode refutes a plan's factual assertions about the code. |
@@ -104,12 +104,21 @@ The labels: eight states, two modifiers, defined in the contract.
 - `skills/` — the reference implementation of the protocol for Claude Code. Nothing in here
   names a repo.
 - `agents/` — `verifier`, the read-only doc-vs-artifact checker `drift` dispatches.
-- `bin/` — the deterministic gates (`pwsh`), the binding validator (`python3`), label creation,
+- `bin/` — the deterministic gates (`pwsh` and `python3` scripts; the `pwsh` gates are the
+  `bin/Test-*.ps1` scripts, and the `bin/Get-*.ps1` scripts are the target selectors, reports and
+  dot-sourced helpers beside them; `git ls-files bin` lists every script), the binding validator
+  (`ouro-binding.py`), label creation (`New-OuroLabels.ps1`),
   `Install-Ouro.ps1`, which writes a repo's onboarding files, `Invoke-BranchSweep.ps1`, which
   reports, and on request removes, the branches and worktrees whose PR is finished, and
   `Vendor-Ouro.ps1`, which copies the plugin's contents into a repo's tree for a standalone exit.
   `forbidden-tokens.py` is the private-token matcher the scan gate and the applier run (see The
   private token list below).
+  The other `python3` tools: `apply-manifest.py` executes a triage manifest against GitHub from
+  the session that holds the owner's approval; `drift-claims.py` hashes, relocates and encodes
+  the claim evidence for the drift audit; `external-audit.py` runs one external-CLI review round
+  with a JSON verdict; `loop-outcomes.py` reports what became of every `agent-ready` promotion,
+  per weekly cohort; `ouro-version.py` prints the installed plugin's version for a status line;
+  `record-counts.py` lists each count in a PR record that no report traces.
   `Get-FootprintGraph.ps1` reads the file footprint of every open `agent-ready` and `needs-ruling`
   issue and prints which collide, which share a batch (a fuse set of at most five issues, merged
   along the strongest collisions), which can run at once and which ruling's build would collide
@@ -127,8 +136,8 @@ The labels: eight states, two modifiers, defined in the contract.
 - `actions/` — `docs-freshness`, the composite Action a consumer workflow `uses:` at a pinned tag
   to run the docs-freshness gate against its own checkout, and `gates`, the composite Action a
   consumer's CI workflow `uses:` the same way to run its own `[[gate]]` loop.
-- `tests/` — fixture suites for the gates, the installer, the sweep, the vendor script and the
-  manifest applier, and one asserting that every `bin/*.ps1` exposes its own help.
+- `tests/` — fixture suites for the scripts, Actions and workflow templates they drive, and one
+  asserting that every `bin/*.ps1` exposes its own help.
   `changelog-entry/` drives the changelog gate over a scratch repository, one branch per surface.
 - `templates/` — the issue form and its template chooser config, the intake workflow, the
   weekly-pass workflow, the docs-freshness gate workflow, the CI gate-loop workflow, the

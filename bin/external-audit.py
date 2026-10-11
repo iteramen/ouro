@@ -18,17 +18,21 @@ below); an unknown one, or one whose binary is not on PATH, is a round-1 failure
 where that CLI runs and what it may read; the default is the repository root of the current
 working directory (git rev-parse --show-toplevel), not the working directory itself. --model
 defaults to "default", which passes no model flag, so the CLI's own default applies; any other
-value maps to the adapter's own model flag. Claims mode makes no git call, so --cwd may sit above
-several repositories when the claims span more than one.
+value maps to the adapter's own model flag. Claims mode reads no diff, so --cwd may sit above
+several repositories when the claims span more than one. A run that starts the CLI still runs
+git status there (silent outside a repository), and without --cwd the default comes from git
+rev-parse.
 
 Prints the session id (round 1 mints one) and the parsed verdict; the id to pass to --resume next
 round is always the one on the "resume with" line, not necessarily this one. Exits 0 on APPROVE, 2
-on REVISE, 1 on a transport/parse failure, an unknown or missing --cli, a CLI not found on PATH, or
-a CLI found as a .cmd or .bat shim with an argument holding one of &|<>^% (cmd.exe's own syntax;
-refused before it starts), and 3 when an APPROVE carries no evidence that anything was read - no
-critique and an empty files_read. A 3 is a failed round, not a round: re-run it, and do not spend
-the two-round budget on it. Every artifact (prompt, raw stdout, verdict.json) lands under
-%TEMP%/external-audit-<user>/<session>/round-N/ -- never in the repo. Repo-agnostic by design.
+on REVISE, 1 on a transport/parse failure, a usage error, an unknown or missing --cli, --resume
+without --digest (or the reverse), not exactly one of --range and --claims, an empty claim set or an
+empty diff, a CLI not found on PATH, or a CLI found as a .cmd or .bat shim with an argument
+holding one of &|<>^% (cmd.exe's own syntax; refused before it starts), and 3 when an APPROVE
+carries no evidence that anything was read - no critique and an empty files_read. A 3 is a failed
+round, not a round: re-run it, and do not spend the two-round budget on it. Every artifact
+(prompt, raw stdout, verdict.json) lands under %TEMP%/external-audit-<user>/<session>/round-N/ --
+never in the repo. Repo-agnostic by design.
 
 Ported from the owner's prior single-CLI reader; the adapter seam below is what this port adds,
 so a second CLI is a new Adapter subclass, not a rewrite of main().
@@ -159,8 +163,9 @@ def _raise_system_exit(signum: int, frame: object) -> None:
 def _default_cwd() -> str | None:
     """--cwd's default: the repository root of the invocation directory (not the directory
     itself), so a run from a subdirectory still diffs/reads the whole repo. Outside a repo, or
-    with no git on PATH at all (--dry-run and claims mode need neither), this answers nothing
-    and the caller falls back to None -- "here", the old default -- rather than refusing."""
+    with no git on PATH at all (--dry-run needs none; claims mode needs none for its subject),
+    this answers nothing and the caller falls back to None -- "here", the old default -- rather
+    than refusing."""
     if shutil.which("git") is None:
         return None
     return sh("git", "rev-parse", "--show-toplevel").strip() or None
@@ -510,7 +515,8 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     if claims_mode:
-        # No git call: the claims may span several repositories, so --cwd is free to sit above them.
+        # No git call to build the subject: the claims may span several repositories, so --cwd
+        # is free to sit above them.
         subject = Path(args.claims).read_text(encoding="utf-8")
         if not subject.strip():
             print(f"external-audit: empty claim set in {args.claims!r}", file=sys.stderr)

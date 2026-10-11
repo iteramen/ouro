@@ -7,7 +7,7 @@ the same honesty as `execute` refusing an issue without `agent-ready`. `/ouro:in
 exception: with no binding it runs the installer, which writes one; a binding that fails
 validation still makes it refuse.
 
-Three consumers read it — a person, the coding agent, and a deterministic supervisor — so it is
+Three consumers read it — a person, the coding agent, and the deterministic gates — so it is
 typed and validated, not prose. `bin/ouro-binding.py check` (Python 3.11+, stdlib only) fails
 closed on an unknown key. Comments are welcome; they are for the people. In a repo that has a
 binding, the deterministic gates that read it need `python3` 3.11+ on PATH — a Windows dev box
@@ -89,7 +89,8 @@ drift_audit = "Docs drift audit"
 loop_runs = "Loop runs"                  # the loop metrics: Get-LoopMetrics.ps1 and loop-outcomes.py each
                                          # append one comment per run
 docs_freshness = "Docs freshness"        # the deterministic docs sweep's rolling issue
-comments_freshness = "Comments freshness" # the comments-freshness sweep's rolling issue
+comments_freshness = "Comments freshness" # the rolling issue of a comments-freshness sweep the repo
+                                         # runs itself; no ouro script reads it
 
 [docs]                                   # every key optional; an absent table means the docs
                                          # gate runs on its own defaults, which name no repo.
@@ -135,14 +136,18 @@ drift = ["docs/incidents/**"]            # point-in-time paths the drift audit s
 [owner]
 role = "loop owner"                      # the role the contract calls "the owner"
 ruling_approvers = ["BoJl4apa"]          # logins whose comment closes a needs-ruling, and who
-                                         # convert an architecture issue; only these logins' (and
-                                         # the job token's bot's) **Triage** comments are
-                                         # provenance, and bin/loop-outcomes.py counts a **Stop:**,
-                                         # **Triage** or **Checkpoint finding** comment only from
-                                         # them, so list every login that runs /ouro:triage,
+                                         # convert an architecture issue. Every trust decision reads
+                                         # this set beside the job token's bot: the rolling-issue
+                                         # ledgers and the intake and blocked-check markers, the
+                                         # shape gate's **Triage** provenance check, the issue-body
+                                         # edits that stop an execute run, and bin/loop-outcomes.py,
+                                         # which counts a **Stop:**, **Triage** or **Checkpoint
+                                         # finding** comment only from them, and whose Assisted
+                                         # count reads the set without the bot. List every login
+                                         # that edits an agent-ready body or runs /ouro:triage,
                                          # /ouro:execute or /ouro:fuse: a checkpoint finding counts
-                                         # as delivered only from these logins, and a finding from
-                                         # another login repeats the checkpoint run
+                                         # as delivered only from these logins (and the bot's), and
+                                         # a finding from another login repeats the checkpoint run
 ```
 
 ### Choosing `ship.review`
@@ -279,7 +284,8 @@ sees as a directory. The overlay entry is unchecked.
 
 ## Rules the validator enforces
 
-- `schema`, `repo.slug`, `repo.default_branch`, `ship.policy`, `ship.review` are required.
+- `schema`, `repo.slug`, `repo.default_branch`, `ship.policy`, `ship.review` and
+  `owner.ruling_approvers` are required.
 - Unknown tables or keys fail. A typo is a silent misconfiguration otherwise.
 - `ship.review = "none"` forbids `ship.policy = "trivial-merge"` — no reviewer beyond an M's
   `/ouro:review`, no unattended merge.
@@ -318,7 +324,8 @@ sees as a directory. The overlay entry is unchecked.
   `execute`, `land`, `land-batch` and `gates` read. It is checked the same way as `run`: non-empty,
   one command line, and `<ouro>` refused where the copy has no plugin root. Declare it for a gate
   whose `run` wraps the real command for the dev box, like `wsl … bash -lc`, which a CI runner
-  cannot run as written.
+  cannot run as written, or for a gate that another workflow already runs in CI, with a `ci` that
+  only prints a notice saying so.
 - A `[[gate]]` may also declare `paths`, optional: a non-empty list of non-empty strings. `check`
   refuses a value that is not a list, an empty list and an empty or non-string entry, naming the
   gate. Each entry is a git pathspec, matched against the repository-relative paths a pull request
@@ -343,11 +350,16 @@ sees as a directory. The overlay entry is unchecked.
   must be a string reason, and an empty key is rejected — it would match every line of every doc.
   A typo in a `[docs]` key, or in the sub-table's own name, still fails. Because the keys may
   contain dots, `get docs.banned` fetches the whole map; a single free key is not addressable.
-- `index_exempt`, `planning_paths` and `generated_pattern` must **compile as regexes**; an
-  invalid pattern is rejected here rather than thrown by the gate mid-run. All are matched
-  case-insensitively.
-- `report_only` names signals **exactly**: the index checks are `S4a` and `S4b`, and `S4` matches
-  neither. The full set is `S1 S2 S3 S4a S4b S7 S8 S9 S10`.
+- `index_exempt`, `planning_paths` and `generated_pattern` must **compile as regexes**.
+  `check` compiles each with Python's `re`, but the
+  gate matches with .NET, so `check` catches only what Python refuses: Python's named group
+  `(?P<n>x)` and possessive `x++` pass `check` and throw in the gate, and .NET's `(?<n>x)` is
+  refused by `check` though the gate accepts it. Keep a pattern in the syntax both engines accept.
+  All are matched case-insensitively.
+- `report_only` names signals without regard to case: the index checks are `S4a` and `S4b`, and
+  `S4` matches neither. The full set is `S1 S2 S3 S4a S4b S7 S8 S9 S10`. `check` refuses a
+  non-list or a non-string entry but not an unknown name; a name outside the set silently
+  matches nothing.
 - **`index_exempt` and `planning_paths` are regexes; `exclude` and `suppress_prefixes` are not.**
   The two regex lists are matched against the repo-relative path with `-match`; `exclude` is a
   substring test against `"/<relpath>"` and `suppress_prefixes` is a `StartsWith`. Writing a
@@ -365,7 +377,7 @@ sees as a directory. The overlay entry is unchecked.
   required check (`gh pr checks <PR> --required`) as a binding smell: its `run` should name the
   narrow, already-scoped check and leave the full suite to CI.
 - **Protected prefixes are absolute.** `land` and `land-batch` refuse them; `execute` never cuts
-  a branch from one; the supervisor skips any issue whose open PR targets one.
+  a branch from one.
 - **Overlays are read, not obeyed as protocol.** They add repo checklists to a named step; a
   binding cannot remove, reorder, or replace a step.
 - **Nothing in a skill names a repo, a path, a bot id, a workflow, or a script.** If it does,

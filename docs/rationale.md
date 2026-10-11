@@ -56,15 +56,7 @@ The audit is not trusted either. Its report is current state too, and it ages fr
 was read — the commit, and any live state its verifiers probed: re-verifying 195 findings from a
 ten-day-old report, before acting on any of them, found 13 already resolved, in exactly the docs
 someone had cleaned in between, and two wrong when written. So consuming a report is a
-verification pass, not a work list:
-
-- re-locate each claim by its content, never by the line number it cites;
-- read the artifact the finding cites, not just the doc, and re-probe any live state it cites;
-- give each finding a verdict — still valid, moved, self-resolved, or wrong when written
-  (misread, or wrong on the merits);
-- say in the PR which findings were declined and why, or a reviewer cannot tell a finding that
-  was handled from one that was quietly dropped; one declined as wrong when written also goes on
-  the audit's ledger, or the next run reports it again.
+verification pass, not a work list; the steps are in [the drift skill](../skills/drift/SKILL.md).
 
 **4. History — what happened, kept out of the way.** Docs are current state, git is history:
 no progress logs, no "previously X"; commits, PR bodies and issue threads hold how-we-got-here;
@@ -86,13 +78,14 @@ Neither session writes to the tracker: each reads text anyone can write, so its 
 permission rule cannot constrain what a session writes after its literal ending, so the bound on
 what it writes is the program that reads what the session wrote, not a narrower grant, and the bound
 on what it reads is a setting that confines its file tools to the workspace, with a Bash grant of
-three git reads; of those, `git rev-parse --resolve-git-dir` prints the target line of an outside
-file in gitfile form, and `git ls-files -X` tests a whole-line guess against one. An
-unattended `/ouro:execute` run's only label move is the demotion §9 enumerates. The pass's
-LLM never picks its own workload — a deterministic script selects targets — and never
-promotes, closes, edits code, or merges. Promotion, `trivial`, and every merge are
-human-approved. A zero-turn session is a failure, not a pass: the silent skip is the
-failure mode this design refuses.
+three git reads for the drift audit (`git ls-files`, `git cat-file`, `git rev-parse`) and
+`git rev-parse` alone for the intake; `git rev-parse --resolve-git-dir` prints the target line of
+an outside file in gitfile form, and the drift audit's `git ls-files -X` tests a whole-line guess
+against one. An unattended `/ouro:execute` run's only label move is the demotion §9 enumerates.
+The pass's LLM never picks its own workload — a deterministic script selects targets — and never
+promotes, closes, edits code, or merges. Promotion, `trivial`, and every merge are human-approved.
+A zero-turn session is a failure, not a pass: the silent skip is the failure mode this design
+refuses.
 
 ## The bottleneck the design creates
 

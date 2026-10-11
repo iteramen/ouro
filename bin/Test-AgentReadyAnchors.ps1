@@ -24,7 +24,7 @@
     as a comment on each affected issue; -Demote additionally swaps agent-ready ->
     needs-ruling (off by default while the gate earns trust).
 
-    A body with paths but no greppable quoted fragments gets an INFO line, not a finding -
+    A body with no checked quoted fragment and no path at all gets an INFO line, not a finding -
     older issues predate the anchor convention; triage refreshes them over time.
 
     -Doc runs the same two checks over documentation files that use the anchor convention

@@ -19,6 +19,9 @@
 .PARAMETER Comment
     Post findings as a comment on the rolling issue named by [rolling_issues].drift_audit,
     reopening that issue first if it is closed.
+.PARAMETER RollingIssueTitle
+    Post to this rolling-issue title instead of resolving [rolling_issues].drift_audit (for
+    tests, or to run without a binding).
 #>
 param(
     [string]$VariablesJson = '',

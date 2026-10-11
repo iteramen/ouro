@@ -18,8 +18,8 @@
 
     The tail is read from a real run's output: the workflows line ends at the scripts directory
     with no parenthetical, a line of its own points the vendored skills' <ouro>/bin paths at that
-    same directory, and the suppress_prefixes line holds the three bin paths the vendored binding
-    doc cites beside its three present entries and no bare bin prefix, and one line names the two
+    same directory, and the suppress_prefixes line holds the bin paths the vendored docs cite
+    beside its three present entries and no bare bin prefix, and one line names the two
     .gitignore entries the installer appends. A plugin root holding none
     of the ten files a run reaches by name warns once per missing file and plans the rest at
     exit 0.
@@ -380,11 +380,11 @@ try {
     $list = [regex]::Match(($suppress -join "`n"), 'suppress_prefixes = \[([^\]]*)\]').Groups[1].Value
     $values = @([regex]::Matches($list, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
     foreach ($prefix in 'bin/Get-RollingIssue.ps1', 'bin/Test-AgentReadyAnchors.ps1', 'bin/Test-AgentReadyShape.ps1',
-        'docs/contract.md', 'docs/binding.md', 'templates/') {
+        'bin/external-audit.py', 'bin/apply-manifest.py', 'bin/forbidden-tokens.py', 'bin/loop-outcomes.py', 'docs/contract.md', 'docs/binding.md', 'templates/') {
         Assert-Equal $true ($values -ccontains $prefix) "holding $prefix"
     }
     Assert-Equal $false ($values -ccontains 'bin/') 'and no bare bin/ prefix, which would hide the scripts directory whole'
-    Assert-Equal 6 $values.Count 'and nothing else'
+    Assert-Equal 10 $values.Count 'and nothing else'
     Assert-Equal $true (($suppress -join "`n") -clike '*docs/ouro-binding.md*') 'and its reason names the third vendored doc'
     # The installer's two .gitignore entries, which a vendored tree that never runs it lacks: without
     # the overlay's, the docs gate reports the vendored binding doc's own citations of that path.

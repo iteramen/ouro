@@ -4,7 +4,8 @@
 Usage:
     python3 ouro-binding.py check [path]
         Validate against docs/binding.md. Exit 0 and print "ok", or exit 1 listing every
-        violation. Default path: .claude/ouro.toml under the working directory's git root.
+        violation. A `warning:` line about repo.checkout may print before either.
+        Default path: .claude/ouro.toml under the working directory's git root.
     python3 ouro-binding.py get <dotted.key> [path]
         Print one value: strings raw, everything else as JSON. List entries by index
         (gate.0.run). Exit 1 if the key is absent, except that an absent ship.sync or
@@ -114,7 +115,8 @@ SCHEMA = {
 REQUIRED = ("schema", "repo.slug", "repo.default_branch", "ship.policy", "ship.review", "owner.ruling_approvers")
 
 # Lists whose entries are regexes, not literals. An invalid pattern is a configuration error the
-# consumer can fix here; left to the gate it is an unhandled throw mid-run.
+# consumer can fix here; `check` catches only what Python's re refuses, and the gate matches
+# with .NET.
 REGEX_KEYS = {"docs": ("index_exempt", "planning_paths", "generated_pattern")}
 
 
@@ -153,7 +155,7 @@ def _check_table(name, table, spec, errors):
             errors.append(f"{name}.{key}: an empty key matches every line; give the substring")
         elif key in REGEX_KEYS.get(name, ()):
             # A scalar regex key is checked too: generated_pattern is a single pattern, and an
-            # invalid one used to pass `check` and then throw from inside the gate.
+            # invalid one is refused here like a list entry.
             for pat in (value if isinstance(value, list) else [value]):
                 try:
                     re.compile(pat)

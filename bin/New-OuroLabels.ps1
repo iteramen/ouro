@@ -11,8 +11,10 @@
     The GitHub repo as owner/name.
 .PARAMETER BindingPath
     Path to a `.claude/ouro.toml` whose [labels] scope, area and type declare labels to create
-    alongside the contract's. Omitted, or unreadable, or declaring none: only the contract's
-    labels are created.
+    alongside the contract's. Omitted, a missing file, a key the binding does not declare or
+    declares empty, or no ouro-binding.py beside this script: only the contract's labels are
+    created. A file that ouro-binding.py get cannot read stops the run with an error, after the
+    contract's labels are created.
 .EXAMPLE
     pwsh -File <ouro>/bin/New-OuroLabels.ps1 -Repo owner/name -WhatIf
 #>

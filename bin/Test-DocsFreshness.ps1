@@ -31,6 +31,14 @@
 
     Which signals block is -ReportOnlySignals. It defaults to S9, S3 and S10 so a
     repo can adopt the gate before it is clean, then narrow the list as it ratchets.
+    S9 never blocks whatever the list holds: only Sweep mode computes it, and only Gate
+    mode exits 1.
+
+    A `.docs-freshness-ignore` file at the repo root excuses individual findings. A
+    `file: <path>` entry exempts one doc, and a bare token suppresses a repo-wide
+    suffix, both for S1 on markdown, S2 and S3. A `file:` entry that resolves to no in-scope doc,
+    or to several, stops the run. Each entry must carry a reason: see docs-governance
+    section 8, Suppressions.
 .PARAMETER Mode
     Gate (default) exits 1 on a blocking finding. Sweep adds S9 and exits 0 on any.
     A failed binding read stops either before the scan.
@@ -561,8 +569,8 @@ function Get-AnchorFindings {
 # findings in every other repo.
 
 # Two entry kinds, told apart by a `file:` prefix -- see .docs-freshness-ignore's header.
-# `file: <path>` is a whole-document S1/S2/S3 exemption; a bare token is a repo-wide
-# suffix suppression honored by Test-Suppressed (S1/S2/S3). One list conflating both
+# `file: <path>` is a whole-document S1 (markdown)/S2/S3 exemption; a bare token is a repo-wide
+# suffix suppression honored by Test-Suppressed (S1 (markdown)/S2/S3). One list conflating both
 # meant a doc-exemption entry also silently suppressed any unrelated token elsewhere
 # in the repo that happened to share its suffix.
 #

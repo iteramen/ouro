@@ -310,7 +310,7 @@ Write-Host '  - .claude/ouro.toml stays; skills read it from the repo root eithe
 # The values are printed, not cited: the example binding is not in the copy plan, and the line
 # above tells the human to remove the plugin entries it lives under.
 Write-Host '  - .claude/ouro.toml [docs]: exclude = ["node_modules/", "/vendor/", "/_site/", ".claude/", "/tests/docs-freshness/fixtures/"] as the whole list (a declared list replaces the default) -- the vendored fixture tree is deliberately broken'
-Write-Host '  - .claude/ouro.toml [docs]: suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "docs/contract.md", "docs/binding.md", "templates/"] -- the vendored docs/ouro-contract.md, docs/ouro-docs-governance.md and docs/ouro-binding.md cite plugin paths'
+Write-Host '  - .claude/ouro.toml [docs]: suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "bin/external-audit.py", "bin/apply-manifest.py", "bin/forbidden-tokens.py", "bin/loop-outcomes.py", "docs/contract.md", "docs/binding.md", "templates/"] -- the vendored docs/ouro-contract.md, docs/ouro-docs-governance.md and docs/ouro-binding.md cite plugin paths'
 # The installer appends these two on every onboarding, and vendoring does not run it, so a tree
 # it never onboarded lacks them. The docs gate honours a committed .gitignore only.
 Write-Host '  - .gitignore: .claude/worktrees/ and .claude/ouro.local.toml, committed, the two entries Install-Ouro.ps1 appends (docs/ouro-binding.md, what a consumer must gitignore) -- without the overlay''s, the docs gate reports the vendored binding doc''s citations of that path'
