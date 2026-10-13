@@ -259,10 +259,11 @@ off there. No binding is absent too. For a binding naming the repository the run
 failed `check` or any other value counts as `"required"`. A binding read that fails counts as
 `"required"` whatever the binding names. The key is repository policy, so the machine-local overlay
 below cannot set it. It does not reach `bin/forbidden-tokens.py`'s `scan` gate, which stays
-fail-closed whatever a binding declares, since it guards the plugin's own text; the `hook` mode,
-with no list, follows this same rule, read from the binding at the session's working directory
-and the repository its `repo.slug` names, a binding that fails `check` blocking as `"required"`
-does.
+fail-closed whatever a binding declares, since it guards the plugin's own text; the `hook` mode
+follows this same rule, read from the binding at the session's working directory and the
+repository its `repo.slug` names: `"off"` passes a hit too, a call naming another repository
+with `-R` reads as if the key were absent, no key follows the visibility only with no list, and a
+binding that fails `check` blocks as `"required"` does.
 
 ## The machine-local overlay — `.claude/ouro.local.toml`
 

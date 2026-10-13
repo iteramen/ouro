@@ -7,7 +7,7 @@
     "hook_event_name": "PreToolUse",
     "tool_name": "PowerShell",
     "tool_input": {
-      "command": "$hostname = \"rig-01\"; $Host.UI.RawUI.WindowTitle = \"x\"; Get-ChildItem $HOME | Measure-Object",
+      "command": "$hostname = \"box-01\"; $Host.UI.RawUI.WindowTitle = \"x\"; Get-ChildItem $HOME | Measure-Object",
       "description": "a recorded call"
     }
   }

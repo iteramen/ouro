@@ -15,6 +15,25 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v0.11.4] - 2026-10-13
+
+- `bin/forbidden-tokens.py hook` honours a binding's `ship.forbidden_check = "off"` on a machine
+  with a list too: a hit in the command text or a body file passes there, as it does for the
+  applier; no key and `"required"` keep the hit, a call naming another repository with `-R` or
+  `--repo` reads as if the key were absent, and the binding is read only when a hit or a missing
+  list would block. A private repository whose own text carries the list's values could not
+  commit from a machine holding the list.
+
+## [v0.11.3] - 2026-10-13
+
+- `release/skill-growth.py`, this repository's own report-only gate on every pull request that
+  touches `skills/` or `agents/`: against the merge base with `origin/master`, one line per `*.md`
+  there whose line count changed, a `SKILL.md` counted by its body and every other file whole,
+  each group's total, the overall net and, where `claude` is on PATH, the on-invoke token estimate
+  of the checkout for each skill or agent a changed file belongs to, or that the table has no row
+  for it. Its fixture suite, `tests/skill-growth/`, skips in a vendored tree, which has no
+  `release/`.
+
 ## [v0.11.2] - 2026-10-13
 
 - The v0.7.0 entry names this repository's own gates workflow in prose, not by a path: the

@@ -159,6 +159,14 @@ The labels: eight states, two modifiers, defined in the contract.
   to .github/workflows/; `Vendor-Ouro.ps1` copies the documentation rule into .claude/rules/. The
   weekly-pass workflow is copied by hand to .github/workflows/, the
   destination its header names.
+- `release/` — this repository's own release tools, which the consumer release leaves out:
+  `export.py`, which moves one tagged version to the consumer release channel;
+  `Test-TrackerReferences.ps1`, the check that no shipped file cites this tracker's numbers;
+  `no-binding-gate.py`, which runs the No binding workflow's step here; and two measurements of
+  the skill and agent text, `shared-runs.py`, the runs of twelve words two files share, and
+  `skill-growth.py`, the net change in lines of each `SKILL.md` body and each other `*.md` under
+  `skills/` and `agents/` on a branch against its base, with the on-invoke token estimate where
+  `claude` is on PATH.
 
 ## The private token list
 
@@ -187,8 +195,9 @@ or `INTERNAL` repository skips the check with one line, any other answer refuses
 as the weekly pass's CI step does, and the run prints a line saying so. A binding may turn the
 applier's check off with `ship.forbidden_check = "off"`, for a private repository whose own issues
 carry such values (docs/binding.md, "The forbidden-token check"); the run then prints a line saying
-so. That key does not reach `scan`, which stays fail-closed; `hook`, with no list, follows the
-applier's rule (below).
+so. That key does not reach `scan`, which stays fail-closed; `hook` follows the applier's rule
+(below): `"off"` passes a hit too, a call naming another repository with `-R` reads as if the
+key were absent, and no key follows the visibility only with no list.
 
 `python3 bin/forbidden-tokens.py hook` is an example Claude Code `PreToolUse` hook for the commands
 a session runs directly. On a `Bash` or `PowerShell` call it acts on `gh issue create` (or `new`),

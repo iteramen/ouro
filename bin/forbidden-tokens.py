@@ -68,15 +68,19 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         a file name and blocks. A hook whose `python3` cannot be found exits 127, and one that
         exceeds Claude Code's hook timeout does not block either: Claude Code treats both as
         non-blocking, so a missing interpreter or a stall disables the hook.
-        With no list the hook follows the manifest applier's rule: the call passes when the
-        binding at the event's `cwd`, read through the ouro-binding.py beside this script,
-        passes `check` and declares `ship.forbidden_check = "off"`, or passes `check` and declares
-        no key (or there is no binding) and
-        `gh repo view` of the binding's `repo.slug`, else the working directory's repository,
-        reports PRIVATE or INTERNAL; a binding that fails `check`, `"required"`, PUBLIC, no `gh`
-        on PATH, and a read that fails or runs past the reads' shared budget of READ_BUDGET (6)
-        seconds, inside the hook's own 10-second timeout, block. A `-R` on the command naming
-        another repository is not read: the list, where one exists, guards that.
+        The hook follows the manifest applier's rule on the binding at the event's `cwd`, read
+        through the ouro-binding.py beside this script: a binding that passes `check` and declares
+        `ship.forbidden_check = "off"` passes the call, a hit on the list included; with no list,
+        the call also passes when the binding passes `check` and declares no key (or there is no
+        binding) and `gh repo view` of the binding's `repo.slug`, else the working directory's
+        repository, reports PRIVATE or INTERNAL. A binding that fails `check`, `"required"`, PUBLIC,
+        no `gh` on PATH, and a read that fails or runs past the reads' shared budget of READ_BUDGET
+        (6) seconds, inside the hook's own 10-second timeout, block; the binding is read only when
+        a hit or a missing list would. `"off"` counts only when the command names no other
+        repository with `-R` or `--repo`, as the applier honours the key only for the repository
+        the run posts to: a call naming another is read as if the key were absent, and with no list
+        the visibility read is that repository's. Every `-R` or `--repo` in the command text
+        counts, one inside a quoted body included: the hook cannot tell a flag from quoted text.
 --selftest  Runs each mode against a temporary list and repository.
 
 A hit is reported by path, line number and entry number, never by the matched text or the entry,
@@ -228,21 +232,17 @@ class Block(Exception):
     pass
 
 
-READ_BUDGET = 6  # seconds for every read of publishes_unchecked together: the registered hook's own timeout is 10
+READ_BUDGET = 6  # seconds for every binding and visibility read of one event together: the registered hook's own timeout is 10
 
 
-def publishes_unchecked(cwd):
-    """True when a publishing call from cwd may run with no list: the binding there passes `check`
-    and turns the check off, or passes `check` and declares no key (or there is no binding) and
-    `gh repo view` reports the repository (the binding's repo.slug, else the working directory's)
-    PRIVATE or INTERNAL, the applier's rule. A binding that fails `check`, a read that fails or
-    runs past the shared READ_BUDGET, no `gh` on PATH, and any other value or key are False."""
-    binding = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ouro-binding.py")
+def reader(cwd):
+    """A bounded reader of child output for one event: every read shares READ_BUDGET from the
+    first call; output goes to files, not pipes (a stalled read is killed at the deadline, and a
+    pipe a grandchild still holds would make the wait outlive the kill); a read past the deadline,
+    timed out or failing to start answers (None, "")."""
     deadline = time.monotonic() + READ_BUDGET
 
     def read(args):
-        # output goes to files, not pipes: a stalled read is killed at the deadline, and a pipe a
-        # grandchild still holds would make the wait outlive the kill
         left = deadline - time.monotonic()
         if left <= 0:
             return None, ""
@@ -254,25 +254,81 @@ def publishes_unchecked(cwd):
             stream = out if r.returncode == 0 else err
             stream.seek(0)
             return r.returncode, stream.read().decode("utf-8", "replace")
+    return read
 
+
+def policy(read):
+    """The binding's say on the check, read through the ouro-binding.py beside this script as the
+    applier's forbidden_policy reads it: ("off", []) for a binding that passes `check` and declares
+    `ship.forbidden_check = "off"` and ("absent", [slug]) for one that passes and declares no key,
+    the slug being the binding's repo.slug; ("absent", []) with no binding; ("required", []) for
+    every other case: `"required"`, a binding that fails `check`, a read that fails or runs past
+    the budget."""
+    binding = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ouro-binding.py")
     tool = [sys.executable, binding]
     code, text = read(tool + ["check"])
     if code is None:
-        return False
-    slug = []
+        return "required", []
     if code != 0:
-        if not text.startswith(("error: no binding at", "error: not inside a git work tree")):
-            return False
+        if text.startswith(("error: no binding at", "error: not inside a git work tree")):
+            return "absent", []
+        return "required", []
+    code, text = read(tool + ["get", "ship.forbidden_check"])
+    if code == 0:
+        if text.rstrip("\r\n") != "off":
+            return "required", []
+        kind = "off"
+    elif code is None or not text.startswith("error: no such key: ship.forbidden_check"):
+        return "required", []
     else:
-        code, text = read(tool + ["get", "ship.forbidden_check"])
-        if code == 0:
-            return text.rstrip("\r\n") == "off"
-        if code is None or not text.startswith("error: no such key: ship.forbidden_check"):
-            return False
-        code, text = read(tool + ["get", "repo.slug"])
-        if code != 0 or not text.strip():
-            return False
-        slug = [text.rstrip("\r\n")]
+        kind = "absent"
+    code, text = read(tool + ["get", "repo.slug"])
+    if code != 0 or not text.strip():
+        return "required", []
+    return kind, [text.rstrip("\r\n")]
+
+
+TARGET = re.compile(r"(?:^|\s)(?:-R|--repo)(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|(\S+))")
+
+
+def named_repos(command):
+    """Every repository a -R or --repo anywhere on the command names, as owner/repo in lower case
+    (a host prefix dropped), a quoted body's mention included: the hook cannot tell a flag from
+    quoted text, so each one counts and the check fails closed."""
+    return ["/".join((m[1] or m[2] or m[3]).strip("/").split("/")[-2:]).lower() for m in TARGET.finditer(command)]
+
+
+def other_repo(command, slug):
+    """The first repository the command names that is not the binding's, or None."""
+    return next((t for t in named_repos(command) if t != slug.lower()), None)
+
+
+def check_off(cwd, command):
+    """True when the binding at cwd turns the check off for the repository the command posts to: a
+    hit passes, as it does for the applier."""
+    kind, slug = policy(reader(cwd))
+    return kind == "off" and other_repo(command, slug[0]) is None
+
+
+def publishes_unchecked(cwd, command):
+    """True when a publishing call from cwd may run with no list: the binding there turns the check
+    off for the repository the command posts to, or the key is absent (no binding, no key, or
+    `"off"` for another repository than the command names) and `gh repo view` reports the
+    repository (the one named on the command, else the binding's repo.slug, else the working
+    directory's) PRIVATE or INTERNAL, the applier's rule. `"required"`, a binding that fails
+    `check`, a read that fails or runs past the shared READ_BUDGET, no `gh` on PATH, and any other
+    visibility are False."""
+    read = reader(cwd)
+    kind, slug = policy(read)
+    target = other_repo(command, slug[0]) if slug else next(iter(named_repos(command)), None)
+    if kind == "off":
+        if target is None:
+            return True
+        kind = "absent"
+    if kind != "absent":
+        return False
+    if target is not None:
+        slug = [target]
     gh = shutil.which("gh")
     if gh is None:
         return False
@@ -281,6 +337,7 @@ def publishes_unchecked(cwd):
         return code == 0 and json.loads(text)["visibility"] in ("PRIVATE", "INTERNAL")
     except (ValueError, KeyError, TypeError):
         return False
+
 
 def hook_check(payload):
     """Reasons to block the event, or an empty list. Raises Block for a cause that is not a hit."""
@@ -297,7 +354,7 @@ def hook_check(payload):
     try:
         entries = load_list()
     except MissingList as e:
-        if publishes_unchecked(payload.get("cwd") or os.getcwd()):
+        if publishes_unchecked(payload.get("cwd") or os.getcwd(), command):
             return []
         raise Block(f"missing list: {e}")
     reasons = []
@@ -325,6 +382,8 @@ def hook_check(payload):
             reasons.append(f"the file {flag} names, line {lineno}: entry {n}")
         for n in wrapped(text, entries, found):
             reasons.append(f"the file {flag} names: entry {n}, across a line break")
+    if reasons and check_off(payload.get("cwd") or os.getcwd(), command):
+        return []
     return reasons
 
 
@@ -800,6 +859,38 @@ def selftest():
         bound = mkrepo("bound-broken", {".claude/ouro.toml": toml.replace('review = "none"', 'review = "bogus"').encode()})
         code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev("gh pr merge 1 --body fine", cwd=bound))
         assert code == 2 and "missing list" in e, (code, o, e)
+        # with a list, the binding's "off" passes a hit, as it does for the applier; no key and
+        # "required" keep it, and no key reads no visibility (no gh on PATH changes nothing)
+        for key, want in (("off", 0), ("required", 2)):
+            bound = mkrepo("listed-" + key, {".claude/ouro.toml": toml.replace('review = "none"\n', f'review = "none"\nforbidden_check = "{key}"\n').encode()})
+            code, o, e = run(["hook"], vis("fail", hl), stdin=ev("gh pr merge 1 --body secretword", cwd=bound))
+            assert code == want and "Traceback" not in e and (want == 0 or "entry 1" in e), (key, code, o, e)
+            code, o, e = run(["hook"], vis("fail", hl), stdin=ev("git commit -F note.md", cwd=mkrepo("listed-file-" + key, {"note.md": b"acme corp\n"})))
+            assert code == 2 and "entry 2" in e, (key, code, o, e)  # no binding: the list governs
+        bound = mkrepo("listed-absent", {".claude/ouro.toml": toml.encode()})
+        code, o, e = run(["hook"], {**hl, "PATH": nogh}, stdin=ev("gh pr merge 1 --body secretword", cwd=bound))
+        assert code == 2 and "entry 1" in e, (code, o, e)
+        bound = mkrepo("listed-broken", {".claude/ouro.toml": toml.replace('review = "none"', 'review = "bogus"\nforbidden_check = "off"').encode()})
+        code, o, e = run(["hook"], vis("fail", hl), stdin=ev("gh pr merge 1 --body secretword", cwd=bound))
+        assert code == 2 and "entry 1" in e, (code, o, e)
+        bound = mkrepo("listed-off-file", {".claude/ouro.toml": toml.replace('review = "none"\n', 'review = "none"\nforbidden_check = "off"\n').encode(), "note.md": b"acme corp\n"})
+        allowed("git commit -F note.md", env=vis("fail", hl), cwd=bound)
+        # "off" is the binding's repository's: a call naming another with -R or --repo keeps the hit,
+        # the binding's own in any case or spelling passes it; with no list the other is read
+        for command in ("gh -R other/repo pr merge 1 --body secretword", "gh pr merge 1 --repo=other/repo --body secretword",
+                        'gh pr merge 1 --repo "github.com/other/repo" --body secretword'):
+            code, o, e = run(["hook"], vis("fail", hl), stdin=ev(command, cwd=bound))
+            assert code == 2 and "entry 1" in e, (command, code, o, e)
+            blocked(command, "missing list", env=vis("PUBLIC"), cwd=bound)
+            allowed(command, env=vis("PRIVATE"), cwd=bound)
+        for command in ("gh -R O/R pr merge 1 --body secretword", "gh pr merge 1 --repo=https://github.com/o/r/ --body secretword"):
+            allowed(command, env=vis("fail", hl), cwd=bound)
+            allowed(command, env=vis("fail"), cwd=bound)
+        # a -R inside a quoted body counts too: the hook cannot tell it from the flag, so it fails closed
+        command = "gh pr create --body '-R o/r' --repo other/repo --title secretword"
+        code, o, e = run(["hook"], vis("fail", hl), stdin=ev(command, cwd=bound))
+        assert code == 2 and "entry 1" in e, (code, o, e)
+        blocked(command, "missing list", env=vis("PUBLIC"), cwd=bound)
         # a read that stalls blocks inside the hook's own timeout
         started = time.monotonic()
         # from the temp root, which outlives the orphaned stand-in that holds its directory
