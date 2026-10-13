@@ -94,6 +94,7 @@ entry as the list of point-in-time paths to skip. `[models].verifier` (default `
    the identifiers it renamed. Skipping this step is the single biggest yield loss.
 4. **Spawn one `verifier` subagent per group** (the plugin's `agents/verifier.md`) —
    parallel, fresh context each; groups must never share conclusions. Give each agent:
+   the Files section of `skills/execute/references/dispatch-rules.md`, read in at dispatch time,
    its doc list, the likely ground-truth artifacts (CI workflows, scripts, project and
    solution files, the code the docs describe), the step-3 delta, the point-in-time
    exclusions, and the turn budget the plugin's `docs/contract.md` sets — reaching it, the

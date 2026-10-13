@@ -15,6 +15,8 @@
       a sh fence is extracted like a bash one             | fixtures/hazards' sh block
       any other git remote form is not a finding          | fixtures/notfindings' add, rm, --help
       a rule matches with its case                        | fixtures/notfindings' $gh_repo
+      a dollar-digit or $ARGUMENTS is a finding           | fixtures/hazards' awk and $ARGUMENTS lines
+      a -v variable field and ${1} are not findings       | fixtures/notfindings' awk -v and ${1} lines
       gh repo set-default is a finding                    | fixtures/hazards' set-default line
       GH_REPO is a finding                                | fixtures/hazards' `$GH_REPO` line
       a >60-char placeholder with an apostrophe parses     | fixtures/notfindings' MERGE_ANSWER
@@ -22,6 +24,7 @@
       a quoted gh subcommand is not a finding              | fixtures/notfindings' "gh pr ready"
       a toml block is never extracted                      | fixtures/notfindings' GH_REPO toml
       agents/*.md is scanned the same as a SKILL.md         | fixtures/notfindings' agents doc
+      skills/*/references/*.md is scanned the same         | fixtures/notfindings' references doc
       no bash on PATH: parse skips, greps still decide exit | the no-bash case below
 #>
 $ErrorActionPreference = 'Stop'
@@ -70,12 +73,12 @@ Assert-Equal 1 $hazards.Code 'the planted findings exit 1'
 $bashRan = $hazards.Out -notmatch 'INFO: no bash that runs is on PATH'
 if ($IsLinux) { Assert-Equal $true $bashRan 'on Linux the parse half runs: a bash is always there to run it' }
 if ($bashRan) {
-    Assert-Match '12 command-block finding\(s\):' $hazards.Out 'exactly the twelve planted findings are reported'
+    Assert-Match '14 command-block finding\(s\):' $hazards.Out 'exactly the fourteen planted findings are reported'
     Assert-Match  'skills/bad/SKILL\.md:13: parse --' $hazards.Out 'the unterminated if is a parse finding at its own line'
 }
 else {
     Write-Host '  skip: no bash that runs is on PATH here, so the parse rows cannot run (the Linux legs run them)'
-    Assert-Match '11 command-block finding\(s\):' $hazards.Out 'without bash, exactly the eleven grep findings are reported'
+    Assert-Match '13 command-block finding\(s\):' $hazards.Out 'without bash, exactly the thirteen grep findings are reported'
 }
 Assert-Match  'skills/bad/SKILL\.md:19: git-remote --' $hazards.Out 'bare `git remote` is a finding'
 Assert-Match  'skills/bad/SKILL\.md:20: gh-set-default --' $hazards.Out '`gh repo set-default` is a finding'
@@ -88,13 +91,15 @@ Assert-Match  'skills/bad/SKILL\.md:26: git-remote --' $hazards.Out 'a bare `git
 Assert-Match  'skills/bad/SKILL\.md:27: git-remote --' $hazards.Out 'a bare `git remote` inside backticks is a finding'
 Assert-Match  'skills/bad/SKILL\.md:28: git-remote --' $hazards.Out 'a bare `git remote 2>&1` is a finding'
 Assert-Match  'skills/bad/SKILL\.md:34: gh-repo-env --' $hazards.Out 'a `GH_REPO` line in an sh fence is a finding'
+Assert-Match  'skills/bad/SKILL\.md:40: skill-argument --' $hazards.Out 'an awk line with a dollar-digit field is a finding'
+Assert-Match  'skills/bad/SKILL\.md:41: skill-argument --' $hazards.Out 'a `$ARGUMENTS` line is a finding'
 
 # --- fixtures/notfindings: acceptance 3's non-findings, plus the write-subcommand control -------
 $clean = Invoke-Gate (Join-Path $Fixtures 'notfindings')
 Assert-Equal 0 $clean.Code 'none of the planted controls is a finding'
-Assert-Match '5 command block\(s\) in 2 document\(s\): no findings\.' $clean.Out `
-    'both the SKILL.md and the agents/*.md doc are scanned, with no findings'
-foreach ($rule in @('parse --', 'git-remote --', 'gh-set-default --', 'gh-repo-env --')) {
+Assert-Match '7 command block\(s\) in 3 document\(s\): no findings\.' $clean.Out `
+    'the SKILL.md, its references/*.md and the agents/*.md doc are scanned, with no findings'
+foreach ($rule in @('parse --', 'git-remote --', 'gh-set-default --', 'gh-repo-env --', 'skill-argument --')) {
     Assert-NoMatch ([regex]::Escape($rule)) $clean.Out "no `"$rule`" finding fires on any control case"
 }
 
@@ -116,7 +121,7 @@ finally {
 }
 Assert-Equal 1 $noBash.Code 'the grep findings alone still exit 1'
 Assert-Match   'INFO: no bash that runs is on PATH' $noBash.Out 'the parse half reports it is skipped'
-Assert-Match   '11 command-block finding\(s\):' $noBash.Out 'the parse finding is gone, the eleven grep findings remain'
+Assert-Match   '13 command-block finding\(s\):' $noBash.Out 'the parse finding is gone, the thirteen grep findings remain'
 Assert-NoMatch 'parse --' $noBash.Out 'the unterminated if is not reported when bash never ran'
 Assert-Match   'git-remote --' $noBash.Out 'and the grep half still ran'
 Assert-Equal   $beforeCount (@(Get-Command bash -All -ErrorAction SilentlyContinue).Count) `

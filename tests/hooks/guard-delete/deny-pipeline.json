@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "pipeline",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "PowerShell",
+    "tool_input": {
+      "command": "Get-ChildItem \"$env:TEMP\\probe-*\" | Remove-Item -Recurse -Force",
+      "description": "a recorded call"
+    }
+  }
+}

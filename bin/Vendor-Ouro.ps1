@@ -12,7 +12,8 @@
       bin/external-audit.py -> <repo>/<ScriptsDir>/       (the external-audit skill runs it)
       bin/drift-claims.py -> <repo>/<ScriptsDir>/         (hashes the drift audit's claim evidence)
       bin/forbidden-tokens.py -> <repo>/<ScriptsDir>/     (checks text against the private token list)
-      bin/record-counts.py -> <repo>/<ScriptsDir>/        (the review skill runs it over a PR record)
+      (not copied: bin/loop-outcomes.py ships with the plugin, and the weekly pass runs it from its
+       own plugin checkout; bin/ouro-version.py reads the user-scope plugin install, never a copy)
       tests/*           -> <repo>/<ScriptsDir>/tests/     (the fixture suites find the scripts there)
       docs/contract.md  -> <repo>/docs/ouro-contract.md
       docs/docs-governance.md         -> <repo>/docs/ouro-docs-governance.md
@@ -231,12 +232,6 @@ if (Test-Path -LiteralPath $tokenMatcher) {
     $plan += , @($tokenMatcher, (Join-Path $ScriptsDir 'forbidden-tokens.py'))
 }
 else { Write-Warning "bin/forbidden-tokens.py not found in the plugin at $Plugin - skipped" }
-# The review skill runs it by name over a PR record, and its suite is vendored with it.
-$countTracer = Join-Path $Plugin 'bin/record-counts.py'
-if (Test-Path -LiteralPath $countTracer) {
-    $plan += , @($countTracer, (Join-Path $ScriptsDir 'record-counts.py'))
-}
-else { Write-Warning "bin/record-counts.py not found in the plugin at $Plugin - skipped" }
 $testsRoot = Join-Path $Plugin 'tests'
 $testFiles = @(if ([System.IO.Directory]::Exists($testsRoot)) { Get-PluginFiles $testsRoot })
 foreach ($f in $testFiles) {
@@ -302,7 +297,7 @@ foreach ($s in $skipped) { Write-Host "  - $s" }
 # Shown with forward slashes on every platform: Windows keeps native separators in $ScriptsDir,
 # and these lines read as a relative path a consumer pastes, not a native one.
 $ScriptsDirShown = $ScriptsDir -replace '\\', '/'
-Write-Host "  - .github/workflows/*: point every ouro/bin/ path at $ScriptsDirShown/"
+Write-Host "  - .github/workflows/*: point every ouro/bin/ path at $ScriptsDirShown/, except the weekly pass's ouro/bin/loop-outcomes.py step, which keeps its plugin checkout"
 Write-Host "  - .claude/skills/*: point every <ouro>/bin/ path at $ScriptsDirShown/"
 Write-Host "  - .github/workflows/*: actions/ is not vendored, so a step that uses: the ouro docs-freshness Action becomes an actions/setup-python step (python-version '3.12': reading [docs] needs python3 3.11+, and an older python3 fails the gate with the floor message) and a pwsh step running $ScriptsDirShown/Test-DocsFreshness.ps1 -Mode Gate"
 Write-Host '  - .claude/settings.json (or settings.local.json): remove the ouro marketplace and plugin entries'

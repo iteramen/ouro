@@ -4,12 +4,13 @@ description: Runs every [[gate]] from the binding of the repo checked out by the
 inputs:
   select-by-paths:
     description: >-
-      Select a pull request's gates by the paths its diff touches. Any value but the string true
-      leaves selection off, and false is the default: every gate runs. On, for a pull_request
-      event, a gate with no paths runs, and a gate with paths (docs/binding.md) runs only when the
-      diff against the pull request's base touches one of them; a changed path no gate claims
-      selects nothing more. Every gate runs on any other event, when the diff cannot be read, and
-      when it touches .claude/ouro.toml, .github/workflows/ or actions/gates/.
+      Select the gates by the paths the diff touches. Any value but the string true leaves
+      selection off, and false is the default: every gate runs. On, a gate with no paths runs, and
+      a gate with paths (docs/binding.md) runs only when the diff touches one of them: a pull
+      request's diff against its base, a push's against the tip the branch had before it. A
+      changed path no gate claims selects nothing more. Every gate runs on any other event, on a
+      push with no previous tip (a new branch, a tag), when the diff cannot be read, and when it
+      touches .github/workflows/ or actions/gates/.
     required: false
     default: 'false'
   setup-python:
@@ -98,6 +99,7 @@ runs:
         if ('${{ inputs.select-by-paths }}' -eq 'true') {
           $eventName = '${{ github.event_name }}'
           $base = '${{ github.event.pull_request.base.sha }}'
+          $before = '${{ github.event.before }}'
           $touches = {
             param([string[]]$Spec)
             # Started directly, by the path pwsh's lookup resolves: pwsh on Linux and macOS globs a
@@ -119,12 +121,19 @@ runs:
             $code -eq 1
           }
           $why = $null
-          if ($eventName -ne 'pull_request') { $why = "the event is $eventName, not pull_request" }
-          elseif (-not $base) { $why = 'the pull request has no base commit' }
-          else {
+          if ($eventName -eq 'pull_request') {
+            if (-not $base) { $why = 'the pull request has no base commit' }
+          }
+          elseif ($eventName -eq 'push') {
+            # A new branch or a tag pushes a before of all zeros: nothing to diff against.
+            if (-not $before -or $before -match '^0+$') { $why = 'the push has no previous tip' }
+            else { $base = $before }
+          }
+          else { $why = "the event is $eventName, not pull_request or push" }
+          if (-not $why) {
             try {
-              if (& $touches '.claude/ouro.toml', '.github/workflows/', 'actions/gates/') {
-                $why = 'the diff touches .claude/ouro.toml, .github/workflows/ or actions/gates/'
+              if (& $touches '.github/workflows/', 'actions/gates/') {
+                $why = 'the diff touches .github/workflows/ or actions/gates/'
               }
               else {
                 $toRun = @()

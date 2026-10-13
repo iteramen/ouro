@@ -326,8 +326,19 @@ def targets_file(steps, numbers=None):
     return path
 
 
+HANG = PARENT_TMP / "hang.py"  # a gh stand-in that outlives any bound
+HANG.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+VIS_FAILS = object()  # a visibility read that exits nonzero, its stdout naming a private repository
+VIS_HANGS = object()  # one that runs until the bound the applier hands it ends it
+
+
+def vis(value):
+    """What `gh repo view --json visibility` prints for a repository of that visibility."""
+    return json.dumps({"visibility": value})
+
+
 def apply(steps, files, dry=False, labels=(), repo=None, unattended=False, named_repo="owner/name", forbidden=False,
-          binding=None, overlay=None, targets=None):
+          binding=None, overlay=None, targets=None, visibility=""):
     """Run main() over a manifest with gh and time.sleep stubbed; return the dir, the gh commands,
     the output and the refusal (None when it ran through; any other exception main() raises is the
     refusal too, as its type and message). A create answers issue 101, each labels read the next
@@ -335,15 +346,16 @@ def apply(steps, files, dry=False, labels=(), repo=None, unattended=False, named
     call instead. With unattended, main() runs as `--unattended` does. named_repo is the value the
     command line spells after --repo, and None is a command line carrying no --repo at all, REPO
     standing for what the binding answered. Every run passes --no-forbidden-check, as CI holds no
-    list; with forbidden, the check runs. With forbidden or a binding, the run is from a fresh git
-    repository of its own holding binding as its .claude/ouro.toml and overlay as its
+    list; with forbidden, the check runs, and the visibility read it may make prints visibility
+    (VIS_FAILS and VIS_HANGS stand for a failed and a hung read; the empty default is no JSON).
+    With forbidden or a binding, the run is from a fresh git repository of its own holding binding as its .claude/ouro.toml and overlay as its
     ouro.local.toml, or no binding when binding is None. Unattended, the run is handed a targets
     file naming the issues the steps name; targets is a list of numbers, or the file's text, or
     False for no --targets at all."""
     d, calls, out, refused, labels = manifest_dir(steps, files), [], io.StringIO(), None, list(labels)
     slept.clear()
     saved_cwd = os.getcwd()
-    if forbidden or binding is not None:  # check_off reads the working directory's binding, never the suite's own
+    if forbidden or binding is not None:  # forbidden_policy reads the working directory's binding, never the suite's own
         home = pathlib.Path(tempfile.mkdtemp(prefix="binding-", dir=PARENT_TMP))
         applier.subprocess.run(["git", "init", "-q"], cwd=home, capture_output=True, check=True)
         for name, text in ((binding is not None and "ouro.toml", binding), (overlay is not None and "ouro.local.toml", overlay)):
@@ -354,6 +366,14 @@ def apply(steps, files, dry=False, labels=(), repo=None, unattended=False, named
 
     def run(cmd, **k):
         calls.append(cmd)
+        if cmd[:3] == ["gh", "repo", "view"]:  # the applier's visibility read, answered whatever the Repo is
+            if visibility is VIS_HANGS:
+                return real_run([sys.executable, str(HANG)], timeout=k.get("timeout"))
+            if visibility is VIS_FAILS:  # a nonzero exit whose stdout still reads PRIVATE
+                failed = Failed("HTTP 502")
+                failed.stdout = vis("PRIVATE")
+                return failed
+            return Ran(visibility)
         if repo:
             return repo.run(cmd)
         if "create" in cmd:
@@ -2808,8 +2828,10 @@ def token_list(text, raw_path=None):
             os.environ["OURO_FORBIDDEN_TOKENS"] = saved
 
 
-def refused_clean(refused, calls, out, planted=PLANT):
-    return refused is not None and calls == [] and planted not in (refused or "") and planted not in out
+def refused_clean(refused, calls, out, planted=PLANT, view=None):
+    """A refusal that leaks no planted text and made no gh call, but the visibility read of the repository view names."""
+    reads = [] if view is None else [["gh", "repo", "view", view, "--json", "visibility"]]
+    return refused is not None and calls == reads and planted not in (refused or "") and planted not in out
 
 
 CLEAN_STEPS = [{"op": "comment", "issue": 42, "body_file": "c.md"}]
@@ -2850,8 +2872,8 @@ with token_list("zebra fish\n"):
 
 with token_list(None):
     d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True)
-    check("an unset list refuses, naming the missing list, even in a dry run",
-          refused_clean(refused, calls, out) and "missing list" in refused and "OURO_FORBIDDEN_TOKENS is not set" in refused)
+    check("an unset list refuses, naming the missing list, even in a dry run: the visibility read its only gh call",
+          refused_clean(refused, calls, out, view="owner/name") and "missing list" in refused and "OURO_FORBIDDEN_TOKENS is not set" in refused)
 
 with token_list(PLANT, raw_path=str(PARENT_TMP / "no-such-list.txt")):
     d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True)
@@ -2905,9 +2927,8 @@ finally:
     applier.MATCHER = saved_matcher
 
 # ship.forbidden_check = "off" in the working directory's binding skips the check and the lookup,
-# printing one line, for the repository that binding names only. Absent, "required", any other
-# spelling, an overlay setting it or a binding naming another repository leaves it on: with no
-# list each of those is the missing-list refusal.
+# printing one line, for the repository that binding names only. "required", any other spelling or
+# an overlay setting it leaves it on: with no list each of those is the missing-list refusal.
 def with_ship(extra):
     return ('schema = 1\n[repo]\nslug = "owner/name"\ndefault_branch = "main"\n'
             f'[ship]\npolicy = "stop-at-pr"\nreview = "adversarial-review"\n{extra}'
@@ -2943,18 +2964,18 @@ with token_list(None):
         d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
                                        binding=text, overlay=over)
         check(f"{what} leaves the check on: no list refuses, as with no binding",
-              refused_clean(refused, calls, out) and "missing list" in refused and "skipped" not in out)
+              refused_clean(refused, calls, out, view="owner/name" if text == with_ship("") and over is None else None) and "missing list" in refused and "skipped" not in out)
 
     d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True, binding=OFF,
                                    named_repo="other/name")
     check("an \"off\" binding naming another repository leaves the check on for --repo's, and says so",
-          refused_clean(refused, calls, out) and "missing list" in refused and "skipped" not in out
+          refused_clean(refused, calls, out, view="other/name") and "missing list" in refused and "skipped" not in out
           and "not other/name" in out)
 
     d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
                                    binding=OFF.replace("owner/name", "owner/nake"), named_repo="owner/na\u212ae")
     check("the slugs are compared in ASCII case only: a KELVIN SIGN is not a k",
-          refused_clean(refused, calls, out) and "missing list" in refused and "skipped" not in out)
+          refused_clean(refused, calls, out, view="owner/naKe") and "missing list" in refused and "skipped" not in out)
 
     d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
                                    binding=OFF.replace('slug = "owner/name"\n', ""))
@@ -2967,14 +2988,122 @@ with token_list(None):
     check('an "off" binding that fails ouro-binding.py check leaves the check on, with no skip line',
           refused_clean(refused, calls, out) and "missing list" in refused and "skipped" not in out)
 
+# Key absent, no list: the check follows the visibility of the repository the run posts to, read by
+# one `gh repo view` call that is the run's first gh call and made in a dry run too. Only PRIVATE
+# and INTERNAL, spelled so, skip; a failed or hung read, or any other output, keeps the check.
+SKIP_PRIVATE = "forbidden-token check skipped: no list, private repository"
+VIEW = ["gh", "repo", "view", "owner/name", "--json", "visibility"]
+with token_list(None):
+    for value in ("PRIVATE", "INTERNAL"):
+        for dry in (False, True):
+            d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=dry,
+                                           visibility=vis(value))
+            check(f"key absent, no list, a {value} target runs{' in a dry run' if dry else ''}, printing the skip line once, "
+                  "the visibility read the first gh call",
+                  refused is None and out.count("forbidden-token check skipped") == 1 and SKIP_PRIVATE in out
+                  and calls[0] == VIEW and (len(calls) == 1 if dry else len(calls) > 1))
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, visibility=vis("PUBLIC"))
+    check("key absent, no list, a PUBLIC target refuses naming the missing list, the visibility read its only gh call",
+          refused_clean(refused, calls, out, view="owner/name") and "missing list" in refused and "skipped" not in out)
+
+    for what, answer in (("a failed read", VIS_FAILS), ("an empty stdout", ""), ("a non-JSON stdout", "PRIVATE"),
+                         ("JSON with no visibility key", "{}"), ("JSON that is not an object", '["PRIVATE"]'),
+                         ("a null visibility", vis(None)), ("a lower-case value", vis("private")),
+                         ("a capitalised value", vis("Private")), ("a value with a newline after it", vis("PRIVATE\n")),
+                         ("a value with a space before it", vis(" PRIVATE")), ("an unknown value", vis("SECRET"))):
+        d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, visibility=answer)
+        check(f"key absent, no list, {what} keeps the check: the missing list refuses, the read its only gh call",
+              refused_clean(refused, calls, out, view="owner/name") and "missing list" in refused and "skipped" not in out)
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, visibility=vis("PRIVATE") + "\n")
+    check("a visibility read with a newline after the JSON still skips", refused is None and SKIP_PRIVATE in out)
+
+    # an empty list variable is no list, as the matcher reads it
+    saved_env = os.environ.get("OURO_FORBIDDEN_TOKENS")
+    os.environ["OURO_FORBIDDEN_TOKENS"] = ""
+    try:
+        d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
+                                       visibility=vis("PRIVATE"))
+    finally:
+        os.environ.pop("OURO_FORBIDDEN_TOKENS", None)
+        if saved_env is not None:
+            os.environ["OURO_FORBIDDEN_TOKENS"] = saved_env
+    check("an empty OURO_FORBIDDEN_TOKENS is no list: a private target skips", refused is None and SKIP_PRIVATE in out)
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
+                                   binding=with_ship(""), named_repo="OWNER/name", visibility=vis("PRIVATE"))
+    check("the repository read is the one the run posts to: --repo, in the case the command line spells",
+          refused is None and calls == [["gh", "repo", "view", "OWNER/name", "--json", "visibility"]]
+          and SKIP_PRIVATE in out)
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
+                                   binding=with_ship("").replace("owner/name", "other/name"), visibility=vis("PRIVATE"))
+    check("a binding naming another repository leaves the key absent: a private target skips",
+          refused is None and SKIP_PRIVATE in out and calls == [VIEW])
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
+                                   binding=with_ship('forbidden_check = "required"\n').replace("owner/name", "other/name"),
+                                   visibility=vis("PRIVATE"))
+    check('a "required" binding naming another repository is absent for this run: a private target skips',
+          refused is None and SKIP_PRIVATE in out and calls == [VIEW] and "covers" not in out)
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
+                                   binding=OFF.replace("owner/name", "other/name"), visibility=vis("PRIVATE"))
+    check('an "off" binding naming another repository is absent for this run: the private target skips, and the line is true',
+          refused is None and SKIP_PRIVATE in out and "does not turn the forbidden-token check off here" in out
+          and calls == [VIEW])
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
+                                   binding=with_ship('forbidden_check = "required"\n'), visibility=vis("PRIVATE"))
+    check('"required", no list, a private target refuses naming the missing list, with no visibility read',
+          refused_clean(refused, calls, out) and "missing list" in refused and "skipped" not in out)
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True, binding=OFF,
+                                   visibility=vis("PRIVATE"))
+    check('"off" makes no visibility read: its own skip line, and no gh call in a dry run',
+          refused is None and SKIP_BY_BINDING in out and SKIP_PRIVATE not in out and calls == [])
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, dry=True, visibility=vis("PRIVATE"))
+    check("--no-forbidden-check makes no visibility read", refused is None and calls == [] and SKIP_PRIVATE not in out)
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True,
+                                   binding='[repo]\nslug = "owner/name"\n', visibility=vis("PRIVATE"))
+    check("a binding that fails ouro-binding.py check counts as required: no visibility read, the missing list refuses",
+          refused_clean(refused, calls, out) and "missing list" in refused and "skipped" not in out)
+
+    outside, saved_cwd, saved_repo = pathlib.Path(tempfile.mkdtemp(prefix="no-git-", dir=PARENT_TMP)), os.getcwd(), applier.REPO
+    try:
+        os.chdir(outside)
+        applier.REPO = "owner/name"
+        policy = applier.forbidden_policy()
+    finally:
+        os.chdir(saved_cwd)
+        applier.REPO = saved_repo
+    check("a working directory outside any git work tree holds no binding: the key is absent", policy == "absent")
+
+with token_list(PLANT):
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": f"A {PLANT} here.\n"}, forbidden=True, visibility=vis("PRIVATE"))
+    check("key absent, a list set, a private target and a planted hit refuses with no visibility read",
+          refused_clean(refused, calls, out) and "step 1 c.md:1: entry 1" in refused)
+
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True, visibility=vis("PRIVATE"))
+    check("key absent, a list set, a private target and clean text runs the check, with no visibility read",
+          refused is None and "skipped" not in out and calls == [])
+
+# A list that is set but unusable refuses whatever the visibility, and the read is not made.
+with token_list(PLANT, raw_path=str(PARENT_TMP / "no-such-list.txt")):
+    d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, visibility=vis("PRIVATE"))
+    check("a list that is set but cannot be read refuses on a private target, with no visibility read",
+          refused_clean(refused, calls, out) and "cannot be read" in refused)
+
+
 # A helper that hangs: the binding read is a failed read, which keeps the check; the matcher call
 # refuses. HELPER_TIMEOUT is lowered so each row ends within a few seconds.
-hang = PARENT_TMP / "hang.py"
-hang.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
 saved_helpers = (applier.BINDING, applier.MATCHER, applier.HELPER_TIMEOUT)
 try:
     applier.HELPER_TIMEOUT = 2
-    applier.BINDING = hang
+    applier.BINDING = HANG
     with token_list(None):
         t0 = time.monotonic()
         d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, dry=True, binding=OFF)
@@ -2982,13 +3111,26 @@ try:
     check(f"a binding read that hangs keeps the check, ending within the bound ({elapsed:.1f}s)",
           refused_clean(refused, calls, out) and "missing list" in refused and "skipped" not in out and elapsed < 15)
     applier.BINDING = saved_helpers[0]
-    applier.MATCHER = hang
+    applier.MATCHER = HANG
     with token_list(PLANT):
         t0 = time.monotonic()
         d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True)
         elapsed = time.monotonic() - t0
     check(f"a matcher call that hangs refuses with nothing applied, within the bound ({elapsed:.1f}s)",
           refused_clean(refused, calls, out) and "timed out after 2 s" in refused and elapsed < 15)
+    applier.MATCHER = saved_helpers[1]
+    with token_list(None):
+        t0 = time.monotonic()
+        d, calls, out, refused = apply(CLEAN_STEPS, {"c.md": "Clean.\n"}, forbidden=True, visibility=VIS_HANGS)
+        elapsed = time.monotonic() - t0
+    conds = {"refused_clean": refused_clean(refused, calls, out, view="owner/name"),
+             "missing list": "missing list" in (refused or ""), "no skipped": "skipped" not in out,
+             "within 15 s": elapsed < 15}
+    failed = [k for k, v in conds.items() if not v]
+    if failed:  # a CI-only failure is otherwise just this row's label: name the condition and what the run saw
+        print(f"  detail: failed {failed}; refused={refused!r}; out={out!r}; calls={calls!r}")
+    check(f"key absent, no list, a visibility read that hangs refuses, ending within the bound ({elapsed:.1f}s)",
+          not failed)
 finally:
     applier.BINDING, applier.MATCHER, applier.HELPER_TIMEOUT = saved_helpers
 

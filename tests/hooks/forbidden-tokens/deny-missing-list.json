@@ -1,0 +1,13 @@
+{
+  "decision": "deny",
+  "reason": "missing list",
+  "env": { "OURO_FORBIDDEN_TOKENS": null },
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${TEMP}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": { "command": "git commit -m \"docs: tidy the install notes\"", "description": "Commit the docs change" }
+  }
+}

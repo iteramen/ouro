@@ -256,9 +256,9 @@ jobs:
       # This report is the rolling issue's BODY, rewritten every run -- the opposite choice from
       # the ledger below, and for the opposite reason: a docs-rot report is current state, so
       # last week's is noise, while the audit ledger is history and must not be overwritable.
-      # The blocking-signal sentence is GENERATED from the gate's own exported signal set minus
-      # the repo's report-only list. Never hand-written: the prose this replaces drifted into
-      # calling a blocking signal report-only, and no reader could tell.
+      # The blocking-signal sentence is GENERATED from the gate's own exported signal set. Never
+      # hand-written: the prose this replaces drifted into calling a blocking signal report-only,
+      # and no reader could tell.
       - name: Write the docs-freshness report to its rolling issue
         shell: pwsh
         run: |

@@ -58,7 +58,8 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         Exit 2 blocks it, and Claude Code shows stderr to the session as the reason: a hit
         (`command text line <l>: entry <n>`, `command text: entry <n>, across a line break`,
         `the file <flag> names, line <l>: entry <n>`, or `the file <flag> names: entry <n>,
-        across a line break`), a missing list, a body file it cannot read, a body it cannot see,
+        across a line break`), a missing list where the working directory's repository may not
+        publish without one (below), a body file it cannot read, a body it cannot see,
         a payload it cannot parse, or any error of its own. Any other nonzero exit would let the
         call run, so this mode has none. It does not see `gh api`, nor a value expanded at run
         time. A body file is read from the session's working directory before the command runs,
@@ -67,6 +68,15 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         a file name and blocks. A hook whose `python3` cannot be found exits 127, and one that
         exceeds Claude Code's hook timeout does not block either: Claude Code treats both as
         non-blocking, so a missing interpreter or a stall disables the hook.
+        With no list the hook follows the manifest applier's rule: the call passes when the
+        binding at the event's `cwd`, read through the ouro-binding.py beside this script,
+        passes `check` and declares `ship.forbidden_check = "off"`, or passes `check` and declares
+        no key (or there is no binding) and
+        `gh repo view` of the binding's `repo.slug`, else the working directory's repository,
+        reports PRIVATE or INTERNAL; a binding that fails `check`, `"required"`, PUBLIC, no `gh`
+        on PATH, and a read that fails or runs past the reads' shared budget of READ_BUDGET (6)
+        seconds, inside the hook's own 10-second timeout, block. A `-R` on the command naming
+        another repository is not read: the list, where one exists, guards that.
 --selftest  Runs each mode against a temporary list and repository.
 
 A hit is reported by path, line number and entry number, never by the matched text or the entry,
@@ -79,8 +89,11 @@ import os
 import posixpath
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 VAR = "OURO_FORBIDDEN_TOKENS"
 SCAN_DIRS = ("skills", "agents", "templates", "docs")
@@ -215,6 +228,60 @@ class Block(Exception):
     pass
 
 
+READ_BUDGET = 6  # seconds for every read of publishes_unchecked together: the registered hook's own timeout is 10
+
+
+def publishes_unchecked(cwd):
+    """True when a publishing call from cwd may run with no list: the binding there passes `check`
+    and turns the check off, or passes `check` and declares no key (or there is no binding) and
+    `gh repo view` reports the repository (the binding's repo.slug, else the working directory's)
+    PRIVATE or INTERNAL, the applier's rule. A binding that fails `check`, a read that fails or
+    runs past the shared READ_BUDGET, no `gh` on PATH, and any other value or key are False."""
+    binding = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ouro-binding.py")
+    deadline = time.monotonic() + READ_BUDGET
+
+    def read(args):
+        # output goes to files, not pipes: a stalled read is killed at the deadline, and a pipe a
+        # grandchild still holds would make the wait outlive the kill
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None, ""
+        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            try:
+                r = subprocess.run(args, stdout=out, stderr=err, timeout=left, cwd=cwd)
+            except (subprocess.TimeoutExpired, OSError):
+                return None, ""
+            stream = out if r.returncode == 0 else err
+            stream.seek(0)
+            return r.returncode, stream.read().decode("utf-8", "replace")
+
+    tool = [sys.executable, binding]
+    code, text = read(tool + ["check"])
+    if code is None:
+        return False
+    slug = []
+    if code != 0:
+        if not text.startswith(("error: no binding at", "error: not inside a git work tree")):
+            return False
+    else:
+        code, text = read(tool + ["get", "ship.forbidden_check"])
+        if code == 0:
+            return text.rstrip("\r\n") == "off"
+        if code is None or not text.startswith("error: no such key: ship.forbidden_check"):
+            return False
+        code, text = read(tool + ["get", "repo.slug"])
+        if code != 0 or not text.strip():
+            return False
+        slug = [text.rstrip("\r\n")]
+    gh = shutil.which("gh")
+    if gh is None:
+        return False
+    code, text = read([gh, "repo", "view", *slug, "--json", "visibility"])
+    try:
+        return code == 0 and json.loads(text)["visibility"] in ("PRIVATE", "INTERNAL")
+    except (ValueError, KeyError, TypeError):
+        return False
+
 def hook_check(payload):
     """Reasons to block the event, or an empty list. Raises Block for a cause that is not a hit."""
     if not isinstance(payload, dict) or not isinstance(payload.get("tool_name"), str):
@@ -230,6 +297,8 @@ def hook_check(payload):
     try:
         entries = load_list()
     except MissingList as e:
+        if publishes_unchecked(payload.get("cwd") or os.getcwd()):
+            return []
         raise Block(f"missing list: {e}")
     reasons = []
     found = hits(command, entries)
@@ -689,12 +758,53 @@ def selftest():
                         "gh " + "--aa=" + "x" * 100000, "git " + "x " * 30 + "x" * 100000,
                         "gh " + "-" * 100000):
             run(["hook"], hl, stdin=ev(hostile), timeout=2)
-        # a missing list blocks a publishing command and no other
+        # a missing list blocks a publishing command and no other, unless the working directory's
+        # repository may publish without one: the applier's rule, over a gh stand-in on PATH
+        stubs = os.path.join(tmp, "stubs")
+        os.makedirs(stubs)
+        with open(os.path.join(stubs, "gh"), "w", encoding="utf-8", newline="\n") as f:
+            f.write('#!/bin/sh\n[ "$STUB_VIS" = slow ] && sleep 20\n[ "$STUB_VIS" = fail ] && exit 1\n'
+                    'printf \'{"visibility":"%s"}\' "$STUB_VIS"\n')
+        os.chmod(os.path.join(stubs, "gh"), 0o755)
+        with open(os.path.join(stubs, "gh.cmd"), "w", encoding="utf-8", newline="\r\n") as f:
+            f.write('@echo off\nif "%STUB_VIS%"=="slow" ping -n 21 127.0.0.1 >nul\nif "%STUB_VIS%"=="fail" exit /b 1\n'
+                    'echo {"visibility":"%STUB_VIS%"}\n')
+
+        def vis(value, env=None):
+            return {**(env or {}), "PATH": stubs + os.pathsep + os.environ.get("PATH", ""), "STUB_VIS": value}
+
         for env, cause in (({}, VAR + " is not set"), ({VAR: os.path.join(tmp, "nope.txt")}, "cannot be read"),
                            (bad, "line 3 of the file"), (empty, "holds no entry")):
-            blocked("gh pr merge 1 --body fine", cause, env=env)
-            blocked("gh pr merge 1 --body fine", "blocked: missing list: ", env=env)
-            blocked("git commit -m fine", "missing list: ", env=env, tool="PowerShell")
+            blocked("gh pr merge 1 --body fine", cause, env=vis("fail", env))
+            blocked("gh pr merge 1 --body fine", "blocked: missing list: ", env=vis("fail", env))
+            blocked("git commit -m fine", "missing list: ", env=vis("fail", env), tool="PowerShell")
+        for value in ("PUBLIC", "nonsense", "fail"):
+            blocked("gh pr merge 1 --body fine", "missing list", env=vis(value))
+        for value in ("PRIVATE", "INTERNAL"):
+            allowed("gh pr merge 1 --body fine", env=vis(value))
+            allowed("git commit -m fine", env=vis(value), tool="PowerShell")
+        nogh = os.path.join(tmp, "nogh")
+        os.makedirs(nogh)
+        blocked("gh pr merge 1 --body fine", "missing list", env={**vis("PRIVATE"), "PATH": nogh})  # no gh resolves
+        # the binding at cwd decides first: required blocks a private repository, off passes a failed read
+        toml = ('schema = 1\n\n[repo]\nslug = "o/r"\ndefault_branch = "master"\n\n[ship]\npolicy = "stop-at-pr"\n'
+                'review = "none"\n\n[owner]\nruling_approvers = ["o"]\n')
+        for key, value, want in (("required", "PRIVATE", 2), ("off", "fail", 0)):
+            bound = mkrepo("bound-" + key, {".claude/ouro.toml": toml.replace('review = "none"\n', f'review = "none"\nforbidden_check = "{key}"\n').encode()})
+            code, o, e = run(["hook"], vis(value), stdin=ev("gh pr merge 1 --body fine", cwd=bound))
+            assert code == want and "Traceback" not in e, (key, value, code, o, e)
+        bound = mkrepo("bound-absent", {".claude/ouro.toml": toml.encode()})
+        assert run(["hook"], vis("PRIVATE"), stdin=ev("gh pr merge 1 --body fine", cwd=bound))[0] == 0
+        assert run(["hook"], vis("PUBLIC"), stdin=ev("gh pr merge 1 --body fine", cwd=bound))[0] == 2
+        # a binding that fails check blocks as required does, whatever gh says
+        bound = mkrepo("bound-broken", {".claude/ouro.toml": toml.replace('review = "none"', 'review = "bogus"').encode()})
+        code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev("gh pr merge 1 --body fine", cwd=bound))
+        assert code == 2 and "missing list" in e, (code, o, e)
+        # a read that stalls blocks inside the hook's own timeout
+        started = time.monotonic()
+        # from the temp root, which outlives the orphaned stand-in that holds its directory
+        code, o, e = run(["hook"], vis("slow"), stdin=ev("gh pr merge 1 --body fine", cwd=tempfile.gettempdir()), timeout=30)
+        assert code == 2 and "missing list" in e and time.monotonic() - started < 9, (code, e, time.monotonic() - started)
         # a payload the hook cannot parse
         for raw in (b"", b"not json", b"[]", b"null", b"{}", b'{"tool_name": 5}', b"\xff\xfe",
                     b'{"tool_name": "Bash"}', b'{"tool_name": "Bash", "tool_input": []}',

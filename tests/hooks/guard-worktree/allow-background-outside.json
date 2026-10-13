@@ -1,0 +1,15 @@
+{
+  "decision": "allow",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "sleep 5",
+      "description": "a recorded call",
+      "run_in_background": true
+    }
+  }
+}

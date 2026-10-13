@@ -1,0 +1,17 @@
+{
+  "decision": "allow",
+  "env": {
+    "CLAUDE_SCRATCHPAD_DIR": "${FIXTURES}/scratch"
+  },
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}/scratch",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git clean -fdx",
+      "description": "a recorded call"
+    }
+  }
+}

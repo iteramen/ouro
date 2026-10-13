@@ -20,6 +20,11 @@ file-addressed output resumes losslessly where an in-context one is lost. A brie
 reviewer also states the turn budget the plugin's `docs/contract.md` sets, and tells it, on
 reaching it, to stop and return what it has, naming what it did not finish.
 
+- [Phase 1 — contract soundness](#phase-1--contract-soundness)
+- [Phase 2 — one side vs the contract](#phase-2--one-side-vs-the-contract-instantiate-once-per-side)
+- [Phase 3 — adversarial cross-reference](#phase-3--adversarial-cross-reference)
+- [Re-sweep brief](#re-sweep-brief-iterate-until-dry-rounds)
+
 ---
 
 ## Phase 1 — contract soundness

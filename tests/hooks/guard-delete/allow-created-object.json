@@ -1,0 +1,14 @@
+{
+  "decision": "allow",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "PowerShell",
+    "tool_input": {
+      "command": "$d = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ([guid]::NewGuid())); try { 'x' } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force }",
+      "description": "a recorded call"
+    }
+  }
+}

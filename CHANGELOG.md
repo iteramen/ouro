@@ -15,6 +15,249 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v0.11.2] - 2026-10-13
+
+- The v0.7.0 entry names this repository's own gates workflow in prose, not by a path: the
+  export excludes that workflow, and the public tree's docs gate read the path as dead.
+
+## [v0.11.1] - 2026-10-13
+
+- `hooks/guard-delete.py` reads `CLAUDE_SCRATCHPAD_DIR` alone as the scratch directory when it is
+  set, as its docstring said; it had unioned it with `TMPDIR`, `TEMP` and `TMP`, so on Windows,
+  where `TEMP` is always set, a repository under the temporary directory read as scratch and a
+  worktree delete there passed the location check. `.docs-freshness-ignore` leaves the public
+  tree with the old changelog it exempts, so the public docs gate reads no stale entry.
+
+## [v0.11.0] - 2026-10-13
+
+- `bin/forbidden-tokens.py hook` follows the manifest applier's rule on a machine with no list:
+  a publishing call passes when the binding at the working directory declares
+  `ship.forbidden_check = "off"`, or declares no key and `gh repo view` reports the repository
+  PRIVATE or INTERNAL; a binding that fails `check`, `"required"`, PUBLIC, no `gh` and a failed
+  read still block, and every read shares one budget inside the hook's own timeout. A machine
+  with the hook and no list could not commit in a private repository.
+
+- `skills/review/REVIEWER-PROMPT.md` and `skills/seam/references/phase-templates.md`, both over
+  the guide's hundred lines, gain a table of contents.
+
+- `/ouro:execute` reads the binding in a call of its own, before any other command, and a missing
+  binding ends the run there: a first command that chained the binding read with the issue fetch
+  read the tracker before refusing, which the eval's execute case caught in one run of three.
+
+- `/ouro:triage`'s Non-negotiables sit right after its binding step, within what a compaction keeps
+  of the body, and its S-shape paragraph cites contract §4 instead of restating the shape and the
+  mirrored-file exclusion. In `/ouro:triage`, `/ouro:land` and `/ouro:land-batch`, a paragraph that
+  restated a script's own refusals is cut to the rule and the gotcha: the script's STOP line names
+  the refusal, and its help holds the guards.
+
+- Who reviews what, by `[ship].review`, the issue's size and whether `/ouro:fuse` built it, is
+  one table in `docs/binding.md` "Choosing ship.review", with the availability rule for an absent
+  reader beside it; contract §4, `/ouro:execute`, `/ouro:review`, `/ouro:fuse`, `/ouro:triage`,
+  `/ouro:land` and `/ouro:e2e` cite it in place of their own statements, and the review weight
+  by class and size is stated once, in contract §4: `/ouro:review`'s description and the README
+  name the bound as the contract's instead of as a number.
+
+- `/ouro:execute`'s body is under the guide's 500 lines, and the rules a run keeps when a
+  compaction drops the rest of its body, no push to the default branch, no agent as an author,
+  three fix rounds, no silent pick, a read-only checkpoint, sit in a `What a run never does` list
+  near its top. The gate selection by `paths`, the mutation rows and the `trivial` and
+  `checkpoint` variants move to `skills/execute/references/gate-selection.md`, `mutation-rows.md`
+  and `variants.md`, each with a table of contents, as `build-tiers.md` now has; the skill cites
+  each at the step that applies it, and `/ouro:land` step 3 and `/ouro:e2e` cite the references
+  in place of the sections. The `build-tiers.md` bullet that named one host as never a builder
+  goes: the builder is whatever `[models].builder` names.
+
+- **Consumer contract:** `bin/Test-CommandBlocks.ps1` scans every `skills/*/references/*.md`
+  as it scans a `SKILL.md`: its `-Globs` default was `skills/*/SKILL.md` and `agents/*.md`, and
+  is now those two and `skills/*/references/*.md`. A repository whose own skill reference files
+  hold a `bash` or `sh` fence sees them checked from this version; a run line that passes
+  `-Globs` is unchanged.
+
+## [v0.10.0] - 2026-10-12
+
+- No skill or agent file pastes a section of `skills/execute/references/dispatch-rules.md` any
+  more: the session reads the sections a brief needs into it at dispatch time (the execute M brief
+  and the reviewer prompt say which, the build-tiers template and the verifier's brief carry a
+  placeholder for them), and a step that applies one cites it; the file gains a table of contents
+  that names each section's readers. The ceiling on shared twelve-word runs is zero.
+
+- `hooks/guard-commit.py` on `Bash` and `PowerShell`, and `hooks/check-agent-brief.py` on `Agent`,
+  registered in `hooks/hooks.json` with recorded events under `tests/hooks/`: the commit guard
+  refuses an author or committer identity naming an agent, a `git commit`, `git push` or `gh`
+  tracker write chained after `;` or placed in a pipeline, and `gh pr create` without `--draft`;
+  the brief check refuses a dispatch whose prompt names no head, no state-note path or no turn
+  budget, the read-only agent types excepted. **Consumer contract:** the old form is those rules as
+  prose in the contract and the skills; the new form is one more hook on every `Bash` and
+  `PowerShell` call and the first hook on `Agent`, refusing with the reason on stderr; the
+  migration is none beyond rewording a refused command or brief as its reason says.
+
+- `hooks/guard-worktree.py` and `hooks/guard-discard.py`, registered in `hooks/hooks.json`, and
+  the kill guard's provenance check, with recorded events under `tests/hooks/`: the worktree
+  guard refuses `git worktree remove` with a path it cannot read (a variable, a substitution) or
+  that does not resolve, and a background `Bash` call from inside a `.claude/worktrees/` worktree
+  that does not begin with `cd <absolute path outside .claude/worktrees/>`; the discard guard
+  refuses `git checkout -- <path>`, `git checkout .`, `git restore <path>` and its `--worktree`
+  forms on a file changed in the worktree with nothing staged, or on a variable path
+  (`# discard-ok: <why>` overrides); the kill guard refuses a `kill` of a PID whose working
+  directory lies in another session's worktree, read from the process on Linux and macOS
+  (`# pid-ok: <where it was recorded>` overrides). The suite builds a scratch repository or
+  starts a sleeping process for an event that asks for one. `skills/land/SKILL.md` step 11 and
+  `skills/execute/SKILL.md` say a background command from a worktree begins with that `cd`, and
+  the execute skill names mutating on an export as the restore-free alternative.
+  **Consumer contract:** the old form is the prose; the new form is two more hooks and one more
+  refusal a plugin install runs on every `Bash` and `PowerShell` call; the migration is none
+  beyond rewording a refused command as its reason says.
+
+- `hooks/guard-delete.py` and `hooks/guard-stash-kill.py`, registered in `hooks/hooks.json`, with
+  recorded events under `tests/hooks/`: the delete guard refuses a recursive delete by pattern,
+  substitution, pipeline or a variable it cannot see assigned, one aimed at a root, a home
+  directory, `~/.claude`, the checkout or a worktree, one with its errors silenced, an assignment
+  to a PowerShell variable the runtime reserves, and a forced worktree removal or a `git clean` of
+  untracked work outside scratch (`# delete-ok: <why>` overrides those two); the stash-and-kill
+  guard refuses every `git stash` but `push -m`, `apply <sha>`, `list` and `show`, and a process
+  stopped by a pattern, a listing, a name or a group. The sentences each guard enforces leave
+  `skills/execute/references/dispatch-rules.md` (its Scratch and Stash sections, and the Shell
+  section's delete, kill and variable rules) and the briefs that pasted them; `hooks/README.md`
+  keeps each rule beside its guard. **Consumer contract:** the old form is those rules as pasted
+  prose; the new form is two hooks a plugin install runs on every `Bash` and `PowerShell` call,
+  refusing the commands above with the reason on stderr; the migration is none beyond rewording a
+  refused command as its reason says.
+
+- `hooks/hooks.json`, named by `.claude-plugin/plugin.json`: the plugin registers its Claude Code
+  `PreToolUse` guards itself, the forbidden-tokens hook (`bin/forbidden-tokens.py hook`) first,
+  with `hooks/README.md` for what each refuses and how a guard fails, and
+  `tests/hooks/Test-Hooks.Tests.ps1`, which runs every registered hook over the recorded events
+  under `tests/hooks/<hook>/`; `bin/Test-ChangelogEntry.ps1` counts the registry as a surface
+  that takes an entry. **Consumer contract:** the old form is a hook entry the owner writes into
+  `settings.json`, pointing at the marketplace clone; the new form is the plugin's own
+  registration, which a plugin install loads with no settings edit, so the forbidden-tokens hook
+  runs on every `Bash` and `PowerShell` call of a session with the plugin enabled and refuses a
+  publishing call on a machine with no `OURO_FORBIDDEN_TOKENS` list; the migration is to delete
+  the `settings.json` entry, so the hook runs once, and to set the variable on every machine that
+  runs the plugin.
+
+## [v0.9.0] - 2026-10-12
+
+- `bin/Watch-PullRequestChecks.ps1`, `bin/Merge-PullRequest.ps1` and `bin/Remove-LandedBranch.ps1`,
+  with `bin/Get-LandBinding.ps1` they dot-source and a fixture suite each under `tests/land-scripts/`:
+  the deterministic steps of `/ouro:land` — watching the head's checks (step 7, and the batch's
+  default-branch runs for `/ouro:land-batch`), the guarded merge (step 10) and the branch and
+  worktree cleanup (step 11) — run as scripts that read the binding, and the skill names each one's
+  invocation where it held the bash block a session copied, filled and ran. **Consumer contract:**
+  the old form is three bash blocks in `skills/land/SKILL.md` the session runs one call each; the
+  new form is `pwsh <ouro>/bin/Watch-PullRequestChecks.ps1 -Pr <n>` (or `-Sha <sha>...`),
+  `pwsh <ouro>/bin/Merge-PullRequest.ps1 -Pr <n> -Subject <s> -BodyFile <f> -Linear yes|no
+  [-Merge squash|merge]` and `pwsh <ouro>/bin/Remove-LandedBranch.ps1 -Pr <n> [-Branch <b>]`; the
+  migration is none for a plugin install, since the skill names them, and a vendored tree re-runs
+  `bin/Vendor-Ouro.ps1` to receive the four scripts and the suites.
+
+- `bin/Test-LandState.ps1`, `bin/Sync-Branch.ps1` and `bin/Push-Branch.ps1`, with a suite each
+  under `tests/land-scripts/`: `/ouro:land` steps 0 to 4 — the binding read and its refusals, the
+  state and the commits to land, the sync by the binding's answer with the backup and the lease,
+  the plain or leased push — run as scripts, and the skill names each one's invocation where it
+  held six bash blocks. `bin/Get-LandBinding.ps1` gains the worktree readers and the
+  checked-out-branch read. **Consumer contract:** the old form is those six bash blocks in
+  `skills/land/SKILL.md`, filled and run one call each; the new form is
+  `pwsh <ouro>/bin/Test-LandState.ps1`, `pwsh <ouro>/bin/Sync-Branch.ps1 [-Sync merge|rebase]`
+  and `pwsh <ouro>/bin/Push-Branch.ps1 [-Lease <sha>|none]`; the migration is none for a plugin
+  install, and a vendored tree re-runs `bin/Vendor-Ouro.ps1` to receive the scripts and the suites.
+
+- `bin/Invoke-LandBatch.ps1`, with its suite under `tests/land-scripts/`: the whole of
+  `/ouro:land-batch`'s deterministic work as subcommands over the batch files in the git directory
+  — `check`, `worktree`, `start`, `add`, `stacked`, `record`, `amend`, `route`, `land`, `report`,
+  `reset`, `push`, `close`, `watch` — and the skill keeps the order, the judgment and the sharp
+  edges in prose, with no bash block. **Consumer contract:** the old form is seventeen bash blocks
+  in `skills/land-batch/SKILL.md`, filled and run one call each; the new form is
+  `pwsh <ouro>/bin/Invoke-LandBatch.ps1 <subcommand> [-Pr <n>] [-Branch <b>] [-Message <file>]
+  [-Note <text>] [-Sha <sha>]`; the migration is none for a plugin install, and a vendored tree
+  re-runs `bin/Vendor-Ouro.ps1` to receive the script and the suite.
+
+- `bin/Compress-Branch.ps1`, with its suite under `tests/land-scripts/`: `/ouro:land` step 10's
+  compression of a fix-up range before an explicit merge, as `prepare` (the shared-branch signs,
+  the single-author check, the backup branch, the lease, the base and the author printed) and
+  `push -Backup <branch>` (the tree-identity and author checks, then the leased push), around the
+  session's own composing of the arc; the skill names the two invocations where it held its last
+  two bash blocks of step 10. **Consumer contract:** the old form is two bash blocks in
+  `skills/land/SKILL.md`, filled and run one call each; the new form is
+  `pwsh <ouro>/bin/Compress-Branch.ps1 prepare` and
+  `pwsh <ouro>/bin/Compress-Branch.ps1 push -Backup <branch>`; the migration is none for a plugin
+  install, and a vendored tree re-runs `bin/Vendor-Ouro.ps1` to receive the script and the suite.
+
+## [v0.8.0] - 2026-10-12
+
+- `record-counts.py` and its suite are gone from `bin/` and `tests/`, with their entries in the
+  binding, the No binding workflow's path list and `bin/Vendor-Ouro.ps1`'s copy plan: the review
+  skill no longer traces the counts in a PR record, since the record is read once at verification
+  and its counts are never re-taken. **Consumer contract:** the old form is that the vendor script
+  copies `record-counts.py` and its suite into a vendored tree; the new form copies neither; the
+  migration is to delete `<ScriptsDir>/record-counts.py` and `<ScriptsDir>/tests/record-counts/`
+  from a vendored tree, which nothing there runs.
+
+- `skills/review`, `docs/contract.md` §4: review weight follows the class of change and its size,
+  where it followed the class alone. An executed diff of twenty changed text lines or fewer, by
+  the reviewer prompt's count, takes the new sized review, `/ouro:review --sized <range>`: probes
+  at the changed hunks only, at most two attack vectors in place of the four defaults, and one
+  `PROBED` line per hunk in place of the REJECTED ledger. The probe format stands above twenty
+  lines and light mode stands for a documentation-only diff. **Consumer contract:** the old form
+  is two weights, light and probe, chosen by the class of change alone; the new form adds
+  `--sized` for a small executed diff; the migration is none, since `/ouro:execute` and
+  `/ouro:land` pick the weight.
+
+## [v0.7.0] - 2026-10-12
+
+- `actions/gates/action.yml`, this repository's own gates workflow, `.github/workflows/no-binding.yml`,
+  `.claude/ouro.toml`: with `select-by-paths` on, a push selects its gates by the diff against the
+  tip the branch had before it, as a pull request does against its base, and the
+  `.claude/ouro.toml` fallback is gone: a gate that reads the binding names it in its `paths`.
+  Every gate runs on a push with no previous tip (a new branch, a tag), on any other event, when
+  the diff cannot be read, and when the diff touches a workflow or the Action. This repository's
+  gates workflow runs on `v*` tags and once a week, its full-set runs; every gate in its binding
+  declares `paths` but the two whole-tree checks; and its No binding workflow no longer runs on a
+  pull request. **Consumer contract:** the old form is that a push runs every gate whatever the
+  input; the new form is that a push with the input on selects by its own diff, and a push with
+  no previous tip runs every gate; the migration is none, since the input is off by default, and
+  a consumer that turned it on gets the narrower push run.
+
+## [v0.6.0] - 2026-10-11
+
+- `skills/land`, `skills/land-batch`, `bin/Test-CommandBlocks.ps1`: invoking either skill with
+  arguments no longer rewrites the awk field references in its bash blocks (Claude Code replaces
+  a dollar-digit in a skill body with the invocation's arguments, so `$3` could render as an
+  argument word); the six awk programs now reach their fields through `-v` variables with the same
+  output, and the command-blocks gate gains a `skill-argument` rule that reports a dollar-digit
+  or `$ARGUMENTS` on any command-block line.
+
+- `bin/apply-manifest.py`, `docs/binding.md`, `bin/ouro-binding.py`: an absent
+  `ship.forbidden_check` now follows the visibility of the repository the run posts to. With no
+  private token list set, the applier reads that visibility with one `gh repo view` call, in a dry
+  run too; a `PRIVATE` or `INTERNAL` repository skips the check with the line
+  `forbidden-token check skipped: no list, private repository`, and `PUBLIC`, a failed or
+  timed-out read, or any other value refuses as a missing list does. A list that is set,
+  `--no-forbidden-check`, and a `"required"` or `"off"` key in a binding naming the repository
+  the run posts to make no read. **Consumer contract:** the old
+  form is an absent `ship.forbidden_check` meaning `"required"`, so a missing list refuses on
+  every repository; the new form is that an absent key follows the target's visibility, so a
+  private or internal repository with no list skips with one line; the migration is one line: a
+  private repository that wants the old refusal declares `forbidden_check = "required"` under
+  `[ship]`, which holds for runs from its own checkout.
+
+- `skills/init/SKILL.md`: the `description` names the CI workflow among what a re-run adds,
+  beside the docs-freshness workflow and the issue intake files, as the skill's step 1 and the
+  README row already do.
+
+- `bin/Test-DocsFreshness.ps1`: the docs sweep's rolling-issue sentence lists S9 as report-only
+  whatever `[docs].report_only` holds, since only Sweep mode computes it. A comment in
+  `templates/weekly-pass.yml` no longer describes that sentence as emitted signals minus the
+  report-only list.
+
+- `bin/Vendor-Ouro.ps1`: the help names `loop-outcomes.py` and `ouro-version.py` as not copied,
+  each with its reason, and the closing list's workflows line exempts the weekly pass's
+  `loop-outcomes.py` step, which keeps its plugin checkout.
+
+- `bin/external-audit.py`: with no git on PATH, claims mode skips its working-tree check with one
+  stderr line and runs to its verdict, and diff mode exits 1 naming the missing git; the usage
+  text's exit-1 list names that case.
+
 ## [v0.5.2] - 2026-10-11
 
 - `templates/ouro.toml.example`: the `suppress_prefixes` advice gains `bin/external-audit.py`,

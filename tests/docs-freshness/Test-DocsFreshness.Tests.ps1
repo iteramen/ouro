@@ -65,9 +65,9 @@
     them.
 
     The blocking-signal sentence the sweep writes into its rolling issue is pinned here
-    because the prose it replaces drifted: it is generated from $EmittedSignals minus the
-    report-only set, and $EmittedSignals is checked against the emitters in the gate's own
-    source so a new signal cannot appear in findings but not in the sentence.
+    because the prose it replaces drifted: it is generated from $EmittedSignals, which is checked
+    against the emitters in the gate's own source so a new signal cannot appear in findings but
+    not in the sentence.
 #>
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -291,6 +291,9 @@ try {
     Assert-Equal 'Gate signals (blocking): none. Report-only: S1, S2, S3, S4a, S4b, S7, S8, S9, S10.' `
         (Get-BlockingSignalSentence -ReportOnly $EmittedSignals) `
         'an all-report-only repo says none rather than emitting an empty list'
+    Assert-Equal 'Gate signals (blocking): S1, S2, S4a, S4b, S7, S8, S10. Report-only: S3, S9.' `
+        (Get-BlockingSignalSentence -ReportOnly @('S3')) `
+        'S9 is report-only in the sentence even when report_only leaves it out'
 
     # The constant must equal the signals the gate can actually emit -- read off the source, so
     # a new emitter that skipped the constant fails here and not in a consumer's issue body.

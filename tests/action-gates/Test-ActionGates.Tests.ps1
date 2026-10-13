@@ -27,9 +27,9 @@
     breaks no execution here, so it is pinned as prose instead.
 
     (d) select-by-paths is driven the same way, in a consumer with real commits, with
-    ${{ inputs.select-by-paths }}, ${{ github.event_name }} and
-    ${{ github.event.pull_request.base.sha }} filled per row; every other row fills them as an
-    input left off on a push.
+    ${{ inputs.select-by-paths }}, ${{ github.event_name }},
+    ${{ github.event.pull_request.base.sha }} and ${{ github.event.before }} filled per row; every
+    other row fills them as an input left off on a push.
 
     A vendored tree (bin/Vendor-Ouro.ps1) copies the scripts flat and nothing under actions/, so
     there the suite prints a skip line and exits 0, as Test-ActionPath.Tests.ps1 does for
@@ -123,10 +123,11 @@ else {
     # .claude/ouro.toml) reads a binding this suite crafts rather than the plugin's own.
     # The selection expressions default to an input left off on a push, which has no base commit.
     function Invoke-GateStep {
-        param([string]$ConsumerDir, [string]$Select = 'false', [string]$EventName = 'push', [string]$BaseSha = '')
+        param([string]$ConsumerDir, [string]$Select = 'false', [string]$EventName = 'push', [string]$BaseSha = '', [string]$Before = '')
         $body = $script.Replace('${{ inputs.select-by-paths }}', $Select).
             Replace('${{ github.event_name }}', $EventName).
-            Replace('${{ github.event.pull_request.base.sha }}', $BaseSha)
+            Replace('${{ github.event.pull_request.base.sha }}', $BaseSha).
+            Replace('${{ github.event.before }}', $Before)
         Push-Location -LiteralPath $ConsumerDir
         try {
             $out = & $pwshCmd.Source -NoProfile -Command $body *>&1
@@ -256,11 +257,11 @@ else {
         $selBase = (git -C $Sel rev-parse HEAD).Trim()
 
         function Invoke-SelectRow {
-            param([string]$Change, [string]$Select = 'true', [string]$EventName = 'pull_request', [string]$BaseSha = $selBase)
+            param([string]$Change, [string]$Select = 'true', [string]$EventName = 'pull_request', [string]$BaseSha = $selBase, [string]$Before = '')
             Invoke-SelGit checkout -q --detach $selBase
             Add-Content -LiteralPath (Join-Path $Sel $Change) -Encoding utf8 -Value '# changed'
             Invoke-SelGit commit -q -am "change $Change"
-            Invoke-GateStep -ConsumerDir $Sel -Select $Select -EventName $EventName -BaseSha $BaseSha
+            Invoke-GateStep -ConsumerDir $Sel -Select $Select -EventName $EventName -BaseSha $BaseSha -Before $Before
         }
         function Assert-Selection($R, [string[]]$Ran, [string[]]$Skipped, [string]$Row) {
             foreach ($n in $Ran) { Assert-Match "PASS exit=0  .*# gate-$n" $R.Text "${Row}: gate $n runs" }
@@ -299,9 +300,10 @@ else {
         $r = Invoke-GateStep -ConsumerDir $Sel -Select 'true' -EventName 'pull_request' -BaseSha $selBase
         Assert-Selection $r @('C') @('A', 'B', 'D') 'an empty diff'
 
+        # The binding is a path like any other: a gate that reads it names it in its paths.
         $r = Invoke-SelectRow -Change '.claude/ouro.toml'
-        Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a changed .claude/ouro.toml'
-        Assert-Match 'select-by-paths: every gate runs: the diff touches' $r.Text 'a changed binding: the log names the reason'
+        Assert-Selection $r @('C') @('A', 'B', 'D') 'a changed .claude/ouro.toml'
+        Assert-NoMatch 'every gate runs' $r.Text 'a changed binding: no full set'
 
         $r = Invoke-SelectRow -Change '.github/workflows/w.yml'
         Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a change under .github/workflows/'
@@ -311,9 +313,27 @@ else {
         Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a change under actions/gates/'
         Assert-Match 'select-by-paths: every gate runs: the diff touches' $r.Text 'a changed gates Action: the log names the reason'
 
-        $r = Invoke-SelectRow -Change 'z/f.txt' -EventName 'push'
-        Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a push event'
-        Assert-Match 'select-by-paths: every gate runs: the event is push' $r.Text 'a push event: the log names the reason'
+        # A push selects by the diff against the tip the branch had before it, github.event.before;
+        # GitHub fills no pull_request base on a push.
+        $r = Invoke-SelectRow -Change 'a/f.txt' -EventName 'push' -BaseSha '' -Before $selBase
+        Assert-Selection $r @('A', 'C') @('B', 'D') 'a push whose before is the base'
+        Assert-NoMatch 'every gate runs' $r.Text 'a push with a previous tip: no full set'
+
+        $r = Invoke-SelectRow -Change 'z/f.txt' -EventName 'push' -BaseSha '' -Before ''
+        Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a push with no before'
+        Assert-Match 'select-by-paths: every gate runs: the push has no previous tip' $r.Text 'a push with no before: the log names the reason'
+
+        $r = Invoke-SelectRow -Change 'z/f.txt' -EventName 'push' -BaseSha '' -Before '0000000000000000000000000000000000000000'
+        Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a push of a new branch or a tag'
+        Assert-Match 'select-by-paths: every gate runs: the push has no previous tip' $r.Text 'a zero before: the log names the reason'
+
+        $r = Invoke-SelectRow -Change 'z/f.txt' -EventName 'push' -BaseSha '' -Before '0123456789abcdef0123456789abcdef01234567'
+        Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a push whose before is not in the checkout'
+        Assert-Match 'select-by-paths: every gate runs: the diff against \S+ cannot be read' $r.Text 'a before the checkout lacks: the log names the reason'
+
+        $r = Invoke-SelectRow -Change 'z/f.txt' -EventName 'schedule' -BaseSha ''
+        Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a schedule event'
+        Assert-Match 'select-by-paths: every gate runs: the event is schedule, not pull_request or push' $r.Text 'a schedule event: the log names the reason'
 
         $r = Invoke-SelectRow -Change 'z/f.txt' -BaseSha '0123456789abcdef0123456789abcdef01234567'
         Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a base commit missing from the checkout'

@@ -92,7 +92,7 @@ re-opens.
 | `/ouro:compile` | Read-only queue planner: runs the footprint analyzer and prints, in chat, which `agent-ready` issues can run at once, which `/ouro:fuse` sets to build together, which rulings hold blocked issues and what ready work their build would collide with, and what an umbrella or area still needs. Writes nothing and runs no work; the owner names what runs. |
 | `/ouro:drift` | LLM audit of doc claims against artifacts. Report-only; the ledger's entries are append-only comments. |
 | `/ouro:seam` | Adversarial review of a contract seam — both sides locally right, the defect in the gap. |
-| `/ouro:review` | Adversarial second reviewer. Light mode for a diff that changes only documentation, skill text, rules or comments; probe format, REJECTED ledger mandatory, for every other diff. |
+| `/ouro:review` | Adversarial second reviewer. Light mode for a diff that changes only documentation, skill text, rules or comments; the sized review, probes at the changed hunks only, for an executed diff within contract §4's bound; probe format, REJECTED ledger mandatory, above it. |
 | `/ouro:external-audit` | The `ship.review = "external-audit"` reader: a repo-reading, JSON-verdict adversarial review, over a CLI adapter `ship.external_cli` names (`grok`, `claude`, `codex`, `copilot` shipped), capped at two rounds. Diff mode judges a change against a goal; claims mode refutes a plan's factual assertions about the code. |
 | `/ouro:intake` | The unattended weekly entry: gates, then intake grading. Uncredentialed — it proposes a manifest (`needs-triage`/`needs-ruling` only) that a model-free step applies; never promotes. |
 
@@ -111,14 +111,20 @@ The labels: eight states, two modifiers, defined in the contract.
   `Install-Ouro.ps1`, which writes a repo's onboarding files, `Invoke-BranchSweep.ps1`, which
   reports, and on request removes, the branches and worktrees whose PR is finished, and
   `Vendor-Ouro.ps1`, which copies the plugin's contents into a repo's tree for a standalone exit.
+  `Test-LandState.ps1`, `Sync-Branch.ps1`, `Push-Branch.ps1`, `Watch-PullRequestChecks.ps1`,
+  `Compress-Branch.ps1`, `Merge-PullRequest.ps1` and `Remove-LandedBranch.ps1` run `/ouro:land`'s
+  deterministic steps — the state and the commits to land, the sync by the binding's answer, the
+  push, the head's checks watched to a verdict, the compression of a fix-up range before an
+  explicit merge, the guarded merge, the branch and worktree cleanup — and read the binding
+  through `Get-LandBinding.ps1` beside them; `Invoke-LandBatch.ps1` is `/ouro:land-batch`'s
+  deterministic work as subcommands over the batch files in the git directory.
   `forbidden-tokens.py` is the private-token matcher the scan gate and the applier run (see The
   private token list below).
   The other `python3` tools: `apply-manifest.py` executes a triage manifest against GitHub from
   the session that holds the owner's approval; `drift-claims.py` hashes, relocates and encodes
   the claim evidence for the drift audit; `external-audit.py` runs one external-CLI review round
   with a JSON verdict; `loop-outcomes.py` reports what became of every `agent-ready` promotion,
-  per weekly cohort; `ouro-version.py` prints the installed plugin's version for a status line;
-  `record-counts.py` lists each count in a PR record that no report traces.
+  per weekly cohort; `ouro-version.py` prints the installed plugin's version for a status line.
   `Get-FootprintGraph.ps1` reads the file footprint of every open `agent-ready` and `needs-ruling`
   issue and prints which collide, which share a batch (a fuse set of at most five issues, merged
   along the strongest collisions), which can run at once and which ruling's build would collide
@@ -136,9 +142,14 @@ The labels: eight states, two modifiers, defined in the contract.
 - `actions/` — `docs-freshness`, the composite Action a consumer workflow `uses:` at a pinned tag
   to run the docs-freshness gate against its own checkout, and `gates`, the composite Action a
   consumer's CI workflow `uses:` the same way to run its own `[[gate]]` loop.
+- `hooks/` — the guards the plugin ships as Claude Code `PreToolUse` hooks, registered by
+  `hooks/hooks.json`, which `.claude-plugin/plugin.json` names; `hooks/README.md` lists what each
+  refuses, its override and how a guard fails.
 - `tests/` — fixture suites for the scripts, Actions and workflow templates they drive, and one
   asserting that every `bin/*.ps1` exposes its own help.
-  `changelog-entry/` drives the changelog gate over a scratch repository, one branch per surface.
+  `changelog-entry/` drives the changelog gate over a scratch repository, one branch per surface;
+  `land-scripts/` drives the landing scripts in-process over a gh stand-in, one suite per script;
+  `hooks/` runs every registered hook over recorded events, one directory per hook.
 - `templates/` — the issue form and its template chooser config, the intake workflow, the
   weekly-pass workflow, the docs-freshness gate workflow, the CI gate-loop workflow, the
   documentation rule, the example binding. `Install-Ouro.ps1` writes the binding from the example,
@@ -169,11 +180,15 @@ holding a NUL character, an entry that does not compile, or no tracked file to s
 1 and names the cause. CI is the gap: it has no list, so with `CI=true` the scan prints one
 `SKIP:` line and exits 0, and checks nothing there. The check that matters runs on the machines that hold the list.
 `bin/apply-manifest.py` runs `check` over every body file (placeholders unfilled) and `create` title it would post, before it
-makes any `gh` call, and refuses on a hit or a missing list; `--no-forbidden-check` skips that check,
+makes any `gh` call but one visibility read, and refuses on a hit or a missing list. With no list set
+and `ship.forbidden_check` absent, the read (`gh repo view`, even in a dry run) decides: a `PRIVATE`
+or `INTERNAL` repository skips the check with one line, any other answer refuses as a missing list.
+`--no-forbidden-check` skips that check,
 as the weekly pass's CI step does, and the run prints a line saying so. A binding may turn the
 applier's check off with `ship.forbidden_check = "off"`, for a private repository whose own issues
 carry such values (docs/binding.md, "The forbidden-token check"); the run then prints a line saying
-so. That key does not reach `scan` or `hook`, which stay fail-closed.
+so. That key does not reach `scan`, which stays fail-closed; `hook`, with no list, follows the
+applier's rule (below).
 
 `python3 bin/forbidden-tokens.py hook` is an example Claude Code `PreToolUse` hook for the commands
 a session runs directly. On a `Bash` or `PowerShell` call it acts on `gh issue create` (or `new`),
@@ -181,7 +196,8 @@ a session runs directly. On a `Bash` or `PowerShell` call it acts on `gh issue c
 `merge`, `close`, `reopen` and `revert`, and `git commit`, whatever the case of `gh` or `git`, with
 a path or `.exe`, and with gh global flags before the noun; it checks the whole command text
 (titles, bodies, commit messages, a heredoc) and the contents of a file named by `--body-file`,
-`-F` or `--file`. It blocks the call on a hit, on a missing list, on a body file it cannot read, on
+`-F` or `--file`. It blocks the call on a hit, on a missing list where the working directory's repository may not
+publish without one (the applier's rule, above), on a body file it cannot read, on
 a `-` body (or a `/dev/` or `/proc/` path, once slashes, `.` and `..` are normalised, as given and
 joined to the event's `cwd`) unless the whole command is one publishing `gh` or `git` call whose
 first line ends in a quoted heredoc delimiter, `<<'DELIM'` or `<<"DELIM"` (`<<-` allowed; an
@@ -189,13 +205,10 @@ unquoted delimiter never passes), holds no `;`, `&`, `|`, `<`, `>`, parenthesis,
 `#` or `$'`, and has balanced quotes before the operator, followed by the heredoc body and its closing
 delimiter and nothing else, and on an event it cannot parse, by exit 2:
 Claude Code blocks a call only on exit 2, and any other nonzero exit lets it run. The reason names
-the entry number, never the text. ouro installs none of this:
-the owner registers the hook in their own `settings.json`, with `OURO_FORBIDDEN_TOKENS` set in the
-environment Claude Code starts in, and the path pointing at the marketplace clone.
-
-```json
-{ "hooks": { "PreToolUse": [ { "matcher": "Bash|PowerShell", "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/ouro/bin/forbidden-tokens.py\" hook" } ] } ] } }
-```
+the entry number, never the text. The plugin registers the hook through `hooks/hooks.json`
+(`hooks/README.md`), so a plugin install runs it on every such call, with `OURO_FORBIDDEN_TOKENS`
+set in the environment Claude Code starts in: without a list it follows the applier's rule above,
+and refuses every such call that rule does not pass.
 
 The hook does not see `gh api` (`/ouro:land` posts review replies through it), nor a value expanded
 at run time from a variable or a command substitution. A body file is read from the session's
@@ -203,8 +216,7 @@ working directory before the command runs, so a `cd` or a write to the same file
 command is not seen. A body or later command that mentions `--file`, `--body-file` or a spaced `-F` in
 prose is read as a file name and blocks. A hook whose `python3` cannot be found exits 127, and one
 that exceeds Claude Code's hook timeout does not block either: Claude Code treats both as
-non-blocking, so a missing interpreter or a stall disables the hook. A guard against a bare
-`git stash` or a kill by pattern can take the same layout.
+non-blocking, so a missing interpreter or a stall disables the hook.
 
 ## License
 

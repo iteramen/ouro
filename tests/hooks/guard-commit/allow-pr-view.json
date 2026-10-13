@@ -1,0 +1,14 @@
+{
+  "decision": "allow",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "gh pr view 7 -R owner/repo --json state; gh pr checks 7 -R owner/repo",
+      "description": "a recorded call"
+    }
+  }
+}

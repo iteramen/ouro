@@ -1,0 +1,18 @@
+{
+  "decision": "deny",
+  "reason": "delete-ok",
+  "env": {
+    "CLAUDE_SCRATCHPAD_DIR": "${FIXTURES}/scratch"
+  },
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git worktree remove --force .claude/worktrees/x",
+      "description": "a recorded call"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "never by name",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "PowerShell",
+    "tool_input": {
+      "command": "Get-Process node | Stop-Process -Force",
+      "description": "a recorded call"
+    }
+  }
+}

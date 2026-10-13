@@ -1,24 +1,21 @@
 # Dispatch rules
 
-Each section below is pasted whole into the hosts the table names, never cited. A change is made
-here and pasted into every host in the same commit. Contract §7 is the authority for Files, Waits
-and Named head, which quote it.
+The rules a dispatch runs under that no guard the plugin ships can check. No skill pastes them: the
+session reads the sections a brief needs into it at dispatch time, and a skill step that applies
+one cites it. Contract §7 is the authority for Files, Waits and Named head, which quote it. A rule
+with a command shape is a guard under the plugin's `hooks/` instead.
 
-| Section | Pasted in |
-|---|---|
-| Writes off this machine | execute M brief; reviewer prompt main block |
-| Scratch | execute M brief; reviewer prompt; build-tiers template; verifier |
-| Stash | execute M brief |
-| Shell | execute M brief; reviewer prompt; e2e 1; build-tiers template |
-| Sweep | execute 3 Doc impact; execute M brief |
-| Files | execute Law of the road; reviewer prompt; build-tiers template; verifier |
-| Waits | execute M brief; reviewer prompt |
-| Named head | execute M brief; reviewer prompt |
-| State note | execute M brief; reviewer prompt |
-| Gate environment | execute 3 Gates and M brief; land 3; land-batch 4; fuse 4 |
-| What CI checks | execute 3 Gates; land 3; land-batch 4; fuse 4 |
-| Two reads | execute 3 Gates; land 3; land-batch 4; fuse 4 |
-| Coverer | execute 3 Gates; land 3; fuse 4 |
+- [Writes off this machine](#writes-off-this-machine) — builder and reviewer briefs
+- [Shell](#shell) — builder and reviewer briefs; every shell the session runs
+- [Sweep](#sweep) — builder briefs; the session's own doc-impact step
+- [Files](#files) — every brief, the verifier's included
+- [Waits](#waits) — every brief
+- [Named head](#named-head) — every brief
+- [State note](#state-note) — every brief
+- [Gate environment](#gate-environment) — builder briefs; the session's gate runs
+- [What CI checks](#what-ci-checks) — the session's gate runs
+- [Two reads](#two-reads) — the session's gate runs
+- [Coverer](#coverer) — the session's gate runs
 
 ## Writes off this machine
 
@@ -27,31 +24,9 @@ the tracker) without a dry run or a refusing stub first on PATH, probes included
 relies on a stub, the stub proves itself: one call whose stub-only answer must appear in the
 capture.
 
-## Scratch
-
-Delete only scratch you created, by exact name, never by a pattern: another run's files sit under
-the same root.
-
-## Stash
-
-Never a bare `git stash`: the stash stack is shared by every worktree of the repository, so a pop
-can take another session's entry. Stage the work.
-
 ## Shell
 
-A command that removes a path removes a literal path, the object returned by a create that never
-returns an existing path (`New-Item` without `-Force`, which fails on one; `mktemp -d`, which makes
-a new one), or a path it has just proved lies under the session's scratch directory: the target's
-resolved path starts with that directory, its own trailing separator trimmed, then a separator,
-compared case-insensitively on Windows. A recursive delete never silences its errors. Stop only a
-process you started, by the PID you recorded when you started it: never `pkill`, `killall`,
-`Stop-Process -Name`, `taskkill /IM`, or a `kill` fed by `pgrep`. A pattern matches every process on
-the host that holds it, another session's jobs and your own shell included, and a count of processes
-by pattern counts the command doing the counting. In PowerShell, no variable is named after one
-PowerShell reserves: a name `Get-Variable` shows ReadOnly or Constant in a fresh `pwsh -NoProfile`
-(`$home`, `$pshome`, `$isWindows`, `$host`, `$error`, `$pid` among them), whose assignment fails and
-leaves the old value, or one the runtime rebinds (`$input`, `$args`, `$matches`, `$_`). A shell
-variable that was not assigned is a path somewhere else. Text a command carries as data (an issue or
+Text a command carries as data (an issue or
 PR body, a commit message, a fixture, a mutant, a JSON line) that holds a backslash escape, a `$`,
 a backtick or a template tag is written to a file with the agent's file-write or edit tool, never
 through a here-doc, an `echo` or a quoted shell string, and reaches a command through a flag that

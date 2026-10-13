@@ -1,0 +1,16 @@
+{
+  "decision": "deny",
+  "reason": "state-note path",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Agent",
+    "tool_input": {
+      "prompt": "Review the diff at abc1234. Budget: 100 turns.",
+      "description": "review",
+      "subagent_type": "general-purpose"
+    }
+  }
+}

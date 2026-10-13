@@ -174,15 +174,19 @@ never runs it.
 **`S` and `M` differ in what the run does.** An issue built by `/ouro:fuse` takes that skill's
 build, gate and review steps in place of this paragraph's. `S` builds inline — the session edits
 and commits itself — and runs the gates once, on the commit; `M` dispatches one builder and
-re-runs the gates on the commit. Every `M` takes `/ouro:review` before the PR is marked ready,
-whatever `[ship].review` names; an `S` takes it under `adversarial-review`, and under `copilot`
-and `none` gets only the reviewer the binding names; under `external-audit` it gets the named
-reader, or `/ouro:review` in its place when the reader is unavailable (`docs/binding.md`).
+re-runs the gates on the commit. Who reviews each, by `[ship].review`, is the one table in
+`docs/binding.md` "Choosing ship.review"; every `M` takes `/ouro:review` there, before the PR is
+marked ready, whatever the binding names.
 
-**Review weight follows the class of change, not the size.** Wherever `/ouro:review` runs, a
-diff with any executed change takes the probe format, at any size; light mode
-(`/ouro:review --light`) is only for a diff that changes nothing but documentation, skill text,
-rules or comments, and every other diff takes the probe format too. A change is **executed** when
+**Review weight follows the class of change and its size.** Wherever `/ouro:review` runs, a
+diff that changes nothing but documentation, skill text, rules or comments takes light mode
+(`/ouro:review --light`). An executed diff takes the **sized review** at twenty changed text
+lines or fewer, and the **probe format** above that: the count is the reviewer prompt's, lines
+added plus removed with a reworded line counting twice, and a binary change counts as over the
+bound. The sized review is one reviewer reading the diff and probing only the lines it changed
+and the claims it makes, with no attack-vector menu and no REJECTED ledger, its evidence one
+line per changed hunk, and one verification message after a fix; the probe format is the full
+campaign `/ouro:review` defines. A change is **executed** when
 something runs it: scripts, workflows and gate files, CI or build configuration, gate code and
 gate fixtures, parsers, release machinery, product code, and any command block a skill or
 template tells a session to run. A comment-only change inside a script, a workflow, a gate file
@@ -202,10 +206,7 @@ Size is re-derived from the diff after the commit, the way §5 re-grants
 `trivial`: a diff over the S shape, or one that touches a workflow, a migration or a flag
 default, is not `S`; the rest of the S rule was triage's call. Unsure means `M`. A demotion is
 recorded — the PR body states it in one sentence, so triage and the loop metrics see the
-mis-size. The build is done either way: under `adversarial-review` no step
-changes, since the review weight already follows the class of change; under `copilot`,
-`external-audit` and `none` the demoted `S` not built by `/ouro:fuse` also takes the `M`'s
-`/ouro:review` before the PR is marked ready.
+mis-size. The build is done either way, and the demoted `S` takes the `M` row of that table.
 
 ## 5. `trivial`
 
@@ -248,7 +249,9 @@ verifiable domain through `[[gate]]`; anything no gate covers is not executable 
 
 ## 7. The law of the road
 
-Every dispatch — sub-agent, external builder, reviewer — runs under these rules:
+Every dispatch — sub-agent, external builder, reviewer — runs under these rules. A rule whose
+violation has a command shape is also enforced by a guard the plugin ships as a Claude Code hook
+(its `hooks/`); the prose stays, because a guard fails open and Codex has no hook layer.
 
 - **Author ≠ reviewer, always adversarial.** Whoever wrote a change, someone else reviews it
   (for an `S` built inline the session may be the author, never the reviewer), prompted to

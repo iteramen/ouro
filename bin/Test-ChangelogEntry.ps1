@@ -78,7 +78,9 @@
 .PARAMETER TemplatePattern
     Regex over a changed path that is a shipped template.
 .PARAMETER ActionPattern
-    Regex over a changed path that is an Action's own definition file.
+    Regex over a changed path that is an Action's own definition file, or the plugin's hook
+    registry, which a consumer's install runs the same way: at a pinned tag, with no file of the
+    consumer's own naming it.
 .PARAMETER VersionPath
     Repo-relative path of a JSON manifest whose version names the release HEAD is at. An empty
     value turns the check off.
@@ -100,7 +102,7 @@ param(
     [string]$ModulePattern = '^bin/[^/]+\.py$',
     [string]$UsageLinePattern = '^\s*(usage\b|python3?\b|-{1,2}\w)',
     [string]$TemplatePattern = '^templates/',
-    [string]$ActionPattern = '^actions/[^/]+/action\.ya?ml$',
+    [string]$ActionPattern = '^(actions/[^/]+/action\.ya?ml|hooks/hooks\.json)$',
     [string]$VersionPath = '.claude-plugin/plugin.json',
     [switch]$Blocking,
     [switch]$AsModule

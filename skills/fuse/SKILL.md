@@ -17,8 +17,7 @@ description: >
 `/ouro:execute` builds, `/ouro:review` attacks, `/ouro:land` merges — the same three `/ouro:e2e`
 joins for one issue. This skill joins them for several that share files: grouping, the shared brief,
 the review split by file cluster and the per-issue record are its own; everything else it takes by
-reference. **It states no rule those three already state, except the sections
-`skills/execute/references/dispatch-rules.md` pastes here.** Where a step is theirs, this cites and
+reference. **It states no rule those three already state.** Where a step is theirs, this cites and
 defers.
 
 ## 0. Binding
@@ -118,39 +117,15 @@ one diff adds may be bound to an area no issue carries. The clone is made with t
 the tree needs to check out, the ones the session's own checkout carries for that reason, passed
 as `git clone -c <key>=<value>`. `core.longpaths=true` on Windows is the example. The record
 names each setting passed, and code that runs only through a shipped Action, which CI alone checks.
-A gate that replays a CI job runs with that job's `env:` set, read from the workflow. What the local
-run cannot reproduce, such as the runner account's `PATH` or a layout the job builds, is named in
-the gate evidence as CI's to check, never assumed green.
-
-A long gate is judged by two reads, never by the clock. One is whether the gate's own process — the
-process its command started to do the checking, not a helper it spawned that may outlive it — is
-still present. The other is its last progress marker, its newest output or log write, read again to
-see whether it moved. Either one present means the gate is alive and the run keeps waiting. With
-neither, the gate is wedged, and the run reports it at once: the finding names the gate command, the
-last progress marker it read and the absence of the gate's process. A wedged gate is neither a pass
-nor a fail, and its evidence goes where gate results already go. No duration, no timeout, no polling
-interval. A fresh core file, one written after the gate started, says a process the gate depends on
-died: it may mark the gate wedged while the gate's own process is still present. The finding then
-names the core file beside the gate command and the last progress marker. The run waits for the
-gate within its own turn: it runs the gate in the foreground, or blocks on a gate it started in the
-background, re-issuing the blocking call until the gate ends.
-It never ends its turn while a gate it started still runs, to wait for a completion notice or a
-scheduled wake-up: a headless session that ends its turn exits, and nothing reads the gate's result.
-
-A gate the run cannot finish here, wedged or unable to run, is covered only by
-a CI leg the PR's own check list shows ran, the leg that runs that gate's job:
-`gh pr checks <PR> -R <slug>` once the PR is open, where a path-filtered leg reads `skipping` and
-covers nothing. With no such leg, the record names the gate uncovered.
+The run follows the Gate environment, What CI checks, Two reads and Coverer sections of
+`skills/execute/references/dispatch-rules.md`.
 
 ## 5. Review, per file cluster
 
-- Under `ship.review = "external-audit"`, that reader (`/ouro:external-audit`) takes each cluster
-  in place of `/ouro:review`. **When the CLI `ship.external_cli` names is not found, round 1
-  exits 1, round 1 exits 3 twice, or the run may not call it (a policy or network rule forbids it),
-  `/ouro:review` takes `/ouro:external-audit`'s place, and the record says so** — this is the availability rule `/ouro:execute` §4 and `/ouro:land` step 6
-  apply too. Under any other value, `/ouro:review` takes each cluster —
-  its own Steps are the procedure, cited and not copied — and a `copilot` reader also reads the
-  PR once it opens (step 8).
+- Which reviewer takes each cluster, by `ship.review`, is the fused row of the table in
+  `docs/binding.md` "Choosing ship.review", and an unavailable reader falls back to `/ouro:review`
+  by the availability rule beside it, the record saying so. `/ouro:review`'s own Steps are the
+  procedure, cited and not copied, and a `copilot` reader also reads the PR once it opens (step 8).
 - A cluster under `/ouro:review` is capped by contract §7's three fix rounds. Round 1 is the
   review; each fix and its step 7 verification is one fuse round, and
   a fuse round counts as a contract fix round.

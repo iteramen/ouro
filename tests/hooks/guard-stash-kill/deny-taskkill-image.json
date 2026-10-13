@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "never by an image name",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "PowerShell",
+    "tool_input": {
+      "command": "taskkill /IM node.exe /F",
+      "description": "a recorded call"
+    }
+  }
+}

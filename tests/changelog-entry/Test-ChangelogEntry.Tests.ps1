@@ -168,6 +168,7 @@ try {
         @{ Case = 'module-usage';      Surface = 'script usage';       File = 'bin/demo-tool.py' }
         @{ Case = 'template';          Surface = 'shipped template';   File = 'templates/demo.yml' }
         @{ Case = 'action-definition'; Surface = 'action definition';  File = 'actions/demo/action.yml' }
+        @{ Case = 'hook-registry';     Surface = 'action definition';  File = 'hooks/hooks.json' }
         @{ Case = 'quoted-path';       Surface = 'skill front matter'; File = 'skills/café/SKILL.md' }
     )
     foreach ($s in $surfaces) {

@@ -6,6 +6,13 @@
 > with no builder. The table below is
 > this reference's own economics, opt-in for an owner-driven expedition across several tickets.
 
+- [Model tiering (who does what)](#model-tiering-who-does-what)
+- [The dispatch template](#the-dispatch-template)
+- [Trek](#trek)
+- [Expedition](#expedition)
+- [External-builder recipes](#external-builder-recipes-write-enabled--audit-everything)
+- [Cheap adverse panel](#cheap-adverse-panel-trek-default-for-mechanical-changes)
+
 ## Model tiering (who does what)
 
 | Role | Default | Why |
@@ -14,7 +21,7 @@
 | subtle contracts, all adversarial reviews | Opus | reviews are where quality is bought |
 | the single hardest correctness-critical piece | the session's top tier | one ticket, not a habit |
 | web/data gathering | Haiku | mechanical legwork |
-| adverse checks (cheap tier) | Haiku panel + beast advisory | distinct lenses, see below |
+| adverse checks (cheap tier) | Haiku panel | distinct lenses, see below |
 
 External builder (`builder=codex` / `builder=grok`) replaces the *build* row only —
 reviews stay in-family with the arbiter, which keeps author ≠ reviewer across
@@ -34,39 +41,8 @@ STOP-RULE: any done-condition miss → STOP and report what you observed;
 TURN-BUDGET: <the turn budget the plugin's docs/contract.md sets> turns; reaching
   it is the STOP-RULE's STOP — report what is done, what is outstanding, and the
   evidence so far.
-FILE-RULE: A dispatch creates files only where it was sent. Sub-agent, external builder and reviewer
-  alike create files only inside the worktree they were handed, and only the files the task names; a
-  read-only dispatch creates none inside any working tree. Every probe, copy, fixture, scratch repo,
-  download and log goes outside every working tree, in the session's own scratch directory, which is
-  never the main checkout. A location the tree git-ignores counts as outside it for that sentence
-  and for nothing else: what it protects is an empty porcelain status and a worktree that can still
-  be removed. It is somewhere to leave transient output, never a licence to write configuration the
-  tooling reads -- an ignored overlay or settings file is no more a dispatch's to write than a
-  tracked one. The exception is the repo's own gate commands: what they write where they run is
-  theirs, not yours.
-DELETE-RULE: Delete only scratch you created, by exact name, never by a pattern: another run's files
-  sit under the same root.
-SHELL-RULE: A command that removes a path removes a literal path, the object returned by a create
-  that never returns an existing path (`New-Item` without `-Force`, which fails on one; `mktemp -d`,
-  which makes a new one), or a path it has just proved lies under the session's scratch directory:
-  the target's resolved path starts with that directory, its own trailing separator trimmed, then a
-  separator, compared case-insensitively on Windows. A recursive delete never silences its errors.
-  Stop only a process you started, by the PID you recorded when you started it: never `pkill`,
-  `killall`, `Stop-Process -Name`, `taskkill /IM`, or a `kill` fed by `pgrep`. A pattern matches
-  every process on the host that holds it, another session's jobs and your own shell included, and a
-  count of processes by pattern counts the command doing the counting. In PowerShell, no variable is
-  named after one PowerShell reserves: a name `Get-Variable` shows ReadOnly or Constant in a fresh
-  `pwsh -NoProfile` (`$home`, `$pshome`, `$isWindows`, `$host`, `$error`, `$pid` among them), whose
-  assignment fails and leaves the old value, or one the runtime rebinds (`$input`, `$args`,
-  `$matches`, `$_`). A shell variable that was not assigned is a path somewhere else. Text a command
-  carries as data (an issue or PR body, a commit message, a fixture, a mutant, a JSON line) that
-  holds a backslash escape, a `$`, a backtick or a template tag is written to a file with the
-  agent's file-write or edit tool, never through a here-doc, an `echo` or a quoted shell string, and
-  reaches a command through a flag that reads a file, such as `--body-file` or `git commit -F`. The
-  file is then read back and compared with the intended text before it is used: a tool call can
-  decode an escape on the way, and a `\uXXXX` escape sometimes
-  arrives decoded even through the file-write tool. Text that must keep such an escape is produced
-  by a script that builds the backslash from its character code.
+RULES: <the Writes off this machine, Shell, Files, Waits, Named head and State note sections of
+  references/dispatch-rules.md, read in at dispatch time>
 REPORT: what you did, proof output verbatim, what the proof cannot show.
 ```
 
@@ -81,7 +57,7 @@ In-session orchestration, one repo:
 
 1. Slice the spec into dispatches (one seam each). Order by dependency.
 2. Per slice: builder sub-agent (Sonnet, or the external builder) → adverse
-   review (Opus for contract-touching changes, Haiku+beast panel for mechanical
+   review (Opus for contract-touching changes, the Haiku panel for mechanical
    ones) → arbiter audits the diff → fix rounds (≤3) → arbiter commits.
 3. Slices that are independent run as one parallel wave; dependent slices wait.
 4. Full proof once at the end, on the assembled result.
@@ -127,13 +103,9 @@ commit it makes gets soft-reset and audited as a plain diff).
   `grok -p "<dispatch>" -s <UUID>` (fix rounds: `-r <UUID>`). Grant write by
   omitting `--disallowed-tools`; the no-commit/no-push rule rides in the dispatch
   prompt, and the soft-reset guard above catches a violation deterministically.
-- **Beast is never a builder** — a local coder model drives an agent harness fine for
-  drafting, but builder output must clear the same adverse review as everyone
-  else's, and the beast's cost advantage disappears once Opus has to review twice.
-  Advisory and adverse-check roles only.
 
 ## Cheap adverse panel (trek default for mechanical changes)
 
 2–3 Haiku sub-agents in parallel, distinct lenses (correctness, silent-failure,
-regression), plus one beast advisory pass. Majority REJECT or any confirmed file:line
+regression); the panel is Haiku alone. Majority REJECT or any confirmed file:line
 defect → fix round. Contract-touching changes skip straight to an Opus review.

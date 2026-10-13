@@ -24,7 +24,8 @@ leaking into another's job.
 
 **1. Stable instruction — how to work.** The per-session briefing (`CLAUDE.md`), path-scoped
 rules that load only when the touched files match, the plugin's skills (each a drill with its
-gotchas baked in, amended the same day a run teaches something), the per-repo binding, and the
+gotchas baked in; a lesson a run teaches lands the same day at the lowest layer that can hold
+it, a hook, a gate, a line in a skill, or nowhere), the per-repo binding, and the
 repo's deterministic gates. The skills are a runbook for one harness; the contract is the spec
 they run. *Why:* an always-loaded instruction file grows until it is a
 graveyard of stale rules and adherence quietly drops. Stable instruction has to earn its place

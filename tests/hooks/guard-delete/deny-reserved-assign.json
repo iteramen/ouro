@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "reserves",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "PowerShell",
+    "tool_input": {
+      "command": "$home = Join-Path $env:TEMP \"gpg-locate\"; New-Item $home -ItemType Directory | Out-Null; Remove-Item $home -Recurse -Force",
+      "description": "a recorded call"
+    }
+  }
+}

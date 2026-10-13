@@ -44,6 +44,25 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
   logins' `**Triage**` comments count as provenance, so everyone who runs this skill must be
   listed there.
 
+## Non-negotiables
+
+- **Never guess a ruling.** An unanswerable question is the finding itself.
+- **Never close or rewrite unilaterally** — interactive approval first. The unattended
+  `/ouro:intake` adds `needs-triage` and `needs-ruling` only, never PROMOTE.
+- **One state label, always.** Adding a state means removing the one it replaces —
+  an issue must never carry two. An issue found with two is a finding; fix it in the
+  applied changes, with approval.
+- **Idempotency marker.** The intake's comment starts with `**Intake triage** (automated)`;
+  its presence means the issue was graded once, unattended, at an older SHA. Read it as
+  evidence, re-grep everything it cites, and let your verdict supersede it. Never post a
+  second intake-style comment; the interactive comment starts with `**Triage**`.
+- Verification discipline is the drift-audit's: artifact wins; every kept claim cites the
+  artifact; a claim that couldn't be checked is said out loud, not assumed.
+- Don't inflate, but don't reflex to NEEDS-RULING either. An assessment-shaped issue
+  ("Assess: …", "Decide the fate of …") is usually a **CHECKPOINT** — the deliverable is the
+  assessment. Reserve NEEDS-RULING for what survives *after* the evidence, and leave curated
+  roadmap umbrellas as `umbrella` by design. Not everything should be agent-ready.
+
 ## Modes
 
 - `/ouro:triage --all` — the open backlog, excluding the rolling issues and already-
@@ -97,28 +116,20 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
        single deliverable, `Doc impact on close:` line — and a **`Size: S/M/L`**
        estimate. **S** is the eligibility rule `/ouro:execute` re-checks on the diff: one
        deliverable; every anchor resolves; no new API, workflow edit, migration or flag
-       default; no behaviour change beyond what a gate or a same-PR test covers; a bounded
-       diff — no more than three files and about sixty changed lines, a starting point that
-       measured loop runs move. The file count excludes a file that changed **only** because a
-       policy or a gate **requires** a claim to be mirrored into it — a changelog, a generated
-       artefact, a disclosure or release-notes surface — since fan-out is not judgment; those
-       files still count toward the line condition. The requirement is the test and the examples
-       are only examples: a file nothing obliges the change to mirror counts, whatever it is
-       called. Name the exclusions you can foresee and say why; the executor applies the same
-       test to any you could not. One sentence corrected in a repo that
-       mirrors it into a changelog, a gated disclosure card and a header is three excluded files
-       and a handful of lines: **S**, not M. Twenty files of real edits is M however few lines
-       each carries. **M** is everything else that fits one focused session;
-       L = multi-session.
+       default; no behaviour change beyond what a gate or a same-PR test covers; and the S
+       shape contract §4 defines, with its exclusion of a file changed only because a policy or
+       a gate requires a claim mirrored into it. Name the exclusions you can foresee and say
+       why; the executor applies the same test to any you could not. Twenty files of real edits
+       is M however few lines each carries. **M** is everything else that fits one focused
+       session; L = multi-session.
        **L is a SPLIT verdict, not a size an issue gets promoted at** — an issue is never
        executed as L. If the verifier cannot find the split lines, the verdict is
        NEEDS-RULING with the question "owner-driven session, or split how?". A ruling for an
        owner-driven session re-triages the issue to `human-ready` while the owner drives it,
        never to `agent-ready`.
-       Size picks `/ouro:execute`'s build path (S inline, M dispatched) and, under `copilot`,
-       `external-audit` and `none`, whether `/ouro:review` runs before the PR is marked ready; it also lets
-       unattended runs budget their queue. Review weight follows the class of change, not
-       the size.
+       Size picks `/ouro:execute`'s build path (S inline, M dispatched) and, with `[ship].review`,
+       who reviews (the table in `docs/binding.md` "Choosing ship.review"); it also lets unattended
+       runs budget their queue. The review weight is contract §4's.
      - **NEEDS-RULING** — sound issue, but open design decisions. List each as a crisply
        answerable question. These become the rulings queue.
        When a question's options are existing designs, it also offers none of them: an open design brief,
@@ -161,38 +172,18 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
    After its last write it waits past the last `create` and re-reads every issue it created or
    moved to a state, removing a second state label: an intake automation reads the labels on
    `opened` and stamps after it reads, so its stamp can land after the edit's own read.
-   `{{key}}` placeholders stand in for children not yet created. Keep a create key to letters,
-   digits and underscores, and give each `create` its own: the applier refuses any other spelling,
-   and a key a second `create` declares again. A reference to a key no earlier
-   `create` step declares — a step's `issue`, a subissue's `child` or `parent`, a placeholder in
-   a comment, edit or close body — is refused before anything runs, as is one that resolves below
-   1; a create body may name any key the manifest creates, since a final pass re-renders it.
-   A double-brace word in any manifest body is a placeholder to the applier, and one that names
-   no created key is refused: a body that must mention one describes it, or quotes it without
-   its braces, and an anchor on a line that holds one picks a brace-free substring of that line
-   (a fragment is grepped as a substring, so stripping the braces out of it leaves an anchor
-   that greps nothing).
-   A step carries only the fields its op reads: a `create` its key, title, body file and labels;
-   a `comment` or `close` its issue and body file; an `edit` its issue, an optional body file,
-   `add_labels`, `remove_labels` and `allow_shrink`; a `subissue` its parent and child. Any other
-   field refuses the manifest, and an `edit` cannot set a title.
-   A `create` step's `title` is literal text: the applier refuses a placeholder in one, so a
-   manifest that wants a sibling's number puts that reference in the body, which the final pass
-   re-renders, and a title that must mention a placeholder spells it without its braces.
-   It also refuses an empty body file, and an `edit` that cuts an existing issue's body below
-   half unless that step carries `allow_shrink: true`; the body an edit replaces is kept beside
-   the manifest as `<N>.body.before.md` (a dry run reads no issue, so checks only for empty files);
-   an existing file of that name is kept as an earlier run's backup, so a manifest directory must
-   not ship one.
-   It refuses, before any `gh` call, a body file or `create` title the private token list matches,
-   and a missing list too; `--no-forbidden-check` skips that check, for a host that holds no list
-   by design, and so does a binding that declares `ship.forbidden_check = "off"`. A session that
-   meets the refusal reports it to the owner rather than passing `--no-forbidden-check`.
-   Every body file a step names is a bare file name that resolves inside the manifest directory —
-   a name holding a slash, a backslash or a colon, or ending in a space or a dot, since a name
-   Windows rewrites is not that name, is refused wherever the manifest is applied, and so is a
-   `..` segment, an absolute path or a symlink out — so keep each body beside its `manifest.json`.
-   A step object giving a key twice is refused as an unreadable manifest, naming the key.
+   `{{key}}` placeholders stand in for children not yet created; a body that must mention one
+   describes it or quotes it without its braces, and an anchor on such a line picks a brace-free
+   substring. The applier refuses a manifest it cannot apply safely and names the rule, before
+   anything runs where it can: its usage text lists them (create keys, the fields a step may
+   carry, literal titles, body files beside the manifest, an edit that shrinks a body below half
+   without `allow_shrink: true`); the body an edit replaces is kept beside the manifest as
+   `<N>.body.before.md`.
+   It refuses a body file or `create` title the private token list matches, and a missing list
+   unless the target repository is private or internal and the binding does not require the
+   check (`ship.forbidden_check = "off"`, or `--no-forbidden-check` for a host that holds no list
+   by design). A session that meets the refusal reports it to the owner rather than passing
+   `--no-forbidden-check`.
    A body edited by hand outside the applier is never transformed in the same shell statement
    that uploads it: fetch it to a file, edit the file with an exact-match editor, upload the
    file, then re-read the issue and compare sizes.
@@ -273,22 +264,3 @@ is NEEDS-RULING whatever its label says).
 | `wayfinder:prototype` | `agent-ready`, deliverable is an artifact | The throwaway build answers the question; the PR is the artifact, not a feature |
 | `wayfinder:research` | `agent-ready` + `checkpoint` | The deliverable is a finding: read-only, posted as a comment, converts rather than closes |
 | `wayfinder:task` | `agent-ready` or `human-ready` | Decided by who can do it — a bench, a rig, a release step is `human-ready` |
-
-## Non-negotiables
-
-- **Never guess a ruling.** An unanswerable question is the finding itself.
-- **Never close or rewrite unilaterally** — interactive approval first. The unattended
-  `/ouro:intake` adds `needs-triage` and `needs-ruling` only, never PROMOTE.
-- **One state label, always.** Adding a state means removing the one it replaces —
-  an issue must never carry two. An issue found with two is a finding; fix it in the
-  applied changes, with approval.
-- **Idempotency marker.** The intake's comment starts with `**Intake triage** (automated)`;
-  its presence means the issue was graded once, unattended, at an older SHA. Read it as
-  evidence, re-grep everything it cites, and let your verdict supersede it. Never post a
-  second intake-style comment; the interactive comment starts with `**Triage**`.
-- Verification discipline is the drift-audit's: artifact wins; every kept claim cites the
-  artifact; a claim that couldn't be checked is said out loud, not assumed.
-- Don't inflate, but don't reflex to NEEDS-RULING either. An assessment-shaped issue
-  ("Assess: …", "Decide the fate of …") is usually a **CHECKPOINT** — the deliverable is the
-  assessment. Reserve NEEDS-RULING for what survives *after* the evidence, and leave curated
-  roadmap umbrellas as `umbrella` by design. Not everything should be agent-ready.

@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: execute-refuses-without-binding
+context:
+  scaffold_script: fixture.sh

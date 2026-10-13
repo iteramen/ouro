@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "never a commit's author",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git -c \"user.name=Claude\" commit -F m",
+      "description": "a recorded call"
+    }
+  }
+}

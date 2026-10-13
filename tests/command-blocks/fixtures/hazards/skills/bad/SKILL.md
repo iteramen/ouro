@@ -33,3 +33,10 @@ An `sh` fence is extracted as well:
 ```sh
 echo "$GH_REPO"
 ```
+
+A skill argument placeholder, an awk field and `$ARGUMENTS`, one line each:
+
+```bash
+awk '$1 == pr {print $3}' rows.tsv
+echo "$ARGUMENTS"
+```

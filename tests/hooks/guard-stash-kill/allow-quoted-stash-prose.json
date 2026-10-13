@@ -1,0 +1,14 @@
+{
+  "decision": "allow",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "gh issue comment 7 -R owner/repo --body 'never git stash pop; stage the work'",
+      "description": "a recorded call"
+    }
+  }
+}

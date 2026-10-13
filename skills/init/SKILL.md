@@ -6,8 +6,8 @@ description: >
   repository has Issues and whether GitHub deletes a merged PR's branch, and offers to turn
   either on. Invoked by the owner as
   `/ouro:init`, for a repo's first-run onboarding and again to add the docs-freshness
-  workflow or the issue intake files. Writes no file itself and never edits an existing
-  binding.
+  workflow, the CI workflow or the issue intake files. Writes no file itself and never edits
+  an existing binding.
 disable-model-invocation: true
 ---
 

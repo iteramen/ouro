@@ -1,0 +1,18 @@
+{
+  "decision": "deny",
+  "reason": "never a pattern",
+  "env": {
+    "SCRATCH": "${FIXTURES}/scratch"
+  },
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "rm -rf \"$SCRATCH\"/probe-*",
+      "description": "a recorded call"
+    }
+  }
+}

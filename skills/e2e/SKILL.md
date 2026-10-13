@@ -15,8 +15,7 @@ description: >
 them: where one ends and the next begins, what authority the run carries between them, and what it
 does with the work its own landing surfaces.
 
-**It states no rule those three already state, except the sections
-`skills/execute/references/dispatch-rules.md` pastes here.** A rule copied here drifts from its
+**It states no rule those three already state.** A rule copied here drifts from its
 original and leaves a reader guessing which copy governs. Where a step is theirs, this cites and
 defers.
 
@@ -36,15 +35,16 @@ and warn where they warn. Do not re-enumerate them here; a partial copy is how a
 
 Then read what decides this run's shape, and say what you got:
 
-- **The modifiers.** A `checkpoint` run is read-only, as `/ouro:execute` §2 and §4 say. Here that
-  means it ends at §2, with the finding comment `/ouro:execute` §4 prescribes; §§3-5 do not apply.
+- **The modifiers.** A `checkpoint` run is read-only, as `/ouro:execute`'s `references/variants.md`
+  says. Here that means it ends at §2, with the finding comment that reference prescribes; §§3-5
+  do not apply.
   `trivial` changes only what `/ouro:execute` says.
 - **The effective ship policy**, `min([ship].policy, the issue's labels)`, as `docs/contract.md`
   defines it. It decides who lands: where it reaches `trivial-merge`, `/ouro:execute` merges the
   PR itself and §4 is this run's verification pass.
 - **`[ship].review`**, which names the reviewer the binding adds — a bot on the open PR, an
-  external auditor, or none. It does not decide whether there is a review: every M takes
-  `/ouro:review` before the PR is marked ready, whatever the binding names, as the contract says.
+  external auditor, or none. Who reviews the issue, by its size and that value, is the table in
+  `docs/binding.md` "Choosing ship.review".
 
 ## 1. The authority this run carries
 
@@ -58,27 +58,9 @@ guard in `/ouro:land` §10 passes, clean up, and file follow-ups.
 rule firing; anything touching a protected branch prefix. Ask with the measured finding, ranked
 options and a recommendation.
 
-**Every shell it runs, and every one it dispatches.** A command that removes a path removes a
-literal path, the object returned by a create that never returns an existing path (`New-Item`
-without `-Force`, which fails on one; `mktemp -d`, which makes a new one), or a path it has just
-proved lies under the session's scratch directory: the target's resolved path starts with that
-directory, its own trailing separator trimmed, then a separator, compared case-insensitively on
-Windows. A recursive delete never silences its errors. Stop only a process you started, by the PID
-you recorded when you started it: never `pkill`, `killall`, `Stop-Process -Name`, `taskkill /IM`, or
-a `kill` fed by `pgrep`. A pattern matches every process on the host that holds it, another
-session's jobs and your own shell included, and a count of processes by pattern counts the command
-doing the counting. In PowerShell, no variable is named after one PowerShell reserves: a name
-`Get-Variable` shows ReadOnly or Constant in a fresh `pwsh -NoProfile` (`$home`, `$pshome`,
-`$isWindows`, `$host`, `$error`, `$pid` among them), whose assignment fails and leaves the old
-value, or one the runtime rebinds (`$input`, `$args`, `$matches`, `$_`). A shell variable that was
-not assigned is a path somewhere else. Text a command carries as data (an issue or PR body, a commit
-message, a fixture, a mutant, a JSON line) that holds a backslash escape, a `$`,
-a backtick or a template tag is written to a file with the agent's file-write or edit tool, never
-through a here-doc, an `echo` or a quoted shell string, and reaches a command through a flag that
-reads a file, such as `--body-file` or `git commit -F`. The file is then read back and compared with
-the intended text before it is used: a tool call can decode an escape on the way, and a `\uXXXX`
-escape sometimes arrives decoded even through the file-write tool. Text that must keep such an
-escape is produced by a script that builds the backslash from its character code.
+**Every shell it runs, and every one it dispatches,** follows the Shell section of
+`skills/execute/references/dispatch-rules.md`: text a command carries as data reaches it through a
+file, never through a quoted string.
 
 **Never:** promote the issue you are running, certify your own follow-up, push to the default
 branch, merge a head nothing built, or take a release step — tagging and version numbering are the

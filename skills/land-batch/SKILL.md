@@ -22,98 +22,46 @@ GitHub one PR at a time, each merge checked against its local squash commit (5a)
 for a set GitHub cannot reproduce, pushes the default branch once (5b). `$DEFAULT` =
 `[repo].default_branch` and `$SLUG` = `[repo].slug` throughout.
 
-**Every bash block below is one call, and nothing survives between calls.** A shell
-variable set in one block is gone in the next, so whatever a later step needs is written
-to the batch files in the git directory (`land-batch.tsv`, `land-batch.route`,
-`land-batch.landed`, `land-batch.stop`), and each block sets its own inputs and checks
-them with `${VAR:?}`, which ends the call before it reaches `gh` when a value is empty.
-Every other check is a gate too: on failure it ends the call with `exit 1` instead of
-printing and going on.
-
-**Every `gh` call names the repository** — `-R "$SLUG"`, and `gh api` its explicit
-`repos/$SLUG/…` path or `$SLUG`'s owner and name as GraphQL variables. A bare call
-addresses whatever gh picks from the clone's remotes, which in a fork's clone is the
-parent, so the batch would merge PRs on a repository nobody composed or validated.
-
-`<ouro>` below is the plugin root: `${CLAUDE_PLUGIN_ROOT}` if set, else the
-marketplace checkout.
+**Every deterministic step is one subcommand of one script**, `<ouro>/bin/Invoke-LandBatch.ps1`
+(`<ouro>` is the plugin root: `${CLAUDE_PLUGIN_ROOT}` if set, else the marketplace checkout). It
+runs from the repo root of the checkout the batch runs in, reads the binding through
+`ouro-binding.py` beside it, names the binding's repository on every `gh` call (a bare call
+addresses whatever gh picks from the clone's remotes, which in a fork's clone is the parent), and
+keeps whatever a later step needs in the batch files in that checkout's git directory
+(`land-batch.tsv`, `land-batch.route`, `land-batch.landed`, `land-batch.stop`): nothing is carried
+between calls. Every refusal is one `STOP: <why, and what to do>` line and exit 1; the script's
+help holds each subcommand's guards. What stays in this document is what the script cannot carry:
+the order, the judgment, and the sharp edges.
 
 ## 0. Bind — and refuse what is not yours to land
 
-Read `.claude/ouro.toml` at the repo root (`[repo].checkout` if set, else the cwd; read it
-via `python3 <ouro>/bin/ouro-binding.py get repo.checkout` — a gitignored `ouro.local.toml`
-overlay may supply it; the key is optional, and `no such key` on stderr at exit 1 is that read's
-answer for unset). No binding, or `python3 <ouro>/bin/ouro-binding.py check` fails → refuse.
-**Protected prefixes are absolute**: if any branch in the set, or the target,
-starts with an entry of `[repo].protected_branch_prefixes`, stop and name it —
-those follow the repo's own release procedure, never this skill. Read
-`[overlays].land` now: it names the files this repo treats as **tail-append
-hazards** (step 3) and any gate gotchas.
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 check`
 
-**How the binding lands a PR decides whether this batch may run at all.** One dotted `get` of
-`ship.merge` reads it: that read answers from a `[ship].landing` preset where the binding
-declares only the preset, while a read of the whole `[ship]` table answers what the file holds.
-The sync key is never read — the batch brings no branch up to date.
+The script refuses without a binding, or with one that fails `check`. **Protected prefixes are
+absolute**: if any branch in the set, or the target, starts with an entry of
+`[repo].protected_branch_prefixes`, stop and name it — those follow the repo's own release
+procedure, never this skill. Read `[overlays].land` now: it names the files this repo treats as
+**tail-append hazards** (step 3) and any gate gotchas.
 
-```bash
-OUT=$(python3 <ouro>/bin/ouro-binding.py get ship.merge 2>&1); RC=$?
-case "$RC $OUT" in
-  "0 squash") echo "ship.merge: squash" ;;
-  "0 merge")  echo "ship.merge: merge" ;;
-  "1 "*"no such key"*) echo "ship.merge: not declared - the batch lands squash commits, as a binding without the key does" ;;
-  *) echo "ship.merge: no answer (exit $RC): $OUT" ;;
-esac
-```
+**What the binding and the default branch accept decides whether and how the batch lands, and it
+has to be found here** — not after every squash, every composed-state gate and the first merge or
+the push have already run. `check` reads `ship.merge` (a `[ship].landing` preset answers it; the
+sync key is never read, since the batch brings no branch up to date), then the branch's rulesets,
+classic branch protection (which the rules endpoint does not show), a merge queue from either kind,
+and the repository's squash setting; it prints each reading and ends in one `verdict:` line:
 
-**What the default branch accepts decides whether and how the batch lands, and it has to
-be found here** — not after every squash, every composed-state gate and the first merge or
-the push have already run. Read before squashing anything:
-
-```bash
-SLUG=<[repo].slug>; DEFAULT=<[repo].default_branch>
-: "${SLUG:?}" "${DEFAULT:?}"
-gh api "repos/$SLUG/rules/branches/$DEFAULT" --jq '{
-  pull_request:   [.[] | select(.type == "pull_request")] | length,
-  status_checks:  [.[] | select(.type == "required_status_checks")] | length,
-  strict_checks:  [.[] | select(.type == "required_status_checks" and .parameters.strict_required_status_checks_policy == true)] | length,
-  merge_queue:    [.[] | select(.type == "merge_queue")] | length,
-  squash_refused: [.[] | select(.type == "pull_request" and ((.parameters.allowed_merge_methods // ["squash"]) | any(. == "squash") | not))] | length
-}'
-gh api "repos/$SLUG/branches/$DEFAULT" --jq '{classic_protection: .protection.enabled, classic_status_checks: ((.protection.required_status_checks.contexts // []) | length)}'
-gh api "repos/$SLUG/branches/$DEFAULT/protection" --jq '{classic_strict: (.required_status_checks.strict // false), classic_pull_request: (.required_pull_request_reviews != null)}'
-gh api graphql -f query='query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { url } } }' \
-  -f owner="${SLUG%/*}" -f name="${SLUG#*/}" -f branch="$DEFAULT" --jq '{merge_queue: (.data.repository.mergeQueue != null)}'
-gh api "repos/$SLUG" --jq '{allow_squash_merge}'
-```
-
-The first read is the branch's rulesets; the next two are classic branch protection, which
-the rules endpoint does not show; the GraphQL read sees a merge queue from either kind.
-Apply every row that matches:
-
-| Reading | What it means for the batch |
+| Reading | Verdict |
 |---|---|
-| `squash_refused` non-zero, or `allow_squash_merge` false | **Refuse the batch and name the setting.** Both of this drill's paths land squash commits: the batch is not for this branch. (`allow_squash_merge` reads `null` without admin access; then a refusal surfaces at the first merge, before anything lands.) |
-| `ship.merge: merge`, from the binding read above | **Refuse the batch and name the key and the value** — declared, or implied by a `[ship].landing` of `rebase-merge` or `merge-merge`. Both of this drill's paths land squash commits only, so a branch whose PRs land as merge commits is not its business: the set goes to `/ouro:land` per PR. Nothing has been squashed, and nothing is pushed, merged or closed. |
-| `ship.merge: no answer` — the read gave anything but `squash`, `merge` or the `no such key` line | **Refuse the batch and name the read.** A read that answered neither value says nothing about the policy, and is never taken for an undeclared key. |
-| a merge queue (`merge_queue` non-zero or `true`; "Require merge queue" is a classic protection setting too) | **Refuse and hand the set to the queue.** `gh pr merge -R "$SLUG"` enqueues the PR instead of merging it, so no merge can be checked against its squash commit, and a direct push is refused. |
-| `strict_checks` non-zero, `classic_strict` true, or classic protection whose details did not read | **A set of two or more PRs goes to `/ouro:land` per PR.** Strict checks require each PR to be up to date with the base, so 5a lands the first PR and finds the next one `BEHIND`; and 5b's push is refused, since the required checks never ran on the local squash commits. |
-| `pull_request` or `status_checks` non-zero, `classic_pull_request` true, `classic_status_checks` non-zero, or classic protection whose details did not read | **5a only.** A set that routes to 5b (step 5) goes to `/ouro:land` per PR instead: a branch that requires pull requests refuses a direct push, and required checks must pass on a commit before it can be pushed to the branch. |
+| squash merges refused by a ruleset, or `allow_squash_merge` false | **STOP: the batch is not for this branch.** Both paths land squash commits. (`allow_squash_merge` reads `null` without admin access; then a refusal surfaces at the first merge, before anything lands.) |
+| `ship.merge: merge`, declared or by a `rebase-merge` or `merge-merge` preset | **STOP**: a branch whose PRs land as merge commits is not this drill's business; the set goes to `/ouro:land` per PR. Nothing has been squashed, pushed, merged or closed. |
+| a merge queue ("Require merge queue" is a classic setting too) | **STOP: hand the set to the queue.** `gh pr merge` enqueues instead of merging, so no merge can be checked against its squash, and a direct push is refused. |
+| a rules or merge-queue read that failed for any reason but the plan | **per PR through `/ouro:land`**: the batch cannot tell whether a queue or a required pull request is there, and landing blind is not safe. A `403 … Upgrade to GitHub Pro` is nothing to find: rulesets and, on a private repository, classic protection are gated by plan. |
+| strict checks: a ruleset's up-to-date policy, classic `strict`, or classic protection whose details did not read | **a set of two or more PRs goes to `/ouro:land` per PR**: 5a lands the first and finds the next `BEHIND`; 5b's push is refused, since the checks never ran on the squashes. |
+| required pull requests or status checks, by either kind, or classic details that did not read | **5a only**: a set that routes to 5b goes to `/ouro:land` per PR instead. |
 
-**Classic protection whose details did not read** is `classic_protection` true with the
-`/protection` read refused (it needs admin access; a non-admin gets `404`). Say so: whether
-the branch requires up-to-date PRs, pull requests or checks is then unknown, and the
-batch does not guess — it treats all three as required.
-
-Two ways a read comes back without an answer, and they mean different things:
-
-- **`403 … Upgrade to GitHub Pro or make this repository public`** — rulesets and, on a
-  private repository, classic protection are gated by plan: a repository on a plan without
-  them cannot carry what this read looks for. Continue; there is nothing to find.
-- **Anything else** (no network, no read access) on the rules or merge-queue read — the
-  batch cannot tell whether a merge queue or a required pull request is there, and landing
-  blind is not safe: on a merge-queue branch `gh pr merge -R "$SLUG"` enqueues the PR, 5a's check
-  stops at "not MERGED", and the queued PR can still merge later, outside any check. Say
-  so and land the set through `/ouro:land` per PR.
+Classic protection whose details did not read is `protection.enabled` with the `/protection` read
+refused (it needs admin access; a non-admin gets `404`): the script says so and treats up-to-date
+branches, pull requests and checks as all required.
 
 ## Preconditions
 
@@ -127,112 +75,59 @@ Two ways a read comes back without an answer, and they mean different things:
   in the git directory of the checkout the drill runs from; any other worktree has its own
   and sees no batch.
 - **Main checkout on another branch: the drill runs from a batch worktree** on the local
-  `$DEFAULT` branch. From the main checkout, after the fetch, run the gitignore check
-  `/ouro:execute` runs before it creates a worktree, then add the worktree and fast-forward
-  it to `origin/$DEFAULT`:
-
-  ```bash
-  DEFAULT=<[repo].default_branch>
-  : "${DEFAULT:?}"
-  mkdir -p .claude/worktrees/land-batch || exit 2
-  git check-ignore -q --no-index .claude/worktrees/land-batch \
-    || { rmdir -p .claude/worktrees/land-batch 2>/dev/null; echo "STOP: .claude/worktrees/ is not ignored - add it to .gitignore (exit 128 is a git error, above)"; exit 1; }
-  git worktree add .claude/worktrees/land-batch "$DEFAULT" || exit 1
-  git -C .claude/worktrees/land-batch merge --ff-only "origin/$DEFAULT" || exit 1
-  test "$(git -C .claude/worktrees/land-batch rev-parse HEAD)" = "$(git rev-parse "origin/$DEFAULT")" \
-    || { echo "STOP: local $DEFAULT is not origin/$DEFAULT - see git log origin/$DEFAULT..$DEFAULT"; exit 1; }
-  ```
-
-  A failed check removes the directory, and each parent it left empty, before its STOP. Exit 2
-  is a filesystem error, something in the way of the directory such as a file at its path, not
-  a missing entry.
-
-  A block that stopped after `worktree add` leaves the worktree registered: remove it (the end
-  of this skill) before running the block again. Every block from step 1 through step 7 then
-  runs from that worktree, step 4's gates from its root, so every batch file resolves in its
-  one git directory; the clean tree and the tip above are the worktree's. Re-read the binding
-  there: step 0 read the main checkout's, which its branch may have changed, and step 4's
-  `[[gate]]` list and `[overlays].land` are the default branch's. Git refuses the worktree
-  while the main checkout is itself on `$DEFAULT`, the form above. **Never a detached
-  worktree:** 5b's push sends the local `$DEFAULT` branch, never HEAD, so a detached
-  worktree's squashes do not land. Commit message files stay outside the worktree's tree.
+  `$DEFAULT` branch. From the main checkout, after the fetch,
+  `pwsh <ouro>/bin/Invoke-LandBatch.ps1 worktree` checks `.claude/worktrees/` is ignored, adds
+  `.claude/worktrees/land-batch` on `$DEFAULT` and fast-forwards it to `origin/$DEFAULT`; a
+  worktree a stopped run left registered is removed (the end of this skill) before it runs again.
+  Every call from step 1 through step 7 then runs from that worktree, step 4's gates from its
+  root, so every batch file resolves in its one git directory. Re-read the binding there: step 0
+  read the main checkout's, which its branch may have changed, and step 4's `[[gate]]` list and
+  `[overlays].land` are the default branch's. Git refuses the worktree while the main checkout is
+  itself on `$DEFAULT`, the form above. **Never a detached worktree:** 5b's push sends the local
+  `$DEFAULT` branch, never HEAD, so a detached worktree's squashes do not land. Commit message
+  files stay outside the worktree's tree.
 - Every PR in the set: CI green, review triaged.
 
 ## 1. Start the batch; merge order
 
-Start a new batch once, before anything else — it clears any previous batch's files:
-
-```bash
-GD=$(git rev-parse --git-dir) && test -n "$GD" || { echo "STOP: not in a git repository"; exit 1; }
-rm -f -- "$GD"/land-batch.*
-```
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 start` — once, before anything else: it clears any previous
+batch's files.
 
 Base-before-stacked: a PR whose base is another feature branch lands **after**
 its base. Branches that append to the same file tails (the `[overlays].land`
 tail-append hazards — locale tables, release notes) will conflict with each
-other — order doesn't prevent that, the recipe below handles it. A stacked PR
+other — order doesn't prevent that, step 3 handles it. A stacked PR
 does not land through step 2's squash at all: once its base's squash is in the
 batch, that squash replays the base over lines already written and conflicts, so
-the stacked PR lands as its own diff (step 3's stacked recipe).
+the stacked PR lands as its own diff (step 3's `stacked`).
 
-**A stacked PR routes the set to the local push drill (5b)**, and step 2 records that route
+**A stacked PR routes the set to the local push drill (5b)**, and `add` records that route
 when a PR's base is not `$DEFAULT`. Its GitHub base is its base's feature branch until that
 branch is deleted and GitHub retargets the PR, and a retarget after
-`gh pr merge -R "$SLUG" --delete-branch` deletes the ref through the API is not reliable — the
+`gh pr merge --delete-branch` deletes the ref through the API is not reliable — the
 dependent PR can be closed instead.
 
 ## 2. Per PR: check the head, squash, commit, record
 
-One call per PR, in merge order, with that PR's commit message written to a file — subject
-`type(scope): summary (#PR)`, body ending with `Closes #N`:
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 add -Pr <n> -Branch <head branch> -Message <file>`
 
-```bash
-DEFAULT=<[repo].default_branch>; SLUG=<[repo].slug>; PR=<number>; BRANCH=<head branch>; MSG='<file holding the commit message>'
-: "${DEFAULT:?}" "${SLUG:?}" "${PR:?}" "${BRANCH:?}" "${MSG:?}"
-test -r "$MSG" || { echo "STOP: no readable commit message at $MSG"; exit 1; }
-CLEAN=$(git stripspace < "$MSG")
-printf '%s\n' "$CLEAN" | head -n 1 | grep -qE "\(#$PR\)[[:space:]]*\$" && test -z "$(printf '%s\n' "$CLEAN" | sed -n 2p)" \
-  || { echo "STOP: the subject in $MSG reads '$(printf '%s\n' "$CLEAN" | head -n 1)' - it must end in (#$PR), with line 2 blank"; exit 1; }
-GD=$(git rev-parse --git-dir)
-read -r HEAD_SHA BASE <<< "$(gh pr view "$PR" -R "$SLUG" --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"')"
-test -n "$HEAD_SHA" && test "$HEAD_SHA" = "$(git rev-parse "origin/$BRANCH")" \
-  || { echo "STOP: #$PR's head is '$HEAD_SHA', not origin/$BRANCH - refetch and start the batch over"; exit 1; }
-test "$BASE" = "$DEFAULT" || cut -f2 "$GD/land-batch.tsv" 2>/dev/null | grep -qx "$BASE" \
-  || { echo "STOP: #$PR's base $BASE is not in the batch - land it first, or this diff misses what it builds on"; exit 1; }
-RANGE=$DEFAULT; test "$BASE" = "$DEFAULT" || RANGE=$BASE
-EMAILS=$(git log --no-merges --format='%aE' "origin/$RANGE..origin/$BRANCH" | tr '[:upper:]' '[:lower:]' | sort -u)
-test -n "$EMAILS" || { echo "STOP: no author read from origin/$RANGE..origin/$BRANCH for #$PR - already landed (drop it from the set), holds only merge commits (it brings no commit of its own to squash: drop it from the set), or a ref did not resolve (refetch and start the batch over; git's error is above)"; exit 1; }
-test -z "$(printf '%s\n' "$EMAILS" | sed -n 2p)" \
-  || { echo "STOP: #$PR's range has more than one author:"; git log --no-merges --format='%aN <%aE>' "origin/$RANGE..origin/$BRANCH" | sort -u; echo "two addresses for one person are a mailmap entry, not a second author; otherwise a squash would reassign their work, and this drill lands nothing it has not squashed - land #$PR on its own with /ouro:land, and recompose the batch without it"; exit 1; }
-AUTHOR=$(git log -1 --no-merges --format='%aN <%aE>' "origin/$RANGE..origin/$BRANCH")
-if ! git merge --squash "origin/$BRANCH"; then
-  test -z "$(git ls-files -u)" || { echo "STOP: #$PR conflicts with the batch - resolve it by step 3, then run step 3's block"; exit 1; }
-  echo "STOP: git merge --squash origin/$BRANCH failed for #$PR without a conflict (its error is above)"; exit 1
-fi
-git diff --cached --quiet && { echo "STOP: #$PR adds nothing on top of the batch - already landed or named twice"; exit 1; }
-git commit -q --author="$AUTHOR" -F "$MSG" \
-  || { git reset -q --hard HEAD; echo "STOP: git commit failed for #$PR (its error is above); the squash is undone"; exit 1; }
-printf '%s\t%s\t%s\t%s\n' "$PR" "$BRANCH" "$HEAD_SHA" "$(git rev-parse HEAD)" >> "$GD/land-batch.tsv"
-test "$BASE" = "$DEFAULT" || printf 'stacked: #%s is based on %s\n' "$PR" "$BASE" >> "$GD/land-batch.route"
-```
+One call per PR, in merge order, with that PR's commit message written to a file — subject
+`type(scope): summary (#PR)`, body ending with `Closes #N`. The call refuses, before the squash, a
+malformed message, a head that moved since the fetch (a PR nobody validated: refetch and start the
+batch over), a base that is neither `$DEFAULT` nor a branch already in the batch, and a range with
+no author (already landed, or merge commits only: drop it) or more than one; its STOP line says
+which.
+
+The commit carries the author of the PR's own range, never the session's, mailmap applied, with
+the committer the session's identity: a squash would reassign a second author's work, so a
+two-author PR lands on its own through `/ouro:land` and the batch is recomposed without it. A
+squash that stages nothing records no row; a failed commit undoes the squash, and the same call
+runs again once the cause is fixed.
 
 Each row of `land-batch.tsv` is `PR BRANCH HEAD_SHA SQUASH`, in merge order: 5a merges
 exactly that head with that commit's subject and body, and checks the merge against exactly
-that commit; 5b pushes the commit itself, so either path lands the `(#PR)` subject. The call
-stops before the squash when the message's subject does not end in it or its second line is not
-blank. The first row's
-`SQUASH` sits on the pre-batch tip. A head that moved since the fetch is a PR nobody
-validated. A failed commit (a hook, an unreadable message) undoes the squash — the tree is
-clean by precondition, so the reset returns HEAD to the previous squash — and the same call
-can run again once the cause is fixed. A squash that stages nothing records no row.
-
-The commit carries the author of the PR's own range, never the session's: the distinct authors
-of `origin/$DEFAULT..origin/$BRANCH` — its base branch's remote tip instead, for a stacked PR —
-merge commits excluded, mailmap applied. One author is set on the commit, name and email as the
-log gives them; the committer stays the session's identity. Two stop the call before anything is
-staged — a squash would reassign their work and this drill lands nothing it has not squashed, so
-that PR lands on its own through `/ouro:land` and the batch is recomposed without it. Step 3's
-blocks read the same range and stop the same way, before they commit.
+that commit; 5b pushes the commit itself, so either path lands the `(#PR)` subject. The first
+row's `SQUASH` sits on the pre-batch tip.
 
 `Closes #N` in the body makes GitHub close the issue when the commit lands on
 `$DEFAULT` — close nothing by hand, but **verify** afterwards. A PR with no issue
@@ -241,7 +136,8 @@ omits it.
 ## 3. Conflict recipe  ⚠️ the batch's sharp edges
 
 **A conflict resolved by hand routes the set to the local push drill (5b):** a server
-squash of the PR head cannot reproduce a hand resolution.
+squash of the PR head cannot reproduce a hand resolution. `add` stops with
+`conflicts with the batch` and leaves the squash in the tree:
 
 - **Check ALL conflict codes**: `git status --short` — `UU` (both modified) but
   also `AA` (both added: a file two branches introduced). A `grep ^UU` missed a
@@ -257,423 +153,174 @@ squash of the PR head cannot reproduce a hand resolution.
 - Add/add of an identical-purpose file (stacked base + extension): take the
   superset side (`git checkout --theirs`), then diff-sanity it.
 
+Once every path is resolved and staged, record the PR and the route:
+
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 record -Pr <n> -Branch <head branch> -Message <file>`
+
+It refuses while a path is unresolved, validates the message and the head as `add` does, reads the
+range's one author the same way, and commits the staged resolution with the message — or takes a
+commit already made with that subject, when that commit's author is the range's (else it names the
+`--amend --author` to run). It records the row and `conflict resolved by hand`, and the stacked
+route where the base is not `$DEFAULT`.
+
 ### A PR stacked on another branch in the set
 
-A PR whose base is another feature branch already in the batch needs neither step 2's
-squash nor a hand resolution. Its branch carries its base's commits, so the squash replays
-them over the lines the base's squash already wrote and conflicts, while the stacked
-branch's own diff applies cleanly on top. The recipe dry-runs that diff, discards the
-conflicted squash, and applies it — one call, which validates the message exactly as step 2
-does:
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 stacked -Pr <n> -Branch <head branch> -Message <file>`
 
-```bash
-DEFAULT=<[repo].default_branch>; SLUG=<[repo].slug>; PR=<number>; BRANCH=<head branch>; MSG='<file holding the commit message>'
-: "${DEFAULT:?}" "${SLUG:?}" "${PR:?}" "${BRANCH:?}" "${MSG:?}"
-test -r "$MSG" || { echo "STOP: no readable commit message at $MSG"; exit 1; }
-CLEAN=$(git stripspace < "$MSG")
-printf '%s\n' "$CLEAN" | head -n 1 | grep -qE "\(#$PR\)[[:space:]]*\$" && test -z "$(printf '%s\n' "$CLEAN" | sed -n 2p)" \
-  || { echo "STOP: the subject in $MSG reads '$(printf '%s\n' "$CLEAN" | head -n 1)' - it must end in (#$PR), with line 2 blank"; exit 1; }
-GD=$(git rev-parse --git-dir)
-read -r HEAD_SHA BASE <<< "$(gh pr view "$PR" -R "$SLUG" --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"')"
-test -n "$HEAD_SHA" && test "$HEAD_SHA" = "$(git rev-parse "origin/$BRANCH")" \
-  || { echo "STOP: #$PR's head is '$HEAD_SHA', not origin/$BRANCH - refetch and start the batch over"; exit 1; }
-test "$BASE" != "$DEFAULT" \
-  || { echo "STOP: #$PR's base is $DEFAULT - it is not stacked, land it with step 2's squash"; exit 1; }
-cut -f2 "$GD/land-batch.tsv" 2>/dev/null | grep -qx "$BASE" \
-  || { echo "STOP: #$PR's base $BASE is not in the batch - land it first, or this diff misses what it builds on"; exit 1; }
-EMAILS=$(git log --no-merges --format='%aE' "origin/$BASE..origin/$BRANCH" | tr '[:upper:]' '[:lower:]' | sort -u)
-test -n "$EMAILS" || { echo "STOP: no author read from origin/$BASE..origin/$BRANCH for #$PR - already landed (drop it from the set), holds only merge commits (it brings no commit of its own to squash: drop it from the set), or a ref did not resolve (refetch and start the batch over; git's error is above)"; exit 1; }
-test -z "$(printf '%s\n' "$EMAILS" | sed -n 2p)" \
-  || { echo "STOP: #$PR's range has more than one author:"; git log --no-merges --format='%aN <%aE>' "origin/$BASE..origin/$BRANCH" | sort -u; echo "a stale base reports $BASE's own commits here, if it was force-pushed since #$PR was cut - fetch and rebase the stacked branch onto origin/$BASE, then run this call again; otherwise two addresses for one person are a mailmap entry, not a second author, and a real second author means a squash would reassign their work, so land #$PR on its own with /ouro:land, and recompose the batch without it"; exit 1; }
-AUTHOR=$(git log -1 --no-merges --format='%aN <%aE>' "origin/$BASE..origin/$BRANCH")
-OUT=$(git merge-tree --write-tree --merge-base="origin/$BASE" HEAD "origin/$BRANCH"); RC=$?
-test "$RC" = 1 && { echo "STOP: #$PR's own diff conflicts with the batch:"; printf '%s\n' "$OUT" | sed -n '2,$p'; exit 1; }
-test "$RC" = 0 || { echo "STOP: git merge-tree failed for #$PR (exit $RC) - its error is above, and the squash is still in the tree"; exit 1; }
-git diff --binary "origin/$BASE" "origin/$BRANCH" > "$GD/land-batch.patch"
-test -s "$GD/land-batch.patch" \
-  || { echo "STOP: #$PR adds nothing on top of its base - already landed or named twice"; exit 1; }
-git reset -q --hard HEAD
-git apply --index --3way "$GD/land-batch.patch" \
-  || { git reset -q --hard HEAD; echo "STOP: git apply --index --3way failed for #$PR (its error is above); the batch is unchanged"; exit 1; }
-git diff --cached --quiet && { echo "STOP: #$PR adds nothing on top of the batch - already landed or named twice"; exit 1; }
-git commit -q --author="$AUTHOR" -F "$MSG" \
-  || { git reset -q --hard HEAD; echo "STOP: git commit failed for #$PR (its error is above); the applied diff is undone"; exit 1; }
-printf '%s\t%s\t%s\t%s\n' "$PR" "$BRANCH" "$HEAD_SHA" "$(git rev-parse HEAD)" >> "$GD/land-batch.tsv"
-printf 'stacked: #%s is based on %s\n' "$PR" "$BASE" >> "$GD/land-batch.route"
-echo "#$PR landed as its own diff; the batch routes to 5b"
-```
+A PR whose base is another feature branch already in the batch needs neither `add`'s squash nor a
+hand resolution: its branch carries its base's commits, so a squash would conflict, while its own
+diff applies cleanly on top. `stacked` dry-runs that diff against the batch as GitHub merges, stops
+if it conflicts, applies it with the range's author, and records the row and the stacked route. A
+PR whose base is `$DEFAULT` is refused: it is `add`'s. A stale base reports the base's own commits
+as a second author when it was force-pushed since the PR was cut: fetch and rebase the stacked
+branch onto its base, then run it again.
 
-`merge-tree` merges three ways while `git apply` matches context strictly, so a diff the dry
-run calls clean can still fail to apply when the batch moved lines around it: the apply is
-`--3way` for that, and `--binary` so a binary file is not a `Bin` summary the applier refuses.
-
-It records the stacked route and no hand-resolution line, because none happened. The row it
-appends is
-what the rest of the drill reads: a stacked PR has already routed the set to 5b, which
-pushes the commit itself and closes each PR by its row's `HEAD_SHA`, so a commit made by
-applying a diff lands exactly like a squash. 5a is never reached for such a set, and its
-tree check would not accept one.
-
-Once every path is resolved and staged, record the PR and the route in one call — it
-commits the staged resolution with the PR's message, or takes a commit already made with
-that message, when that commit's author is the range's one author:
-
-```bash
-DEFAULT=<[repo].default_branch>; SLUG=<[repo].slug>; PR=<number>; BRANCH=<head branch>; MSG='<file holding the commit message>'
-: "${DEFAULT:?}" "${SLUG:?}" "${PR:?}" "${BRANCH:?}" "${MSG:?}"
-test -r "$MSG" || { echo "STOP: no readable commit message at $MSG"; exit 1; }
-CLEAN=$(git stripspace < "$MSG")
-printf '%s\n' "$CLEAN" | head -n 1 | grep -qE "\(#$PR\)[[:space:]]*\$" && test -z "$(printf '%s\n' "$CLEAN" | sed -n 2p)" \
-  || { echo "STOP: the subject in $MSG reads '$(printf '%s\n' "$CLEAN" | head -n 1)' - it must end in (#$PR), with line 2 blank"; exit 1; }
-GD=$(git rev-parse --git-dir)
-test -z "$(git ls-files -u)" || { echo "STOP: unresolved paths remain:"; git ls-files -u | cut -f2 | sort -u; exit 1; }
-read -r HEAD_SHA BASE <<< "$(gh pr view "$PR" -R "$SLUG" --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"')"
-test -n "$HEAD_SHA" && test "$HEAD_SHA" = "$(git rev-parse "origin/$BRANCH")" \
-  || { echo "STOP: #$PR's head is '$HEAD_SHA', not origin/$BRANCH - refetch and start the batch over"; exit 1; }
-RANGE=$DEFAULT; test "$BASE" = "$DEFAULT" || RANGE=$BASE
-EMAILS=$(git log --no-merges --format='%aE' "origin/$RANGE..origin/$BRANCH" | tr '[:upper:]' '[:lower:]' | sort -u)
-test -n "$EMAILS" || { echo "STOP: no author read from origin/$RANGE..origin/$BRANCH for #$PR - already landed (drop it from the set), holds only merge commits (it brings no commit of its own to squash: drop it from the set), or a ref did not resolve (refetch and start the batch over; git's error is above)"; exit 1; }
-test -z "$(printf '%s\n' "$EMAILS" | sed -n 2p)" \
-  || { echo "STOP: #$PR's range has more than one author:"; git log --no-merges --format='%aN <%aE>' "origin/$RANGE..origin/$BRANCH" | sort -u; echo "two addresses for one person are a mailmap entry, not a second author; otherwise a squash would reassign their work, and this drill lands nothing it has not squashed - land #$PR on its own with /ouro:land, and recompose the batch without it"; exit 1; }
-AUTHOR=$(git log -1 --no-merges --format='%aN <%aE>' "origin/$RANGE..origin/$BRANCH")
-if git diff --cached --quiet; then
-  ! cut -f4 "$GD/land-batch.tsv" 2>/dev/null | grep -qx "$(git rev-parse HEAD)" \
-    && test "$(git log -1 --format=%s)" = "$(head -n 1 "$MSG")" \
-    || { echo "STOP: nothing staged, and HEAD is not an unrecorded commit with #$PR's message"; exit 1; }
-  HEAD_AUTHOR=$(git log -1 --format='%aN <%aE>')
-  HEAD_EMAIL=$(printf '%s' "$HEAD_AUTHOR" | sed -E 's/.*<(.*)>/\1/' | tr '[:upper:]' '[:lower:]')
-  AUTHOR_EMAIL=$(printf '%s' "$AUTHOR" | sed -E 's/.*<(.*)>/\1/' | tr '[:upper:]' '[:lower:]')
-  test "$HEAD_EMAIL" = "$AUTHOR_EMAIL" \
-    || { echo "STOP: HEAD's author is $HEAD_AUTHOR, not #$PR's range author $AUTHOR - amend it with: git commit --amend --no-edit --author=\"$AUTHOR\" - then run this call again"; exit 1; }
-else
-  git commit -q --author="$AUTHOR" -F "$MSG" || { echo "STOP: git commit failed for #$PR (its error is above); the resolution is still staged"; exit 1; }
-fi
-printf '%s\t%s\t%s\t%s\n' "$PR" "$BRANCH" "$HEAD_SHA" "$(git rev-parse HEAD)" >> "$GD/land-batch.tsv"
-printf 'conflict resolved by hand: #%s\n' "$PR" >> "$GD/land-batch.route"
-test "$BASE" = "$DEFAULT" || printf 'stacked: #%s is based on %s\n' "$PR" "$BASE" >> "$GD/land-batch.route"
-echo "#$PR recorded; the batch now routes to 5b"
-```
+A stacked PR has already routed the set to 5b, which pushes the commit itself and closes each PR
+by its row's `HEAD_SHA`, so a commit made by applying a diff lands exactly like a squash.
 
 ## 4. Validate the COMPOSED state — before anything lands
 
-No PR's CI built this tree. Non-negotiable: run **every `[[gate]]` the
-binding declares**, whatever its `areas`, from the repo root, on the composed
-tree, after the last squash commit. A gate that was green on one PR's head
-says nothing about the composition. A gate that replays a CI job runs with that job's `env:` set,
-read from the workflow. What the local run cannot reproduce, such as the runner account's `PATH` or
-a layout the job builds, is named in the gate evidence as CI's to check, never assumed green.
-
-A long gate is judged by two reads, never by the clock. One is whether the gate's own process — the
-process its command started to do the checking, not a helper it spawned that may outlive it — is
-still present. The other is its last progress marker, its newest output or log write, read again to
-see whether it moved. Either one present means the gate is alive and the run keeps waiting. With
-neither, the gate is wedged, and the run reports it at once: the finding names the gate command, the
-last progress marker it read and the absence of the gate's process. A wedged gate is neither a pass
-nor a fail, and its evidence goes where gate results already go. No duration, no timeout, no polling
-interval. A fresh core file, one written after the gate started, says a process the gate depends on
-died: it may mark the gate wedged while the gate's own process is still present. The finding then
-names the core file beside the gate command and the last progress marker. The run waits for the
-gate within its own turn: it runs the gate in the foreground, or blocks on a gate it started in the
-background, re-issuing the blocking call until the gate ends.
-It never ends its turn while a gate it started still runs, to wait for a completion notice or a
-scheduled wake-up: a headless session that ends its turn exits, and nothing reads the gate's result.
-
-```bash
-# for each [[gate]] in the binding, any <ouro> in the run replaced by the plugin root:
-<gate.run>          # base-ref gates take origin/$DEFAULT — the pre-batch tip, since nothing has landed yet
-```
+No PR's CI built this tree. Non-negotiable: run **every `[[gate]]` the binding declares**
+(`python3 <ouro>/bin/ouro-binding.py get gate` lists them), whatever its `areas`, from the repo
+root, on the composed tree, after the last squash commit; any `<ouro>` in a `run` is replaced by the
+plugin root first, and a base-ref gate takes `origin/$DEFAULT`, the pre-batch tip, since nothing
+has landed yet. A gate that was green on one PR's head says nothing about the composition. The run
+follows the Gate environment, What CI checks and Two reads sections of
+`skills/execute/references/dispatch-rules.md`.
 
 A local commit is cheap to amend; a broken default branch is not.
 Fix-in-place and amend the offending squash commit (unlanded history — amend is
 fine here, and it keeps the author git already recorded). **An amend routes the set to the
 local push drill (5b):** a server squash of the PR head lands the unfixed composition, and
 5a's tree check would not see it — it compares each merge with the squash recorded before the
-amend, so the unfixed tree matches. Record the route in one call:
+amend, so the unfixed tree matches. Record the route:
 
-```bash
-NOTE='<what the amend fixed>'
-: "${NOTE:?}"
-printf 'amended after step 2: %s\n' "$NOTE" >> "$(git rev-parse --git-dir)/land-batch.route"
-```
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 amend -Note "<what the amend fixed>"`
 
 5a also refuses, before its first merge, a HEAD that is not the last recorded squash or
 that no longer contains every recorded one — an amend nobody recorded stops there.
 
-**On 5a, no other commit goes on local `$DEFAULT` from here until 5a's reset.** A release
+**On 5a, no other commit goes on local `$DEFAULT` from here until `reset`.** A release
 commit, a version bump or any other follow-up is made after the batch has landed, on top
-of `origin/$DEFAULT`: 5a ends by resetting local `$DEFAULT` to what GitHub merged, and a
-commit made in between would be dropped there. On 5b such a commit can ride the single
-push.
+of `origin/$DEFAULT`: `reset` ends 5a by resetting local `$DEFAULT` to what GitHub merged, and
+refuses while a commit made in between sits there, since the reset would drop it. On 5b such a
+commit can ride the single push.
 
 ## 5. Land — route first
 
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 route`
+
 The set lands on GitHub (5a) unless one of these happened, and any one sends the whole
-set to the local push drill (5b) — or, where step 0's table refuses 5b on this branch, to
-`/ouro:land` per PR. Each is recorded as a line of `land-batch.route`, and 5a refuses while
+set to the local push drill (5b) — or, where step 0's verdict refuses 5b on this branch, to
+`/ouro:land` per PR. Each is recorded as a line of `land-batch.route`, and `land` refuses while
 that file holds one:
 
-- a PR in the set is stacked on another feature branch (step 2 records it);
-- step 3 resolved a conflict by hand (step 3's block records it);
-- step 4 amended a squash commit (step 4's block records it);
-- a path two or more PRs in the set change carries a `merge=` attribute (the block below
-  records it).
+- a PR in the set is stacked on another feature branch (`add` and `stacked` record it);
+- step 3 resolved a conflict by hand (`record` records it);
+- step 4 amended a squash commit (`amend` records it);
+- a path two or more PRs in the set change carries a `merge=` attribute (`route` records it).
 
-The route block prints the decision and exits 0 either way:
+`route` prints `route: 5a`, or `ROUTE: 5b -` with the lines. A `merge=` driver (`union` on a
+tail-append file, a custom driver) runs where the merge runs: locally it resolves the file, while
+GitHub's squash may conflict on the same inputs. That difference is measured with `git merge-tree`
+as a stand-in for GitHub's merge engine, not on GitHub itself; the route takes the safe side of it.
+The route compares the set's PRs with each other; a PR whose own change meets a base change made
+since it forked is what `land`'s first-call mergeability read catches instead.
 
-```bash
-GD=$(git rev-parse --git-dir)
-test -s "$GD/land-batch.tsv" || { echo "STOP: no batch recorded - step 2"; exit 1; }
-cut -f4 "$GD/land-batch.tsv" | while read -r s; do git diff-tree --no-commit-id --name-only -r "$s"; done \
-  | sort | uniq -d | git check-attr --stdin merge | grep -v ': merge: unspecified$' \
-  | sed 's/^/merge= attribute on a path two PRs change: /' >> "$GD/land-batch.route"
-if test -s "$GD/land-batch.route"; then echo "ROUTE: 5b -"; sort -u "$GD/land-batch.route"; else echo "route: 5a"; fi
-```
-
-A `merge=` driver (`union` on a tail-append file, a custom driver) runs where the merge
-runs: locally it resolves the file, while GitHub's squash may conflict on the same inputs.
-That difference is measured with `git merge-tree` as a stand-in for GitHub's merge engine,
-not on GitHub itself; the route takes the safe side of it. The route compares the set's
-PRs with each other; a PR whose own change meets a base change made since it forked is
-what 5a's first-call mergeability read catches instead.
-
-Why 5a can otherwise reproduce the validated tree: squash commits carry no branch parent,
-so the merge base of a PR head with the landed tip is the same commit locally and on
-GitHub, and a clean squash of the same head onto a tip whose tree equals the previous
-local squash's tree yields the local squash's tree. The checks below confirm that per
+5a can otherwise reproduce the validated tree because a squash commit carries no branch parent, so
+a clean squash of the same head onto the same tree yields the same tree; `land` confirms that per
 merge rather than trusting it.
 
 ### 5a. GitHub path — merge each PR, check each merge
 
-Run this block once per PR. It takes the next recorded PR that has not landed, so it
-cannot run out of order, and a stop recorded by any earlier call refuses every later one:
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 land` — once per PR. It takes the next recorded PR that has
+not landed, so it cannot run out of order; `STOP: every recorded PR has landed` is the signal to go
+on to `reset`. Every stop it records in `land-batch.stop` refuses every later call.
 
-```bash
-DEFAULT=<[repo].default_branch>; SLUG=<[repo].slug>
-: "${DEFAULT:?}" "${SLUG:?}"
-GD=$(git rev-parse --git-dir)
-stop() { echo "STOP: $*" | tee -a "$GD/land-batch.stop"; exit 1; }
-test -s "$GD/land-batch.tsv" || { echo "STOP: no batch recorded - step 2"; exit 1; }
-test ! -s "$GD/land-batch.route" || { echo "STOP: this batch routes to 5b, not 5a:"; sort -u "$GD/land-batch.route"; exit 1; }
-test ! -s "$GD/land-batch.stop" || { echo "STOP: this batch already stopped:"; cat "$GD/land-batch.stop"; exit 1; }
-N=$(( $(cat "$GD/land-batch.landed" 2>/dev/null | wc -l) + 1 ))
-IFS=$'\t' read -r PR BRANCH HEAD_SHA SQUASH < <(sed -n "${N}p" "$GD/land-batch.tsv")
-PREV=$(tail -n 1 "$GD/land-batch.landed" 2>/dev/null | cut -f2)
-test -n "$PREV" || PREV=$(git rev-parse "$(head -n 1 "$GD/land-batch.tsv" | cut -f4)^")
-: "${PR:?every recorded PR has landed}" "${BRANCH:?}" "${HEAD_SHA:?}" "${SQUASH:?}" "${PREV:?}"
-
-git fetch origin "$DEFAULT" || stop "cannot fetch $DEFAULT before #$PR"
-test "$(git rev-parse "origin/$DEFAULT")" = "$PREV" \
-  || stop "$DEFAULT is at $(git rev-parse --short "origin/$DEFAULT"), not $PREV - it moved since validation"
-if test "$N" = 1; then
-  test "$(git rev-parse HEAD)" = "$(tail -n 1 "$GD/land-batch.tsv" | cut -f4)" \
-    || stop "HEAD is not the last recorded squash - a squash was amended or a commit added after step 2"
-  LOST=$(cut -f4 "$GD/land-batch.tsv" | while read -r s; do git merge-base --is-ancestor "$s" HEAD || echo "$s"; done)
-  test -z "$LOST" || stop "recorded squashes no longer on HEAD: $LOST"
-  for pr in $(cut -f1 "$GD/land-batch.tsv"); do
-    for i in 1 2 3 4 5; do
-      M=$(gh pr view "$pr" -R "$SLUG" --json mergeable --jq .mergeable)
-      test "$M" = UNKNOWN && test "$i" != 5 || break
-      sleep 10
-    done
-    test "$M" = MERGEABLE || stop "#$pr reads '$M' against $DEFAULT before anything landed"
-    test "$(gh pr view "$pr" -R "$SLUG" --json isDraft --jq .isDraft)" = false \
-      || stop "#$pr is still a draft, or its draft state did not read, before anything landed - mark it ready (/ouro:execute §4) and start a new batch (steps 1-4)"
-  done
-fi
-for i in 1 2 3 4 5; do
-  read -r BASE STATE <<< "$(gh pr view "$PR" -R "$SLUG" --json baseRefName,mergeable,mergeStateStatus --jq '"\(.baseRefName) \(.mergeable) \(.mergeStateStatus)"')"
-  case "$STATE" in *UNKNOWN*) test "$i" = 5 || sleep 10 ;; *) break ;; esac
-done
-test -n "$BASE" || stop "cannot read #$PR's base and state"
-test "$BASE" = "$DEFAULT" || stop "#$PR's base reads '$BASE', not $DEFAULT - a PR retargeted since step 2 would merge into a branch nobody validated"
-test "$STATE" = "MERGEABLE CLEAN" || stop "#$PR is '$STATE', not MERGEABLE CLEAN"
-for pr in $(tail -n +"$N" "$GD/land-batch.tsv" | cut -f1); do
-  OPEN=$(gh api graphql --paginate -F number="$pr" -f owner="${SLUG%/*}" -f name="${SLUG#*/}" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
-    repository(owner: $owner, name: $name) { pullRequest(number: $number) { author { login } reviewThreads(first: 100, after: $endCursor) {
-    pageInfo { hasNextPage endCursor } nodes { isResolved comments(first: 1) { totalCount nodes { author { login } path url } } } } } } }' \
-    --jq '.data.repository.pullRequest as $p | $p.reviewThreads.nodes[] | select(.isResolved == false and .comments.totalCount == 1)
-    | .comments.nodes[0] | select(.author.login != $p.author.login) | "\(.author.login) \(.path) \(.url)"') \
-    || stop "cannot read #$pr's review threads"
-  test -z "$OPEN" || stop "#$pr has a review thread nobody answered - reply in it (/ouro:land step 8) or resolve it:"$'\n'"$OPEN"
-done
-DEL=; test "$(gh pr list -R "$SLUG" --base "$BRANCH" --state open --json number --jq length)" = 0 && DEL=--delete-branch
-gh pr merge "$PR" -R "$SLUG" --squash --match-head-commit "$HEAD_SHA" $DEL \
-  --subject "$(git log -1 --format=%s "$SQUASH")" \
-  --body "$(git log -1 --format=%b "$SQUASH")"
-VIEW=$(gh pr view "$PR" -R "$SLUG" --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "")"') \
-  || stop "cannot read #$PR after the squash-merge - check it by hand; nothing is recorded for it"
-read -r AFTER MERGE <<< "$VIEW"
-test "$AFTER" = MERGED && test -n "$MERGE" || stop "#$PR reads '$VIEW', not MERGED with a merge commit - after 'Base branch was modified' the default branch moved and nothing merged for #$PR: the PRs not on the report's origin list go to a new batch (steps 1-4), since this stop file refuses every later call"
-printf '%s\t%s\n' "$PR" "$MERGE" >> "$GD/land-batch.landed"
-git fetch origin "$DEFAULT" || stop "#$PR merged as $MERGE, but $DEFAULT could not be fetched to check it"
-test "$(git rev-parse "$MERGE^")" = "$PREV" \
-  || stop "#$PR merged as $MERGE onto $(git rev-parse "$MERGE^"), not onto $PREV - someone pushed in between"
-test "$(git rev-parse "$MERGE^{tree}")" = "$(git rev-parse "$SQUASH^{tree}")" \
-  || stop "#$PR merged as $MERGE, whose tree is not the validated $SQUASH's"
-echo "#$PR landed as $MERGE ($N of $(wc -l < "$GD/land-batch.tsv"))"
-```
-
-When every recorded PR has landed, the next call stops at the `PR` check with "every
-recorded PR has landed" — that is the signal to go on to the reset below.
-
-- **Before the first merge, the batch must still be the one step 4 validated.** HEAD is the
-  last recorded squash and contains every recorded one, and every PR in the set reads
-  `MERGEABLE` against `$DEFAULT` (`UNKNOWN` re-polled as below). That read catches what the
-  `merge=` route cannot: a PR whose change conflicts with a base change made since it forked,
-  which a local driver resolved and GitHub's squash would not — the batch stops before
-  anything lands instead of after the first PRs have.
-- **The tip must be the previously landed commit before each merge** — the pre-batch tip
-  for the first PR. A moved default branch stops the batch before that PR merges: the
-  composition step 4 validated is no longer what would land. `--match-head-commit` pins
-  only the PR head, never the base.
-- **Based on `$DEFAULT`, MERGEABLE and CLEAN, and nothing else.** A PR retargeted to another
-  branch since step 2 would squash-merge into a tree nobody validated, past step 0's
-  protected-prefix refusal. `gh pr merge -R "$SLUG"` itself refuses only `BLOCKED`,
-  `BEHIND` and `DIRTY`, so `UNKNOWN` and `UNSTABLE` would merge. `UNKNOWN` is routine right
-  after the previous merge moved the base, while GitHub recomputes: the read re-polls it
-  five times, ten seconds apart, and anything but `MERGEABLE CLEAN` stops.
-- **No open review thread on a PR still to land.** Before each merge the call reads the review
-  threads of every recorded PR not yet landed, row `N` of `land-batch.tsv` onward, and stops on
-  an open one by `/ouro:land` step 10's read and rule: not resolved, opened by anyone but the
-  PR's author, no reply. The first call refuses before anything lands; each later call re-reads
-  before its own merge, so a finding posted while the earlier PRs merged still stops. A failed
-  read stops too.
+- **Before the first merge, the batch must still be the one step 4 validated**: HEAD is the last
+  recorded squash and contains every recorded one, and every PR in the set reads `MERGEABLE`
+  against `$DEFAULT` and is not a draft. That read catches a conflict with a base change made
+  since the PR forked, which a local `merge=` driver resolved and GitHub's squash would not.
+- **The tip must be the previously landed commit before each merge**, the pre-batch tip for the
+  first PR: a moved default branch stops the batch, since `--match-head-commit` pins only the PR
+  head, never the base.
+- **Based on `$DEFAULT`, `MERGEABLE` and `CLEAN`, and nothing else.** `gh pr merge` itself refuses
+  only `BLOCKED`, `BEHIND` and `DIRTY`, so `UNKNOWN` and `UNSTABLE` would merge; `UNKNOWN` is
+  routine right after the previous merge moved the base, and is re-polled.
+- **No open review thread on a PR still to land**, read before each merge by `/ouro:land` step
+  10's rule, so a finding posted while the earlier PRs merged still stops.
 - **Never `--auto` or `--admin`.** `--auto` merges later, outside the check; `--admin`
   bypasses the rules the batch exists to pass.
-- **`--delete-branch` only when no open PR is based on `$BRANCH`.** Deleting a branch
-  another open PR targets closes or strands that PR; a failed count adds no delete.
-- **Judge the merge by `gh pr view -R "$SLUG"`, not by `gh`'s exit code.** The local cleanup of
-  `gh pr merge -R "$SLUG"` can fail after the server merge succeeded (`/ouro:land` step 11);
-  `state` and `mergeCommit` are the server's answer. A read that fails is not an answer: it
-  stops the batch without recording the PR as landed or as not landed.
-- **Check the merge commit, not the tip.** Its parent must be the previously landed commit
-  and its tree must equal `$SQUASH`'s tree. Comparing `origin/$DEFAULT`'s tip instead
-  misreads a push that landed after the merge as a mismatch; the parent check runs first,
-  so a push that landed between the tip check and the merge is named as that.
+- **`--delete-branch` only when no open PR is based on `$BRANCH`.**
+- **Judge the merge by `gh pr view`, not by `gh`'s exit code**: the local cleanup of
+  `gh pr merge` can fail after the server merge succeeded (`/ouro:land` step 11). A read that
+  fails is not an answer: it stops the batch without recording the PR as landed or as not landed.
+- **Check the merge commit, not the tip.** Its parent must be the previously landed commit and
+  its tree must equal `SQUASH`'s tree; comparing `origin/$DEFAULT`'s tip instead misreads a push
+  that landed after the merge as a mismatch.
 
 **Stop and report.** A moved tip, a batch that is no longer the validated one, a PR not
 MERGEABLE, not based on `$DEFAULT`, not MERGEABLE and CLEAN, not MERGED or not readable (gh's
 `Base branch was modified` is this case: the default branch moved, nothing merged, and the PRs not
 on the report's origin list go to a new batch), an open review thread or a failed thread read, or
-a parent or tree mismatch
-stops the batch, and `land-batch.stop` keeps every later call from merging. Report what
-landed from `origin`, not from `land-batch.landed` alone — a read that failed after a
-successful merge leaves that PR out of the file:
+a parent or tree mismatch stops the batch, and `land-batch.stop` keeps every later call from
+merging. Report what landed from `origin`, not from `land-batch.landed` alone — a read that failed
+after a successful merge leaves that PR out of the file:
 
-```bash
-DEFAULT=<[repo].default_branch>
-: "${DEFAULT:?}"
-GD=$(git rev-parse --git-dir)
-test -s "$GD/land-batch.tsv" || { echo "STOP: no batch recorded - step 2"; exit 1; }
-git fetch origin "$DEFAULT" || exit 1
-cat "$GD/land-batch.stop" 2>/dev/null
-echo "on origin/$DEFAULT since the batch began:"
-git log --oneline "$(git rev-parse "$(head -n 1 "$GD/land-batch.tsv" | cut -f4)^")..origin/$DEFAULT"
-```
-
-A PR whose merge mismatched is already merged, so it is on that list, with the mismatch.
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 report` — the stop, then what is on `origin/$DEFAULT` since
+the batch began. A PR whose merge mismatched is already merged, so it is on that list, with the
+mismatch.
 
 **Local `$DEFAULT` has then diverged from `origin/$DEFAULT`:** it still holds every local
 squash, so `git status -sb` reads ahead — and behind as well once something merged or
-someone pushed, when `git pull --ff-only` fails. The way back to a clean tree is the reset
-block below — fetch, the extra-commit check, reset. A continuation re-squashes the PRs
-that are not on the report's `origin` list from there and re-gates: steps 1–4, as a new
-batch. What to do about the rest of the set is the owner's call.
+someone pushed, when `git pull --ff-only` fails. The way back to a clean tree is `reset`. A
+continuation re-squashes the PRs that are not on the report's `origin` list from there and
+re-gates: steps 1–4, as a new batch. What to do about the rest of the set is the owner's call.
 
 After the last merge — or after a stop — replace the local squash commits with what GitHub
 merged:
 
-```bash
-DEFAULT=<[repo].default_branch>
-: "${DEFAULT:?}"
-GD=$(git rev-parse --git-dir)
-LAST_SQUASH=$(tail -n 1 "$GD/land-batch.tsv" 2>/dev/null | cut -f4)
-: "${LAST_SQUASH:?no batch recorded - step 2}"
-git fetch origin "$DEFAULT" || exit 1
-if test "$(git rev-parse HEAD)" != "$LAST_SQUASH"; then
-  echo "STOP: local $DEFAULT has commits after the last squash $LAST_SQUASH, and a reset would drop them:"
-  git log --oneline "$LAST_SQUASH..HEAD"
-  echo "carry them onto what landed instead: git rebase --onto origin/$DEFAULT $LAST_SQUASH"
-  exit 1
-fi
-git reset --hard "origin/$DEFAULT"
-```
-
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 reset` — it fetches and resets local `$DEFAULT` to
+`origin/$DEFAULT`. It refuses while local `$DEFAULT` holds a commit after the last squash, which the
+reset would drop, and names the way to carry it: `git rebase --onto origin/$DEFAULT <last squash>`.
 After a clean batch the reset is tree-equal to the local squashes by the checks above.
 Then clean up as in 5b's last four bullets (surviving remote branches, worktrees and
 local branches, the sweep, the `Closes #N` issues).
 
 ### 5b. Local push drill — push once, then close each PR
 
-The push is its own call, and it checks that the remote now holds exactly what was pushed:
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 push`
 
-```bash
-DEFAULT=<[repo].default_branch>; SLUG=<[repo].slug>
-: "${DEFAULT:?}" "${SLUG:?}"
-GD=$(git rev-parse --git-dir)
-test -s "$GD/land-batch.tsv" || { echo "STOP: no batch recorded - step 2"; exit 1; }
-for pr in $(cut -f1 "$GD/land-batch.tsv"); do
-  HEAD_SHA=$(awk -F'\t' -v pr="$pr" '$1 == pr {print $3}' "$GD/land-batch.tsv")
-  HEAD_NOW=$(gh pr view "$pr" -R "$SLUG" --json headRefOid --jq .headRefOid)
-  test -n "$HEAD_NOW" || { echo "STOP: cannot read #$pr's head"; exit 1; }
-  test "$HEAD_NOW" = "$HEAD_SHA" \
-    || { echo "STOP: #$pr's head is '$HEAD_NOW', not the $HEAD_SHA squashed in step 2 - what was pushed to it is not in its squash: recompose the batch (the non-fast-forward bullet)"; exit 1; }
-  # 5a's merge guard refuses a draft by its merge state; this push reads no merge state, so it asks.
-  test "$(gh pr view "$pr" -R "$SLUG" --json isDraft --jq .isDraft)" = false \
-    || { echo "STOP: #$pr is still a draft, or its draft state did not read - it is marked ready once its fix commit verifies (/ouro:execute §4)"; exit 1; }
-  OPEN=$(gh api graphql --paginate -F number="$pr" -f owner="${SLUG%/*}" -f name="${SLUG#*/}" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
-    repository(owner: $owner, name: $name) { pullRequest(number: $number) { author { login } reviewThreads(first: 100, after: $endCursor) {
-    pageInfo { hasNextPage endCursor } nodes { isResolved comments(first: 1) { totalCount nodes { author { login } path url } } } } } } }' \
-    --jq '.data.repository.pullRequest as $p | $p.reviewThreads.nodes[] | select(.isResolved == false and .comments.totalCount == 1)
-    | .comments.nodes[0] | select(.author.login != $p.author.login) | "\(.author.login) \(.path) \(.url)"') \
-    || { echo "STOP: cannot read #$pr's review threads"; exit 1; }
-  test -z "$OPEN" || { echo "STOP: #$pr has a review thread nobody answered - reply in it (/ouro:land step 8) or resolve it:"; echo "$OPEN"; exit 1; }
-done
-git push origin "$DEFAULT" || exit 1
-test "$(git ls-remote origin "refs/heads/$DEFAULT" | cut -f1)" = "$(git rev-parse HEAD)" \
-  || { echo "STOP: origin's $DEFAULT is not local HEAD after the push"; exit 1; }
-```
+**Before `git push`, every PR in the set must still be the head step 2 squashed, with no open
+review thread.** The call reads each PR in `land-batch.tsv`: its head against its row's `HEAD_SHA`,
+whether it is still a draft, and its review threads by `/ouro:land` step 10's rule; a moved head, a
+draft, an open thread or a failed read stops it, and nothing lands or closes. A moved head is step
+8's usual path for a valid finding, and what was pushed is not in the squash, so recompose as the
+non-fast-forward bullet below says. Then it pushes the local `$DEFAULT` once and checks that origin
+now holds exactly what was pushed.
 
-Then one call per PR. `SHA` is that PR's squash commit as pushed — `git log --oneline
-"origin/$DEFAULT"` shows it by its `(#PR)` subject — and the close refuses unless that commit
-is on `origin/$DEFAULT` and the PR's head is still the `HEAD_SHA` step 2 squashed — a commit
-pushed to the PR after its squash never landed:
-
-```bash
-DEFAULT=<[repo].default_branch>; SLUG=<[repo].slug>; PR=<number>; SHA=<its squash commit on origin>
-: "${DEFAULT:?}" "${SLUG:?}" "${PR:?}" "${SHA:?}"
-GD=$(git rev-parse --git-dir)
-HEAD_SHA=$(awk -F'\t' -v pr="$PR" '$1 == pr {print $3}' "$GD/land-batch.tsv")
-: "${HEAD_SHA:?no row for this PR in land-batch.tsv - step 2}"
-git fetch origin "$DEFAULT" || exit 1
-git merge-base --is-ancestor "$SHA" "origin/$DEFAULT" \
-  || { echo "STOP: $SHA is not on origin/$DEFAULT - #$PR has not landed, so it is not closed"; exit 1; }
-HEAD_NOW=$(gh pr view "$PR" -R "$SLUG" --json headRefOid --jq .headRefOid)
-test -n "$HEAD_NOW" || { echo "STOP: cannot read #$PR's head - #$PR is not closed"; exit 1; }
-test "$HEAD_NOW" = "$HEAD_SHA" \
-  || { echo "STOP: #$PR's head is '$HEAD_NOW', not the $HEAD_SHA squashed in step 2 - what was pushed after it has not landed, so #$PR is not closed"; exit 1; }
-gh pr close "$PR" -R "$SLUG" --comment "Landed on $DEFAULT via the local squash-merge drill — $SHA." --delete-branch
-```
-
-- **Before `git push`, every PR in the set must still be the head step 2 squashed, with no open
-  review thread.** The push call reads each PR in `land-batch.tsv`: its head against its row's
-  `HEAD_SHA`, then whether it is still a draft, then its review threads by `/ouro:land` step 10's
-  read and rule. A moved head, a draft, an open thread or a failed read ends the call with exit 1: nothing lands and nothing is closed. A
-  thread answered by a reply or a resolve alone lets the call run again. A moved head is step 8's
-  usual path for a valid finding (fix, commit, verify, push, reply), and what was pushed is not in the
-  squash, so recompose as the non-fast-forward bullet below says.
 - **A `GH013` or `GH006` rejection means step 0 missed a rule** — one it could not read, one added since,
   or a bypass the pusher does not have. `GH013: Repository rule violations found` names a
   ruleset; `GH006: Protected branch update failed` names classic protection. Nothing is lost:
-  the push call stops there, and a close runs only for a commit it finds on `origin`. The
+  the push stops there, and a close runs only for a commit it finds on `origin`. The
   set has to land through `/ouro:land` per PR instead.
 - **A non-fast-forward rejection (`[rejected] … (fetch first)` or `(non-fast-forward)`) means
   `$DEFAULT` moved since the batch was composed** — step 4's gates validated a composition on
   the old tip, not what would land. The landing stops there and nothing is closed. Recompose
-  on the new tip: first the reset block under 5a, which reads `land-batch.tsv` before step 1
-  clears it. A commit it names after the last squash — a release commit that was to ride the
-  push — is not carried: reset to that squash, run the block again, and re-make the commit on
-  top of the new batch. Then steps 1–4 again, as a new batch, from the fetched `origin/$DEFAULT`.
+  on the new tip: first `reset`, which reads `land-batch.tsv` before `start` clears it. A commit it
+  names after the last squash — a release commit that was to ride the push — is not carried: reset
+  to that squash, run `reset` again, and re-make the commit on top of the new batch. Then steps 1–4
+  again, as a new batch, from the fetched `origin/$DEFAULT`.
+
+Then one call per PR. `-Sha` is that PR's squash commit as pushed — `git log --oneline
+"origin/$DEFAULT"` shows it by its `(#PR)` subject:
+
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 close -Pr <n> -Sha <its squash commit on origin>`
+
+The close refuses unless that commit is on `origin/$DEFAULT` and the PR's head is still the
+`HEAD_SHA` step 2 squashed — a commit pushed to the PR after its squash never landed. It closes the
+PR with the landing comment and `--delete-branch`.
+
 - Close a **stacked** PR before its base (avoids GitHub retarget noise).
 - **`--delete-branch` on close silently no-ops** (unlike on merge): verify with
   `git ls-remote --heads origin refs/heads/<branch>` and `git push origin --delete refs/heads/<branch>`
@@ -688,71 +335,26 @@ gh pr close "$PR" -R "$SLUG" --comment "Landed on $DEFAULT via the local squash-
 
 ## 6. Watch default-branch CI
 
-Watch the runs that built the batch's composition on `$DEFAULT`, listed from these commits:
+`pwsh <ouro>/bin/Invoke-LandBatch.ps1 watch`
 
-- **5a** — every merge commit in `land-batch.landed` (`cut -f2` of it); after a stop, every
-  batch commit on the stop report's `origin` list, up to and including the newest one. Each
-  merge is its own push, and a workflow with a `paths:` filter runs for a merge only when that
-  merge's own diff touches its list, so the last merge may not trigger that workflow at all:
-  each workflow's newest run per event across the batch's commits built the validated
-  composition. After a stop at a parent or tree mismatch, the mismatched merge commit landed and
-  is on that list — include it, not only the matching ones before it.
+It hands the right commits to `<ouro>/bin/Watch-PullRequestChecks.ps1 -Sha`, the watch `/ouro:land`
+step 7 describes: the newest run per workflow and event across the commits, each judged by its
+own conclusion.
+
+- **5a** — every merge commit `land` recorded. Each merge is its own push, and a workflow with a
+  `paths:` filter runs for a merge only when that merge's own diff touches its list, so the last
+  merge may not trigger that workflow at all: each workflow's newest run per event across the
+  batch's commits built the validated composition. After a stop at a parent or tree mismatch, the
+  mismatched merge commit landed and is recorded, so it is watched with the matching ones before
+  it. After a stop whose read failed after its merge, that commit is not in `land-batch.landed`:
+  run the watch script by hand with every batch commit on the report's `origin` list, up to and
+  including the newest one.
 - **5b** — `origin/$DEFAULT` right after the push: that one push's diff covers the whole batch.
-- **Nothing landed** (a stop before the first merge) — there is nothing to watch; say so
-  with `SHAS=none`.
+- **Nothing landed** (a stop before the first merge) — there is nothing to watch; it says so.
 
-`SHAS` may be space- or newline-separated. The block lists the runs of every commit in it and
-watches the newest run per workflow and event across them: the workflow by its
-`workflowDatabaseId`, not its name, which two workflow files can share; the newest by the latest
-`createdAt`, the higher `databaseId` on a tie. A run that a later commit's run of the same
-workflow and event supersedes is not watched once that newer run is listed, and the verdict
-reads only the newest runs.
-
-```bash
-DEFAULT=<[repo].default_branch>; SLUG=<[repo].slug>; SHAS="<the commits above, space- or newline-separated, or none when nothing landed>"
-: "${DEFAULT:?}" "${SLUG:?}"
-test "$SHAS" != none || { echo "nothing landed: nothing to watch"; exit 0; }
-: "${SHAS:?}"
-stop() { echo "STOP: $*"; exit 1; }
-# The newest run per workflow and event across every commit in $SHAS: one id per line.
-list_runs() {
-  ALL=""
-  for s in $(printf '%s\n' "$SHAS"); do
-    R=$(gh run list -R "$SLUG" --branch "$DEFAULT" --commit "$s" --limit 100 --json databaseId,workflowDatabaseId,event,createdAt \
-      --jq '.[] | "\(.createdAt)\t\(.databaseId)\t\(.workflowDatabaseId)/\(.event)"') || return 1
-    ALL="$ALL$R
-"
-  done
-  printf '%s' "$ALL" | sort -k1,1r -k2,2nr | awk -F '\t' 'NF == 3 && !seen[$3]++ {print $2}'
-}
-for i in 1 2 3 4 5 6; do
-  RUNS=$(list_runs) || stop "cannot list the runs of $SHAS"
-  test -n "$RUNS" && break
-  test "$i" = 6 || sleep 10
-done
-if test -z "$RUNS"; then
-  echo "no run for any of $SHAS after a minute: no workflow was triggered for them (path filters, as /ouro:land step 7 notes)"
-else
-  WATCHED=""
-  while true; do
-    NEW=""
-    for run in $(printf '%s\n' "$RUNS"); do
-      case " $WATCHED " in *" $run "*) ;; *) NEW="$NEW $run" ;; esac
-    done
-    test -n "$NEW" || break
-    for run in $(printf '%s\n' "$NEW"); do gh run watch "$run" -R "$SLUG" --interval 60; WATCHED="$WATCHED $run"; done
-    RUNS=$(list_runs) || stop "cannot list the runs of $SHAS"
-  done
-  BAD=""
-  for run in $(printf '%s\n' "$RUNS"); do
-    STATE=$(gh run view "$run" -R "$SLUG" --json status,conclusion --jq '"\(.status) \(.conclusion)"') || stop "cannot read run $run's status"
-    read -r RSTATUS CONCLUSION <<< "$STATE"
-    test "$RSTATUS" = completed || stop "run $run is still $RSTATUS, with no conclusion yet"
-    case "$CONCLUSION" in success|skipped|neutral) ;; *) BAD="$BAD $run:$CONCLUSION" ;; esac
-  done
-  test -z "$BAD" || stop "run(s) concluded outside success/skipped/neutral (/ouro:land step 9 judges a bad run):$BAD"
-fi
-```
+No run after a minute means no workflow was triggered for them (path filters, as `/ouro:land`
+step 7 notes); a run that concluded outside success, skipped and neutral is `/ouro:land` step 9's
+to judge.
 
 The drill isn't done at the last merge or the push, nor when `$DEFAULT` is green: step 7 closes
 the wave.
@@ -760,12 +362,11 @@ the wave.
 ## 7. Close the wave: follow-ups, then the queue's anchors
 
 Run it before the batch worktree goes, since it reads the batch files there. Nothing landed (step 6
-watched `none`): skip it.
+watched nothing): skip it.
 
 A batch lands several reviewed PRs at once, and two things each landing leaves are still open when
-`$DEFAULT` goes green. Each review's findings outside its diff, and whatever its PR deferred, have
-to go somewhere. And the landing has split or changed lines that queued `agent-ready` issues quote
-as anchors.
+`$DEFAULT` goes green: each review's findings outside its diff, and whatever its PR deferred; and
+the lines the landing split or changed that queued `agent-ready` issues quote as anchors.
 
 1. **Follow-ups, per landed PR.** Run `/ouro:land` step 12 once for each PR this batch landed. On
    5a, that is each batch PR on `origin/$DEFAULT`; after a stop, each batch PR on the stop report's
@@ -781,20 +382,15 @@ as anchors.
    nothing here; its own landing does.
 2. **Then the queue's anchors.** Run `/ouro:land` step 13 as it is written there, once for the
    wave rather than once per PR: in the checkout the batch ran in (the batch worktree, where
-   there is one), whose `$DEFAULT` 5a's reset block or 5b's push left at `origin/$DEFAULT`, and
+   there is one), whose `$DEFAULT` `reset` or 5b's push left at `origin/$DEFAULT`, and
    against the files of every PR this batch landed (`land-batch.tsv`, or the stop report's
    `origin` list after a stop) in place of the one PR step 13 names.
 
-**A batch worktree goes last** — after step 7, or once the owner ends a stopped batch: steps 6
-and 7 read the batch files in that worktree's git directory, and a stopped batch runs 5a's reset
-block there first, so no squash stays on the local `$DEFAULT`
-branch the next batch starts from. An untracked file left in the worktree, such as gate
-output, makes the removal refuse: check `git -C .claude/worktrees/land-batch status --short`.
-Move **every** tool shell out of it — each holds its own current directory, so moving one frees
-nothing while another still sits there — then remove it from the main checkout, as `/ouro:land`
-step 11 states: `[repo].checkout`, else the directory the batch-worktree block ran from, then
-`git -C <that checkout> worktree remove .claude/worktrees/land-batch`, and verify the directory
-is gone from the **filesystem** — `git worktree list` cannot see an orphan, for the reason step 11
-gives. Its branch is
-`$DEFAULT` and is never deleted. A PR branch the main checkout itself is on is deleted after
-that, once the main checkout has switched away from it.
+**A batch worktree goes last** — after step 7, or once the owner ends a stopped batch: steps 6 and
+7 read the batch files in its git directory, and a stopped batch runs `reset` there first, so no
+squash stays on the local `$DEFAULT` branch the next batch starts from. An untracked file left in
+it makes the removal refuse. Move **every** tool shell out of it, then from the main checkout
+(`[repo].checkout`, else the directory the `worktree` call ran from)
+`git -C <that checkout> worktree remove .claude/worktrees/land-batch`, and verify the directory is
+gone from the **filesystem**, as `/ouro:land` step 11 says. Its branch is `$DEFAULT` and is never
+deleted; a PR branch the main checkout itself is on is deleted once the checkout has switched away.

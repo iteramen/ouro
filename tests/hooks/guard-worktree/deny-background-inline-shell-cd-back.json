@@ -1,0 +1,16 @@
+{
+  "decision": "deny",
+  "reason": "background command",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${TEMP}/ouro-hooks/.claude/worktrees/w1",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "cd /tmp && bash -lc 'cd -; sleep 5'",
+      "description": "a recorded call",
+      "run_in_background": true
+    }
+  }
+}

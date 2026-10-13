@@ -37,6 +37,13 @@ git remote --help
 echo "$gh_repo"
 ```
 
+An awk field reached through a `-v` variable, and a brace expansion -- neither is a skill argument:
+
+```bash
+awk -F'\t' -v pf=1 -v hf=3 '$pf == pr {print $hf}' rows.tsv
+set -- a b; echo "${1}"
+```
+
 A fenced `toml` block holding `GH_REPO` -- not a bash or sh block, so it is never extracted:
 
 ```toml

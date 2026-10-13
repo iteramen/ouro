@@ -72,7 +72,8 @@ sync = "merge"                           # merge | rebase — how `land` brings 
 merge = "squash"                         # squash | merge — how the PR lands (default: squash)
 forbidden_check = "required"             # required | off — whether the manifest applier checks what it
                                          # posts against the private token list — see "The
-                                         # forbidden-token check" (default: required)
+                                         # forbidden-token check" (default: follows the target's
+                                         # visibility)
 
 [models]                                 # every key optional — the model tier per role, an alias
                                          # never a pinned version, so a role follows the current
@@ -166,32 +167,31 @@ things and tend to find different defects, so the choice is a real one.
 a range, or a claim set; it answers with a JSON verdict that names the files it read; two rounds
 at most, a third only for a new blocker, with the triage of round 1 given to round 2.
 
-What the value decides, by the issue's size (its `Size:` line, contract §4). Under
-`external-audit`, this applies to every S, M and fused deliverable alike: an unavailable reader —
-the CLI `ship.external_cli` names is not found, round 1 exits 1, round 1 exits 3 twice,
-or the run may not call it (a policy or network rule forbids it) — falls back to `/ouro:review`
-in its place, and the record says so.
+**Who reviews what**, by the value, the issue's `Size:` line (contract §4) and whether
+`/ouro:fuse` built it, is this table and nowhere else: contract §4, `/ouro:execute`,
+`/ouro:review`, `/ouro:fuse`, `/ouro:triage`, `/ouro:land` and `/ouro:e2e` cite it. Every
+`/ouro:review` pass takes the weight contract §4 assigns the diff, light, sized or the probe
+format, whatever the cell.
 
-- **An S** not built by `/ouro:fuse` — under `adversarial-review` it takes `/ouro:review`;
-  under `copilot` or `external-audit` it takes the named reader; under `none` it takes no
-  reviewer.
-- **An M** — every M not built by `/ouro:fuse` takes `/ouro:review`, whatever is named; under
-  `copilot` or `external-audit` it takes the named reader as well, under `adversarial-review` that
-  pass alone.
-- **An S or M built by `/ouro:fuse`** — reviewed per file cluster, by the reader `/ouro:fuse` step 5
-  names: under `external-audit`, that reader takes each cluster in place of `/ouro:review`; under
-  any other value, `/ouro:review` takes each cluster, and under `copilot` the named reader also
-  reads the PR.
+| | `adversarial-review` | `copilot` | `external-audit` | `none` |
+|---|---|---|---|---|
+| **S**, not fused | `/ouro:review` | Copilot on the PR | the reader | no reviewer |
+| **M**, not fused | `/ouro:review` | `/ouro:review`, then Copilot on the PR | `/ouro:review` and the reader | `/ouro:review` |
+| **S or M, fused** (`/ouro:fuse` step 5, per file cluster) | `/ouro:review` per cluster | `/ouro:review` per cluster, then Copilot on the PR | the reader per cluster | `/ouro:review` per cluster |
 
-Under `stop-at-pr` the owner sees every PR whatever the value. The binding names one value, and
-nothing requires it to name a second; the `/ouro:review` every M not fused takes is the loop's own.
+**The availability rule.** An unavailable reader — the CLI `ship.external_cli` names is not
+found, round 1 exits 1, round 1 exits 3 twice, or the run may not call it (a policy or network
+rule forbids it) — falls back to `/ouro:review` in every cell that names the reader, and the
+record says so. An `S` re-derived as `M` after the commit (contract §4) takes the `M` row. Under
+`stop-at-pr` the owner sees every PR whatever the value. The binding names one value, and nothing
+requires it to name a second; the `/ouro:review` every `M` takes is the loop's own.
 
 ### The landing policy
 
 `ship.landing` names the pair below it in one word: how `land` brings a branch up to date before
 the PR, and how the PR lands. It is what `/ouro:init` asks at onboarding, and what the installer
-writes into a new binding. `/ouro:land` reads `sync` and `merge` at its step 0, through the two
-dotted reads below, and lands the way they answer. A range with more than one author lands by
+writes into a new binding. `/ouro:land`'s scripts read `sync` and `merge` through the two dotted
+reads below, and land the way they answer. A range with more than one author lands by
 merge commit under either merge answer, since a squash would reassign their work.
 `/ouro:land-batch` reads `merge`, lands squash commits only, and refuses a batch on a binding
 that lands by merge.
@@ -234,21 +234,35 @@ read their keys. The smoke check keeps `--model haiku`: it tests reachability, n
 ### The forbidden-token check
 
 `bin/apply-manifest.py` matches every body file and `create` title it would post against the
-private token list (README, "The private token list") and refuses on a hit or a missing list.
+private token list (README, "The private token list") and refuses on a hit, and on a missing
+list except where the key and the repository's visibility say below that it does not.
 `ship.forbidden_check = "off"` turns that check off for this repository: the applier skips the
 check and the matcher lookup, and prints one line saying the binding turned it off, as it does for
 `--no-forbidden-check`. It is for a private repository whose own issues legitimately carry the
 values a list would hold, where the check refuses every apply on a host with no list and nothing
-useful can go on one. Absent, or `"required"`, the check runs.
+useful can go on one. `"required"` runs the check whatever the repository's visibility, and a
+missing list refuses.
 
-The applier reads the key from the working directory's binding, and honours `"off"` only when that
+Absent, the check follows the visibility of the repository the run posts to. When a list is set
+(`OURO_FORBIDDEN_TOKENS` set and non-empty) the check runs and a hit refuses, whatever the
+visibility. When none is set, the applier reads the visibility with one `gh repo view` call, in a
+dry run too: `PRIVATE` or `INTERNAL` prints `forbidden-token check skipped: no list, private
+repository` and goes on, while `PUBLIC`, a read that fails or runs past its time bound, or any other
+value refuses as a missing list does. A private repository that wants the refusal declares
+`"required"`, which holds for runs from its own checkout.
+
+The applier reads the key from the working directory's binding, and honours it only when that
 binding's `repo.slug` is the repository the run posts to, compared case-insensitively, and
 `ouro-binding.py check` passes that binding: run from that checkout with `--repo` naming another,
-the check runs, and a line says so. No binding, a binding that fails `check`, a read that fails, or
-any other value leaves the check on. The key is repository policy, so the machine-local overlay
-below cannot set it. It does not reach `bin/forbidden-tokens.py`: its `scan`
-gate and its `hook` mode stay fail-closed whatever a binding declares, since they guard the
-plugin's own text and the commands a session runs.
+the key counts as absent whatever its value, and an `"off"` binding says it does not turn the check
+off there. No binding is absent too. For a binding naming the repository the run posts to, a
+failed `check` or any other value counts as `"required"`. A binding read that fails counts as
+`"required"` whatever the binding names. The key is repository policy, so the machine-local overlay
+below cannot set it. It does not reach `bin/forbidden-tokens.py`'s `scan` gate, which stays
+fail-closed whatever a binding declares, since it guards the plugin's own text; the `hook` mode,
+with no list, follows this same rule, read from the binding at the session's working directory
+and the repository its `repo.slug` names, a binding that fails `check` blocking as `"required"`
+does.
 
 ## The machine-local overlay — `.claude/ouro.local.toml`
 
@@ -306,7 +320,8 @@ sees as a directory. The overlay entry is unchecked.
 - Every `[models]` key is optional, and each must be one of `opus`, `sonnet`, `haiku`, `fable` —
   see "Model tiers".
 - `ship.forbidden_check` is optional and, when present, must be `"required"` or `"off"`; any
-  other value or type is refused. Like every key but `repo.checkout`, the overlay may not set it.
+  other value or type is refused. Absent follows the target repository's visibility, as "The
+  forbidden-token check" says. Like every key but `repo.checkout`, the overlay may not set it.
 - `ship.landing` must name one of the four pairs above, and an explicit `ship.sync` or
   `ship.merge` beside it must agree with the pair it names — the error names both keys. All three
   are optional; absent means today's behaviour, which is what `merge-squash` names.
@@ -329,7 +344,7 @@ sees as a directory. The overlay entry is unchecked.
 - A `[[gate]]` may also declare `paths`, optional: a non-empty list of non-empty strings. `check`
   refuses a value that is not a list, an empty list and an empty or non-string entry, naming the
   gate. Each entry is a git pathspec, matched against the repository-relative paths a pull request
-  changes, the way `git diff --name-only` matches its pathspec arguments when run from the
+  or a push changes, the way `git diff --name-only` matches its pathspec arguments when run from the
   repository root: git sees each entry as written, magic such as `:(glob)` included. Without magic,
   a wildcard such as `*.md` matches at every level. A gate with no `paths` always runs. A gate
   with `paths` runs only when the pull request changes a path that one of its entries matches, and
@@ -337,10 +352,12 @@ sees as a directory. The overlay entry is unchecked.
   with only such paths changed, only the gates without `paths` run. The gates Action reads
   `paths` when its selection input is on, and `execute` and `land` always read them, to narrow
   their area-selected set with the same fallbacks; `gates`, `land-batch` and `fuse` never read
-  them. With selection on, every gate runs in these cases: an event other than a pull request; a
-  diff that cannot be read; and a change to `.claude/ouro.toml`, a workflow or the gates Action.
-  A path-scoped gate whose list misses a file it depends on is skipped wrongly when only that file
-  changes, so a list names everything its gate reads.
+  them. With selection on, a pull request's diff is read against its base and a push's against
+  the tip the branch had before it, and every gate runs in these cases: an event that is neither;
+  a push with no previous tip, such as a tag or a new branch; a diff that cannot be read; and a
+  change to a workflow or the gates Action. A gate that reads the binding names `.claude/ouro.toml`
+  in its `paths`. A path-scoped gate whose list misses a file it depends on is skipped wrongly
+  when only that file changes, so a list names everything its gate reads.
 - `owner.ruling_approvers` is non-empty.
 - No `[labels]` set names one of the eight states or the two modifiers — the contract fixes those
   — and `area` and `type` are disjoint. Both are compared case-insensitively, because GitHub label

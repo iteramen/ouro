@@ -121,13 +121,14 @@ Set-StrictMode -Version Latest
 $script:EmittedSignals = @('S1', 'S2', 'S3', 'S4a', 'S4b', 'S7', 'S8', 'S9', 'S10')
 
 # The sentence the docs-freshness sweep writes into its rolling issue: emitted minus
-# report-only. Both halves are ordered by $EmittedSignals, never by how the binding happens to
-# list them, so a reordered `report_only` produces no diff in the rewritten body. A declared
-# signal this gate cannot emit is named in neither half -- it is silent in the gate too.
+# report-only, with S9 report-only whatever the list holds, since only Sweep mode computes it.
+# Both halves are ordered by $EmittedSignals, never by how the binding happens to list them, so
+# a reordered `report_only` produces no diff in the rewritten body. A declared signal this gate
+# cannot emit is named in neither half -- it is silent in the gate too.
 function Get-BlockingSignalSentence {
     param([string[]]$ReportOnly = $ReportOnlySignals, [string[]]$Signals = $EmittedSignals)
-    $blocking = @($Signals | Where-Object { $_ -notin $ReportOnly })
-    $quiet    = @($Signals | Where-Object { $_ -in $ReportOnly })
+    $blocking = @($Signals | Where-Object { $_ -notin $ReportOnly -and $_ -ne 'S9' })
+    $quiet    = @($Signals | Where-Object { $_ -in $ReportOnly -or $_ -eq 'S9' })
     "Gate signals (blocking): {0}. Report-only: {1}." -f
         $(if ($blocking) { $blocking -join ', ' } else { 'none' }),
         $(if ($quiet)    { $quiet    -join ', ' } else { 'none' })

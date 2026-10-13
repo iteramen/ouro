@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "never by a pattern",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "pkill -f replay",
+      "description": "a recorded call"
+    }
+  }
+}

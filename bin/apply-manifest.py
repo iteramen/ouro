@@ -17,10 +17,13 @@ nonzero exit, or no forbidden-tokens.py beside this script refuses too. --no-for
 skips the check and the lookup, and the run prints one line saying so -- for a host that holds no
 list, as the weekly pass's CI does. So does a working directory's binding declaring
 ship.forbidden_check = "off" when its repo.slug is the repository the run posts to and
-`ouro-binding.py check` passes it; a binding that fails that check, a failed read of it, or no
-binding leaves the check on. Each matcher call and each binding read is bounded at HELPER_TIMEOUT
-(30) seconds: a binding read that runs past it is a failed read, and a matcher call that does
-refuses. See check_forbidden.
+`ouro-binding.py check` passes it. With the key absent for this run (no binding, or one naming
+another repository) and no list set, the check follows the visibility of the repository the run
+posts to, read once with `gh repo view` even in a dry run: PRIVATE or INTERNAL skips the check with
+one line, and anything else -- PUBLIC, a failed read, another value -- refuses as a missing list
+does. The read is made only when forbidden_policy answers "absent" and no list is set. Each matcher call, binding read and visibility
+read is bounded at HELPER_TIMEOUT (30) seconds: a binding or visibility read that runs past it is
+a failed read, and a matcher call that does refuses. See check_forbidden.
 manifest.json is read as utf-8-sig, and render reads each body file the same way and drops a
 repeated mark, so a UTF-8 byte-order mark on either applies and no posted body carries one; a
 manifest that cannot be read as JSON -- absent, not UTF-8, text that does not parse, an object
@@ -110,13 +113,13 @@ so one that fails is reported and the next still runs; a failed step still exits
 failure, and with every step applied, a re-render that fails exits nonzero naming each issue it
 left.
 """
-import errno, json, pathlib, re, stat, subprocess, sys, time
+import errno, json, os, pathlib, re, stat, subprocess, sys, time
 if hasattr(sys.stdout, "reconfigure"): sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 MATCHER = pathlib.Path(__file__).resolve().parent / "forbidden-tokens.py"
 BINDING = pathlib.Path(__file__).resolve().parent / "ouro-binding.py"
-HELPER_TIMEOUT = 30  # seconds, per matcher call and per binding read
-MATCH_RUN = subprocess.run  # bound at import: a caller that replaces subprocess.run to stand in for gh leaves the matcher and check_off's binding read real
+HELPER_TIMEOUT = 30  # seconds, per matcher call, binding read and visibility read
+MATCH_RUN = subprocess.run  # bound at import: a caller that replaces subprocess.run to stand in for gh leaves the matcher and forbidden_policy's binding reads real
 REPO = None  # --repo, resolved at the bottom, before main() runs
 UNATTENDED = False  # --unattended, resolved at the bottom
 TARGETS = None  # --targets <file>, resolved at the bottom: the intake's own targets file
@@ -707,13 +710,21 @@ def check_forbidden(d, steps):
     no matcher beside this script refuses too, relaying the matcher's stderr cause or what was
     missing; so does a matcher call that runs past HELPER_TIMEOUT (30) seconds.
     --no-forbidden-check skips all of it, the lookup included, and says so once; so does a binding
-    that turns the check off -- see check_off.
+    that turns the check off -- see forbidden_policy. So does a run whose key is absent, with no
+    list set (OURO_FORBIDDEN_TOKENS unset or empty), against a repository whose visibility is
+    exactly PRIVATE or INTERNAL, read by one `gh repo view <repo> --json visibility` call bounded at
+    HELPER_TIMEOUT, made in a dry run too; PUBLIC, a failed or timed-out read, or any other value
+    leaves the check on, and a missing list then refuses. A set list makes no such read.
     """
     if "--no-forbidden-check" in sys.argv:
         print("forbidden-token check skipped: --no-forbidden-check")
         return
-    if check_off():
+    policy = forbidden_policy()
+    if policy == "off":
         print('forbidden-token check skipped: the binding declares ship.forbidden_check = "off"')
+        return
+    if policy == "absent" and not os.environ.get("OURO_FORBIDDEN_TOKENS") and private_target():
+        print("forbidden-token check skipped: no list, private repository")
         return
     if not MATCHER.is_file():
         raise SystemExit(f"forbidden-token check refused, nothing applied: {MATCHER.name} is not beside this script")
@@ -746,35 +757,57 @@ def check_forbidden(d, steps):
                          + "\n".join(bad))
 
 
-def check_off():
-    """True when the working directory's binding declares ship.forbidden_check = "off", its
-    repo.slug is the repository this run posts to, compared case-insensitively as GitHub does, and
-    `ouro-binding.py check` passes it.
+def private_target():
+    """True when `gh repo view` reports the repository this run posts to as PRIVATE or INTERNAL.
+    Its own subprocess.run call, not gh(): the slug is the command's argument and a dry run must
+    read too. A failed or timed-out read, or any other output, is False."""
+    try:
+        r = subprocess.run(["gh", "repo", "view", REPO, "--json", "visibility"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=HELPER_TIMEOUT)
+        return r.returncode == 0 and json.loads(r.stdout)["visibility"] in ("PRIVATE", "INTERNAL")
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError, TypeError):
+        return False
 
-    The key is that repository's policy, so a run from its checkout with --repo naming another
-    keeps the check, and says so. No binding, a binding that fails check, a failed read, or any
-    other value keeps it silently: the run is then the one the key's absence makes. Each binding
-    call is bounded at HELPER_TIMEOUT (30) seconds, and one that runs past it is a failed read."""
+
+def forbidden_policy():
+    """The working directory's binding's ship.forbidden_check for this run: "off", "required" or "absent".
+
+    The key is the policy of the repository the binding's repo.slug names, compared
+    case-insensitively as GitHub does, and only a binding that `ouro-binding.py check` passes
+    counts. A binding naming another repository, whatever its value, or no binding, is "absent"
+    for this run, and an "off" one naming another says so. For a binding naming this repository, a
+    failed check and any present value but "off" are "required". A binding read that fails or runs
+    past HELPER_TIMEOUT (30) seconds is "required" whatever the binding names. "required" keeps the
+    check."""
     def binding(*args):
         try:
             return MATCH_RUN([sys.executable, str(BINDING), *args], capture_output=True, encoding="utf-8",
                              errors="replace", timeout=HELPER_TIMEOUT)
         except subprocess.TimeoutExpired:
             return None
-
-    def get(key):
-        r = binding("get", key)
-        return r.stdout.removesuffix("\n") if r is not None and r.returncode == 0 else None
-    if get("ship.forbidden_check") != "off":
-        return False
-    slug = get("repo.slug")
-    if slug is None:
-        return False
-    if slug.encode().lower() == str(REPO).encode().lower():
-        r = binding("check")
-        return r is not None and r.returncode == 0
-    print(f'ship.forbidden_check = "off" covers the binding\'s {slug}, not {REPO}: the forbidden-token check runs')
-    return False
+    r = binding("get", "ship.forbidden_check")
+    if r is None:
+        return "required"
+    if r.returncode != 0:
+        if r.stderr.startswith(("error: no binding at", "error: not inside a git work tree")):
+            return "absent"
+        if not r.stderr.startswith("error: no such key: ship.forbidden_check"):
+            return "required"
+    value = r.stdout.removesuffix("\n") if r.returncode == 0 else None
+    s = binding("get", "repo.slug")
+    if s is None or s.returncode != 0:
+        return "required"
+    slug = s.stdout.removesuffix("\n")
+    if slug.encode().lower() != str(REPO).encode().lower():
+        if value == "off":
+            print(f'ship.forbidden_check = "off" covers the binding\'s {slug}, not {REPO}: it does not turn the forbidden-token check off here')
+        return "absent"
+    c = binding("check")
+    if c is None or c.returncode != 0:
+        return "required"
+    if value is None:
+        return "absent"
+    return "off" if value == "off" else "required"
 
 
 def check_bodies(d, steps):
@@ -1080,7 +1113,7 @@ def main():
     check_writable(d, steps)  # the write side: render's own path, before the first step renders one
     check_order(d, steps)
     check_refs(d, steps)  # before check_bodies, whose shrink check reads issues
-    check_forbidden(d, steps)  # before check_bodies too: a refusal makes no gh call, a read included
+    check_forbidden(d, steps)  # before check_bodies too: a refusal makes no gh call but the one visibility read
     check_bodies(d, steps)
     ids = {}
     deferred = []  # (issue, body_file) whose body had forward references

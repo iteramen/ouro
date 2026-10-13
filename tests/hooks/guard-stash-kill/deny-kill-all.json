@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "every process",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "kill -9 -1",
+      "description": "a recorded call"
+    }
+  }
+}

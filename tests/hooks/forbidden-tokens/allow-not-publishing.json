@@ -1,0 +1,12 @@
+{
+  "decision": "allow",
+  "env": { "OURO_FORBIDDEN_TOKENS": null },
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": { "command": "git status --porcelain && echo zzqx-secret", "description": "Show the tree's status" }
+  }
+}

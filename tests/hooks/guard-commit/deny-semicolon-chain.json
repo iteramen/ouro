@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "never after",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "make test; git commit -F m",
+      "description": "a recorded call"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "decision": "allow",
+  "only": "linux|darwin",
+  "spawn": {
+    "cwd": "${TEMP}/ouro-hooks/.claude/worktrees/other"
+  },
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "kill ${PID} # pid-ok: recorded at step 3 of this run",
+      "description": "a recorded call"
+    }
+  }
+}

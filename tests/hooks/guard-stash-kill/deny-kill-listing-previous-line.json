@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "process listing",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "pid=$(pgrep -f sleeper)\nkill $pid",
+      "description": "a recorded call"
+    }
+  }
+}

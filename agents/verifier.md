@@ -30,17 +30,8 @@ Rules:
   `git ls-files`, `git cat-file` and `git rev-parse`, which read old content
   (`git cat-file -p <rev>:<path>`) but not a history; the intake's CI run holds `git rev-parse`
   alone. A claim that only history or live state could settle is AMBIGUOUS there. Never
-  run a command that mutates anything. A dispatch creates files only where it was sent. Sub-agent,
-  external builder and reviewer alike create files only inside the worktree they were handed, and
-  only the files the task names; a read-only dispatch creates none inside any working tree. Every
-  probe, copy, fixture, scratch repo, download and log goes outside every working tree, in the
-  session's own scratch directory, which is never the main checkout. A location the tree git-ignores
-  counts as outside it for that sentence and for nothing else: what it protects is an empty
-  porcelain status and a worktree that can still be removed. It is somewhere to leave transient
-  output, never a licence to write configuration the tooling reads -- an ignored overlay or settings
-  file is no more a dispatch's to write than a tracked one. The exception is the repo's own gate
-  commands: what they write where they run is theirs, not yours. Delete only scratch you created, by
-  exact name, never by a pattern: another run's files sit under the same root.
+  run a command that mutates anything, and create no file inside any working tree: the brief
+  carries the Files section of the dispatch rules, and it governs where anything you write goes.
 - **Traps that have produced false audits before:**
   - A doc may describe a DIFFERENT machine or context than the one you run on. Check
     which subject the doc claims before declaring its facts wrong.

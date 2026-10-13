@@ -138,7 +138,6 @@ $ByNamePairs = @(@('bin/apply-manifest.py', 'scripts/apply-manifest.py'),
     @('bin/external-audit.py', 'scripts/external-audit.py'),
     @('bin/forbidden-tokens.py', 'scripts/forbidden-tokens.py'),
     @('bin/ouro-binding.py', 'scripts/ouro-binding.py'),
-    @('bin/record-counts.py', 'scripts/record-counts.py'),
     @('docs/binding.md', 'docs/ouro-binding.md'),
     @('docs/contract.md', 'docs/ouro-contract.md'),
     @('docs/docs-governance.md', 'docs/ouro-docs-governance.md'),
@@ -309,7 +308,6 @@ try {
             @('bin/apply-manifest.py', 'scripts/apply-manifest.py'),
             @('bin/drift-claims.py', 'scripts/drift-claims.py'),
             @('bin/forbidden-tokens.py', 'scripts/forbidden-tokens.py'),
-            @('bin/record-counts.py', 'scripts/record-counts.py'),
             @('bin/Vendor-Ouro.ps1', 'scripts/Vendor-Ouro.ps1'))) {
         Assert-Equal $false ((Get-RootHex $Base $pair[0]) -ceq '<no source>') "and $($pair[0]) is there to compare"
         Assert-Equal (Get-RootHex $Base $pair[0]) (Read-Hex $repo $pair[1]) "and $($pair[1]) is $($pair[0]), byte for byte"
@@ -368,8 +366,8 @@ try {
     Assert-Equal 1 $workflows.Count 'the tail points the workflows at the scripts directory once'
     # Joined, not indexed: a line the tail does not print is a red row of its own, not an index
     # out of bounds that ends the suite before the cases below it.
-    Assert-Equal '  - .github/workflows/*: point every ouro/bin/ path at scripts/' ($workflows -join "`n") `
-        'and that line ends there, naming no gate or suite of its own'
+    Assert-Equal "  - .github/workflows/*: point every ouro/bin/ path at scripts/, except the weekly pass's ouro/bin/loop-outcomes.py step, which keeps its plugin checkout" ($workflows -join "`n") `
+        'and that line exempts the loop-outcomes step, naming no gate or suite of its own'
     $skillPaths = @($tail | Where-Object { $_ -cmatch '<ouro>/bin/' })
     Assert-Equal 1 $skillPaths.Count 'and one line names the plugin-relative bin paths the vendored skills carry'
     Assert-Equal $true (($skillPaths -join "`n") -clike '*scripts/*') 'and points them at the scripts directory'

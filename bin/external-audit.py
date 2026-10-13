@@ -20,19 +20,20 @@ working directory (git rev-parse --show-toplevel), not the working directory its
 defaults to "default", which passes no model flag, so the CLI's own default applies; any other
 value maps to the adapter's own model flag. Claims mode reads no diff, so --cwd may sit above
 several repositories when the claims span more than one. A run that starts the CLI still runs
-git status there (silent outside a repository), and without --cwd the default comes from git
-rev-parse.
+git status there (silent outside a repository), or, with no git on PATH, skips it with one
+stderr line; without --cwd the default comes from git rev-parse, and with no git it is the
+working directory.
 
 Prints the session id (round 1 mints one) and the parsed verdict; the id to pass to --resume next
 round is always the one on the "resume with" line, not necessarily this one. Exits 0 on APPROVE, 2
 on REVISE, 1 on a transport/parse failure, a usage error, an unknown or missing --cli, --resume
 without --digest (or the reverse), not exactly one of --range and --claims, an empty claim set or an
-empty diff, a CLI not found on PATH, or a CLI found as a .cmd or .bat shim with an argument
-holding one of &|<>^% (cmd.exe's own syntax; refused before it starts), and 3 when an APPROVE
-carries no evidence that anything was read - no critique and an empty files_read. A 3 is a failed
-round, not a round: re-run it, and do not spend the two-round budget on it. Every artifact
-(prompt, raw stdout, verdict.json) lands under %TEMP%/external-audit-<user>/<session>/round-N/ --
-never in the repo. Repo-agnostic by design.
+empty diff, diff mode with no git on PATH, a CLI not found on PATH, or a CLI found as a .cmd or
+.bat shim with an argument holding one of &|<>^% (cmd.exe's own syntax; refused before it
+starts), and 3 when an APPROVE carries no evidence that anything was read - no critique and an
+empty files_read. A 3 is a failed round, not a round: re-run it, and do not spend the two-round
+budget on it. Every artifact (prompt, raw stdout, verdict.json) lands under
+%TEMP%/external-audit-<user>/<session>/round-N/ -- never in the repo. Repo-agnostic by design.
 
 Ported from the owner's prior single-CLI reader; the adapter seam below is what this port adds,
 so a second CLI is a new Adapter subclass, not a rewrite of main().
@@ -163,7 +164,7 @@ def _raise_system_exit(signum: int, frame: object) -> None:
 def _default_cwd() -> str | None:
     """--cwd's default: the repository root of the invocation directory (not the directory
     itself), so a run from a subdirectory still diffs/reads the whole repo. Outside a repo, or
-    with no git on PATH at all (--dry-run needs none; claims mode needs none for its subject),
+    with no git on PATH at all (claims mode needs none, --dry-run included),
     this answers nothing and the caller falls back to None -- "here", the old default -- rather
     than refusing."""
     if shutil.which("git") is None:
@@ -476,7 +477,7 @@ def main() -> int:
     ap = _ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cli", required=True,
                     help="the external CLI adapter: " + ", ".join(sorted(ADAPTERS)))
-    ap.add_argument("--cwd", help="where the CLI runs and what it may read; default: the repository root of the current working directory")
+    ap.add_argument("--cwd", help="where the CLI runs and what it may read; default: the repository root of the current working directory, or with no git the working directory")
     ap.add_argument("--model", default="default",
                     help="the CLI's model, or 'default' (the default) to pass no model flag")
     ap.add_argument("--range", help="diff mode: git diff range, e.g. master..HEAD or <sha>..<sha>")
@@ -505,6 +506,10 @@ def main() -> int:
 
     cwd = args.cwd or _default_cwd()
     claims_mode = bool(args.claims)
+    has_git = shutil.which("git") is not None
+    if not has_git and not claims_mode:
+        print("external-audit: 'git' not found on PATH; diff mode needs it to build the diff", file=sys.stderr)
+        return 1
     lens = args.lens or (CLAIMS_LENS if claims_mode else DEFAULT_LENS)
 
     session = args.resume or str(uuid.uuid4())
@@ -566,10 +571,14 @@ def main() -> int:
                       f"when it runs {resolved}; refused, nothing started", file=sys.stderr)
                 return 1
 
-    # Unconditional in both modes, as the port's source ran it: claims mode makes no git call
-    # to build its subject, but --cwd may still sit inside a repo, and outside one this is
-    # silent (sh() does not check the exit code).
-    dirty_before = sh("git", "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
+    # In both modes whenever git is on PATH: claims mode makes no git call to build its subject,
+    # but --cwd may still sit inside a repo, and outside one this is silent (sh() does not check
+    # the exit code). Only claims mode reaches here without git.
+    dirty_before = None
+    if has_git:
+        dirty_before = sh("git", "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
+    else:
+        print("external-audit: 'git' not found on PATH; the working-tree check is skipped", file=sys.stderr)
     started = time.time()
     stdin_arg = None
     if adapter.stdin_prompt:
@@ -647,7 +656,8 @@ def main() -> int:
         print(f"external-audit: could not write the prompt to {adapter.binary}'s stdin ({stdin_errors[0]}) "
               "- failed round, re-run it", file=sys.stderr)
         return 1
-    dirty_after = sh("git", "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
+    dirty_after = dirty_before if dirty_before is None else sh(
+        "git", "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
     if dirty_after != dirty_before:
         changed = sorted(set(dirty_after.splitlines()) ^ set(dirty_before.splitlines()))
         # write tools are disallowed, so this is usually the author editing during a parallel

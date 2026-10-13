@@ -1,0 +1,14 @@
+{
+  "decision": "allow",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "PowerShell",
+    "tool_input": {
+      "command": "gh issue comment 7 -R owner/repo --body \"done; the push is next\"",
+      "description": "a recorded call"
+    }
+  }
+}

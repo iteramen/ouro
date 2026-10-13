@@ -11,12 +11,12 @@ real subprocess -- the point is what the driver puts on the CLI's argv and how i
 stdout, not the driver's Python internals.
 
 Claims mode is used for most rows (no diff to construct, and no git call the driver makes to
-build its subject), except that the driver's dirty-tree check runs unconditionally in both modes
-(ported from the prior single-CLI reader, which never gated it on the mode either), so one shared
-git-init'd fixture repo serves every claims-mode row, the dirty-tree row included -- most run the
-driver FROM that repo (its own process cwd, not the --cwd flag) and leave --cwd unset, so the
-driver's own default (the repository root of its invocation directory) resolves back to it; the
-rows that exercise --cwd itself, and diff mode's own two-commit fixture, say so.
+build its subject), except that the driver's dirty-tree check runs in both modes whenever git is
+on PATH (ported from the prior single-CLI reader, which never gated it on the mode either), so
+one shared git-init'd fixture repo serves every claims-mode row, the dirty-tree row included --
+most run the driver FROM that repo (its own process cwd, not the --cwd flag) and leave --cwd
+unset, so the driver's own default (the repository root of its invocation directory) resolves
+back to it; the rows that exercise --cwd itself, and diff mode's own two-commit fixture, say so.
 
 stdlib only, like bin/*.py. Run: python3 tests/external-audit/external-audit.Tests.py
 """
@@ -309,35 +309,13 @@ def expected_grok_argv(prompt_path, session, resume=False, model=None):
 # --- the stub launcher finds python3 by its own absolute path, not PATH: SAFE_PATH drops any
 # directory holding a stubbed real CLI, so a box where python3 shares that directory loses it from
 # every child's PATH too. PATH here drops every directory that resolves python3, to prove the
-# launcher does not need it on PATH at all. On a box where that directory also holds git (e.g. a
-# Linux box where both sit in /usr/bin), the dirty-tree check still needs git, so a fresh scratch
-# directory holding only a symlink to it is put back on PATH; where the symlink is refused (no
-# privilege for it on Windows, say), the row is skipped with a visible line naming why. Linux always
-# grants the symlink, so a skip there is a broken probe and fails the row.
+# launcher does not need it on PATH at all.
 PATH_NO_PYTHON3 = os.pathsep.join(
     p for p in SAFE_PATH.split(os.pathsep) if p and not shutil.which("python3", path=p))
-_skip_no_python3_reason = None
-if shutil.which("git", path=PATH_NO_PYTHON3) is None:
-    _real_git = shutil.which("git")
-    if _real_git is None:
-        _skip_no_python3_reason = "no git resolves on this machine's own PATH"
-    else:
-        _git_only = pathlib.Path(tempfile.mkdtemp(prefix="git-only-", dir=PARENT_TMP))
-        try:
-            os.symlink(_real_git, _git_only / pathlib.Path(_real_git).name)
-            PATH_NO_PYTHON3 = str(_git_only) + os.pathsep + PATH_NO_PYTHON3
-        except OSError as e:
-            _skip_no_python3_reason = f"git shares python3's directory and symlinking it failed: {e}"
-if _skip_no_python3_reason and sys.platform.startswith("linux"):
-    check(f"the stub launcher still runs when no directory on PATH resolves python3 (skipped on Linux: {_skip_no_python3_reason})",
-          False)
-elif _skip_no_python3_reason:
-    print(f"  skip: the stub launcher still runs when no directory on PATH resolves python3 ({_skip_no_python3_reason})")
-else:
-    stub_dir, record, env_extra = make_stub(reply_text=APPROVE_REPLY, exit_code=0)
-    r = run_driver(BASE_ARGS, stub_dir, {**env_extra, "PATH": str(stub_dir) + os.pathsep + PATH_NO_PYTHON3}, cwd=REPO)
-    check("the stub launcher still runs when no directory on PATH resolves python3",
-          r.returncode == 0)
+stub_dir, record, env_extra = make_stub(reply_text=APPROVE_REPLY, exit_code=0)
+r = run_driver(BASE_ARGS, stub_dir, {**env_extra, "PATH": str(stub_dir) + os.pathsep + PATH_NO_PYTHON3}, cwd=REPO)
+check("the stub launcher still runs when no directory on PATH resolves python3",
+      r.returncode == 0)
 
 # --- exit codes on the four verdict shapes -------------------------------------------------
 stub_dir, record, env_extra = make_stub(reply_text=APPROVE_REPLY, exit_code=0)
@@ -409,6 +387,23 @@ check("diff mode: an APPROVE with empty files_read exits 3", r.returncode == 3)
 stub_dir, record, env_extra = make_stub(reply_text=DIFF_REVISE, exit_code=0)
 r = run_driver(DIFF_ARGS, stub_dir, env_extra, cwd=DIFF_REPO)
 check("diff mode: a REVISE exits 2", r.returncode == 2)
+
+# --- no git on PATH: PATH is the stub's directory alone, since the launcher and the driver both
+# start python by its absolute path. Claims mode skips the dirty-tree check with one stderr line
+# and runs to its verdict; diff mode, which needs git for its subject, refuses before any git call.
+stub_dir, record, env_extra = make_stub(reply_text=APPROVE_REPLY, exit_code=0)
+check("the no-git PATH resolves no git", shutil.which("git", path=str(stub_dir)) is None)
+r = run_driver(BASE_ARGS, stub_dir, {**env_extra, "PATH": str(stub_dir)}, cwd=REPO)
+check("claims mode with no git on PATH runs to its verdict, skipping the working-tree check with one line",
+      r.returncode == 0 and read_argv(record) != []
+      and r.stderr.count("'git' not found on PATH; the working-tree check is skipped") == 1
+      and "Traceback" not in r.stderr)
+
+stub_dir, record, env_extra = make_stub(reply_text=DIFF_REVISE, exit_code=0)
+r = run_driver(DIFF_ARGS, stub_dir, {**env_extra, "PATH": str(stub_dir)}, cwd=DIFF_REPO)
+check("diff mode with no git on PATH exits 1 naming git, with no traceback and no CLI started",
+      r.returncode == 1 and "'git' not found on PATH; diff mode needs it" in r.stderr
+      and "Traceback" not in r.stderr and read_argv(record) == [])
 
 # --- the dirty-tree warning ------------------------------------------------------------
 written = REPO / "stub-wrote-this.txt"

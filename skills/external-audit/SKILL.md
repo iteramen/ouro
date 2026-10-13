@@ -137,8 +137,8 @@ Hard cap: **two rounds**; a third only for a *new blocker*.
   `--enable-all-github-mcp-tools`, `--allow-all-tools`, `--allow-all`, `--yolo`,
   `--allow-all-paths`, nor `--disable-builtin-mcps`, so the built-in GitHub MCP server keeps
   its default read-only tool set.
-  The driver also diffs `git status --porcelain` before/after and names any path that changed; if
-  you did not edit it, the critic did — revert, drop the round.
+  With git on PATH, the driver also diffs `git status --porcelain` before/after and names any
+  path that changed; if you did not edit it, the critic did — revert, drop the round.
 - Payload cap 100 KB — narrow with `--paths` rather than truncating (the summary line says
   when a diff was truncated). The prompt never lands on argv, since Windows caps a command line
   near 32K characters: each adapter's `stdin_prompt` says how it travels instead — grok reads it
@@ -193,9 +193,10 @@ critic cannot.
   can spot an unsound inference, and say explicitly that the plan's design is out of scope.
 - **Claims mode builds its subject without git, so `--cwd` can sit above several repositories.**
   A run that starts the CLI still runs git status in that directory, which is silent outside a
-  repository. Name each tree in the claim set. This skill still runs bound to one repository (step
-  0's binding read); if the claims span repos, pass `--cwd` at their common parent rather than
-  trying to run from it.
+  repository; with no git on PATH it skips that check and says so in one stderr line. Name each
+  tree in the claim set. This skill still runs bound to one repository (step 0's binding read);
+  if the claims span repos, pass `--cwd` at their common parent rather than trying to run from
+  it.
 - **A citation you cannot find is not thereby false.** The driver tells the critic to search
   for the symbol before declaring a path absent; apply the same rule to yourself when checking
   its findings.

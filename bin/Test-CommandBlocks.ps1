@@ -9,7 +9,8 @@
     false-positive class. There is no rule here for a `gh` call that names no repository.
 
     The gate extracts every fenced block whose info string is exactly `bash` or `sh` from every
-    SKILL.md under skills/ and every .md file under agents/, then does two things to each block,
+    SKILL.md and every references/*.md under skills/, and every .md file under agents/, then does
+    two things to each block,
     independent of one another:
 
       parse - replaces each placeholder with the plain word PLACEHOLDER and hands the result to
@@ -29,9 +30,12 @@
         small table of environment-resolved-repository forms: `git remote` used to read a remote
         (bare, `-v`/`--verbose`, `get-url`, `show`; any other subcommand or option, such as `add`,
         `rm` or `--help`, is not this), `gh repo set-default`, and `GH_REPO`, each matched with its
-        case. A new row is one entry in the table
-        below and one fixture case; a finding here is cleared by rewording the line, not by
-        restructuring the shell.
+        case. The table also holds `skill-argument`: a dollar sign followed by a digit or by
+        `ARGUMENTS`. Claude Code replaces `$ARGUMENTS`, and a dollar sign and its digits not
+        followed by a word character, with the invocation's arguments wherever it sits in a skill
+        body; a brace form such as `${1}` is not replaced and is not a finding. A new row is one
+        entry in the table below and one fixture case; a finding here is cleared by rewording the
+        line, not by restructuring the shell.
 
     A finding prints as `path:line: rule -- why`, with the offending line under it. With none,
     the gate prints the block and document count and exits 0.
@@ -46,7 +50,7 @@
 #>
 param(
     [string]$RepoRoot,
-    [string[]]$Globs = @('skills/*/SKILL.md', 'agents/*.md')
+    [string[]]$Globs = @('skills/*/SKILL.md', 'skills/*/references/*.md', 'agents/*.md')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -69,6 +73,9 @@ $script:Hazards = @(
     @{ Rule = 'gh-repo-env'
        Why  = 'GH_REPO reads the repository from the environment instead of the binding'
        Pattern = '(?<![\w-])GH_REPO\b' }
+    @{ Rule = 'skill-argument'
+       Why  = 'Claude Code replaces a dollar-digit or dollar-ARGUMENTS in a skill body with the invocation''s arguments, zero-indexed'
+       Pattern = '\$(?:\d|ARGUMENTS)' }
 )
 
 # Documents matching each pattern: under its first path segment, or in the root itself when the

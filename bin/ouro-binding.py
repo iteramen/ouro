@@ -65,7 +65,7 @@ MERGES = ("squash", "merge")
 # keys already default to, so a binding that declares none of the three lands that way.
 LANDINGS = {f"{sync}-{merge}": (sync, merge) for sync in SYNCS for merge in MERGES}
 # ship.forbidden_check: whether bin/apply-manifest.py matches what it posts against the private
-# token list. The first is the default, and absent means it.
+# token list. Absent follows the target repository's visibility (see docs/binding.md).
 FORBIDDEN_CHECKS = ("required", "off")
 # [models] roles and the aliases each may hold -- never a pinned version, so a role follows the
 # current model. Absent is the skill's own default, named beside each role in docs/binding.md.

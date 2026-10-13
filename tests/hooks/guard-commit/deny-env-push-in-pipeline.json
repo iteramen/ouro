@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "stage of a pipeline",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "env GIT_TRACE=1 git push origin HEAD 2>&1 | tee push.log",
+      "description": "a recorded call"
+    }
+  }
+}

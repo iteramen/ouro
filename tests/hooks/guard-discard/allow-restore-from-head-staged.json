@@ -1,0 +1,19 @@
+{
+  "decision": "allow",
+  "repo": {
+    "staged": [
+      "a.txt"
+    ]
+  },
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${REPO}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "git restore --source=HEAD --worktree -- a.txt",
+      "description": "a recorded call"
+    }
+  }
+}

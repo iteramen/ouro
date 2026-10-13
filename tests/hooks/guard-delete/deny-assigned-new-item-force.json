@@ -1,0 +1,15 @@
+{
+  "decision": "deny",
+  "reason": "neither a literal path",
+  "event": {
+    "session_id": "fixture",
+    "transcript_path": "${FIXTURES}/transcript.jsonl",
+    "cwd": "${FIXTURES}",
+    "hook_event_name": "PreToolUse",
+    "tool_name": "PowerShell",
+    "tool_input": {
+      "command": "$d = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP 'x'); Remove-Item $d -Recurse",
+      "description": "a recorded call"
+    }
+  }
+}
