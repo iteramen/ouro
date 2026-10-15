@@ -84,8 +84,8 @@ Step 1's script checks the first three; the fourth is yours.
   feature/x`). Renaming the **remote** branch after the PR exists **closes the PR** — GitHub's
   branches/rename API does not retarget an open PR despite its docs.
 - `gh auth status` is logged in.
-- **Reproduce the CI-only gates locally before pushing** (step 3). Don't push a red PR you could
-  have caught locally.
+- **Run step 3's gates before pushing**, the set that step gives the issue's Flow class. Don't
+  push a red PR you could have caught locally.
 
 ## The sequence
 
@@ -110,8 +110,9 @@ abort, refuses to rebase a branch someone else is working on, and after a rebase
 branch and prints `lease:` for step 4; its STOP line names the refusal. After a sync that brought
 anything in, it prints the pre-sync tip, the old base, and the files both sides changed since it.
 
-If the incoming delta includes **code** (not only docs), re-run the gates for the overlapping
-areas (step 3) before pushing. A finished rebase that proves wrong goes back with
+Under a full change (contract §4's Flow class), if the incoming delta includes **code** (not only
+docs), re-run the gates for the overlapping areas (step 3) before pushing; under express and
+standard the push re-runs the checks. A finished rebase that proves wrong goes back with
 `git reset --hard <backup>`; the backup is a local branch, and step 11 deletes it once the PR has
 landed. A sync is read against the branch, not trusted because git took it:
 
@@ -130,24 +131,34 @@ landed. A sync is read against the branch, not trusted because git took it:
   conflicted files and how the resolution was verified.
 
 ### 3. Run the gates locally
-Run every `[[gate]]` whose `areas` covers what the branch touched, **plus every `areas = ["*"]`
-gate** — the `*` gates catch people who correctly decide the area gates don't apply (a lone `.ps1`
-or `.md` change is still a change). A gate in that set that declares `paths` then runs only when
-the branch's diff touches one of them: `/ouro:execute`'s `references/gate-selection.md` holds that
-narrowing, its fallbacks, how each entry reaches git, and the evidence line for a skipped gate, and
-this step applies it as written there. Each gate's `run` executes from the repo root, with any `<ouro>` in it replaced by
-the plugin root first. The run follows the Gate environment, What CI checks, Two reads and Coverer
-sections of `skills/execute/references/dispatch-rules.md`.
+The set is every `[[gate]]` whose `areas` covers what the branch touched, **plus every
+`areas = ["*"]` gate** — the `*` gates catch people who correctly decide the area gates don't
+apply (a lone `.ps1` or `.md` change is still a change). A gate in that set that declares
+`paths` then runs only when the branch's diff touches one of them: `/ouro:execute`'s
+`references/gate-selection.md` holds that narrowing, its fallbacks, how each entry reaches git,
+and the evidence line for a skipped gate, and this step applies it as written there. Which of the
+set runs here follows the issue's Flow class (contract §4; no `Flow:` line reads as standard), as
+`/ouro:execute` §3 gives it: under express and standard only a gate the pull request's checks do
+not run at all or run only to print a skip, the checks being the rest; under full also each gate
+whose own code the diff changes; the whole set, said in the PR body, when the pull request's
+checks cannot run. Each
+gate's `run` executes from the repo root, with any `<ouro>` in it replaced by the plugin root
+first. The run follows the Gate environment, What CI checks, Two reads and Coverer sections of
+`skills/execute/references/dispatch-rules.md`.
 
 - **Commit first, then gate.** A gate that diffs committed state against a base ref reports on the
   *previous* commit when your edit is still unstaged, and hands you a false green. Use
   `$(git merge-base origin/$DEFAULT HEAD)` where a gate takes a base ref.
-- **A green gate run stands when its tree still matches**, here and on its re-run under step 6's
-  adversarial review: `git rev-parse HEAD^{tree}` equals the tree that run gated, the base
-  (`git merge-base origin/$DEFAULT HEAD`) is unchanged, and the step needs no gate that run did not
-  include. Cite that run — its commit and the tree match — in the PR's Verification section instead
-  of a new one. Any tree difference re-runs the gates, and so does a gate whose input is not the
-  tree and the base, such as one that reads commit messages.
+- **Under full, a green gate run stands when its tree still matches**, here and on its re-run
+  under step 6's adversarial review: `git rev-parse HEAD^{tree}` equals the tree that run gated,
+  the base (`git merge-base origin/$DEFAULT HEAD`) is unchanged, and the step needs no gate that
+  run did not include. Cite that run — its commit and the tree match — in the PR's Verification
+  section instead of a new one. A tree difference re-runs the gates whose paths it touches, a
+  comment-only one excepted as a prose round (contract §4, §7), and so does a gate whose input is
+  not the tree and the base, such as one that reads commit messages.
+  Under standard a fix is pushed, and the checks the pull request runs re-run on it; under
+  express a fix before convergence waits for the one push, and one after it is pushed as under
+  standard (`/ouro:execute` §4).
 - **Read `[overlays].land` now.** Those checklists carry the repo's own gate gotchas — the CI-only
   style analyzers a plain build won't show, the language-agnostic checks that fire on docs, the
   build flags a standalone project needs. They add to this step; they never replace it.
@@ -168,6 +179,7 @@ before it is marked ready. Write a body that summarizes the **whole branch** (no
 commit) and links any follow-ups you'll file in step 12, to a file with the file-write tool:
 
 ```markdown
+Part k/n of #<N>
 ## Merge danger
 - **Door:** <two-way or one-way>: <one sentence of why>
 - **Blast radius:** <what breaks if this is wrong, and for whom>: <one sentence of why>
@@ -190,6 +202,9 @@ commit) and links any follow-ups you'll file in step 12, to a file with the file
 - <#issue, filled in step 12>
 ```
 
+When the deliverable is a checklist (contract §3), the body's first line, above `## Merge danger`,
+is the `Part k/n of #<N>` line; otherwise that line is dropped.
+
 Then `gh pr create -R "$REPO" --base "$DEFAULT" --head "$BRANCH" --draft --label <Area> --label
 <Type> --title "type(scope): summary" --body-file <that file>`, with one or more labels from
 `[labels].area` plus the type the contract uses.
@@ -199,21 +214,25 @@ revert undoes the change, one-way when it does not: a migration, data written or
 message sent outward, a published tag or release, a flag default consumers pick up, or a
 consumer-contract change. **Blast radius** is what breaks if the change is wrong, and for whom.
 **Smoke by hand** is what the merger checks in the running app for code with no test host
-(`/ouro:review` step 5), dropped when there is none. All three are claims like every other sentence
-in the body. Verification goes inside `<details>`, off the first screen but in the body
+(`/ouro:review` step 5), a `run:` block whose probe's two exits differ aside, dropped when there is
+none. All three are claims like every other sentence in the body. Verification goes inside
+`<details>`, off the first
+screen but in the body
 `/ouro:review`'s verification message reads: one line per gate, its command and exit code, the
 output posted as or linked from a PR comment, never pasted; the reviewer's report and each
 verification's answer as PR comments (`/ouro:review` step 6), the body keeping the verdict line and
 the link; the measurement table for a bug and the mutation table when the change adds a test, and
 nothing else. GitHub renders Markdown there only after a blank line: keep the one after
-`</summary>`, and put one before each table. The `Fixes #<N>` line `/ouro:execute` adds stays at
-the start of its own line, where the loop metrics match it.
+`</summary>`, and put one before each table. The `Fixes #<N>` line `/ouro:execute` adds, or the
+`Part` line of a part that is not the last, stays at the start of its own line, where the loop
+metrics match the `Fixes` line.
 
-**The `Review:` line** is the one line the loop metrics read for the change's review. It stands
-alone, at the start of its own line, outside any fenced block (a reader skips fenced blocks before
-matching), directly under the body's `Fixes` line or lines. It reads either `Review: rounds:2
-findings:H0/M3/L4 false-sentences:1` (every field a decimal count, `false-sentences` also `unread`)
-or `Review: none`, and this pattern, read multiline, matches it:
+**The `Review:` line** is the one line the loop metrics read for the change's review, on the pull
+request carrying its `Fixes` line. It stands alone, at the start of its own line, outside any
+fenced block (a reader skips fenced blocks before matching), directly under the body's `Fixes #<N>`
+line or lines, or the `Part` line of a part that is not the last. It reads either
+`Review: rounds:2 findings:H0/M3/L4 false-sentences:1` (every field a decimal count,
+`false-sentences` also `unread`) or `Review: none`, and this pattern, read multiline, matches it:
 `^Review: (?:none|rounds:([0-9]+) findings:H([0-9]+)/M([0-9]+)/L([0-9]+) false-sentences:([0-9]+|unread))[ \t\r]*$`.
 - **`rounds`** is the fix rounds the change took, counted as contract §7 counts them: a prose
   round is not counted. It is 0 when the first review needed no fix.
@@ -249,13 +268,15 @@ is a **different bot** (the coding agent, attached with `addAssigneesToAssignabl
 
 **`adversarial-review`** — run `/ouro:review` on the branch range
 `$(git merge-base origin/$DEFAULT HEAD)..HEAD` **before the PR is marked ready** (it may already be
-open as a draft, `/ouro:execute` §4), at the weight contract §4 selects (light, sized or the probe
-format). Fix what it proves, have it verify the fix (its step 7), re-run step 3, then put the
-verdict in the PR's Verification section, post its report as a comment, and mark it ready.
+open as a draft, `/ouro:execute` §4), at the weight the issue's Flow class selects (contract §4:
+light, sized or the probe format). Fix what it proves, have it verify the fix (its step 7), re-run
+step 3, then put the verdict in the PR's Verification section, post its report as a comment, and
+mark it ready.
 
-**`external-audit`** — the external critic `ship.external_cli` names. Run `/ouro:external-audit`
-on the same range; an unavailable reader falls back to `/ouro:review` by the availability rule in
-`docs/binding.md` "Choosing ship.review", and the record says so.
+**`external-audit`** — for an S not fused, the reader (`/ouro:external-audit`) on the same
+range; an M not fused takes `/ouro:review` alone, by the table in `docs/binding.md` "Choosing
+ship.review"; a fused change takes what `/ouro:fuse` step 5 gave it; an unavailable reader falls
+back to `/ouro:review` by the availability rule beside the table, and the record says so.
 
 **`none`** — stop at the PR. Human review only; the merge is theirs.
 
@@ -359,21 +380,27 @@ without calling the PR merged or not merged.
 step fails inside a worktree: `fatal: '<default>' is already used by worktree at <checkout>`. The
 merge still happened. From the main checkout (`[repo].checkout`, `$CHECKOUT`), with **every** tool
 shell moved out of the worktree first — an agent host holds several shells, each with its **own**
-current directory, and one still inside is the lock — run the script below. A background command
-started while the shell's current directory is inside a worktree begins with
-`cd <absolute path outside .claude/worktrees/>` (the main checkout or the scratch directory), so it
-never pins the worktree.
+current directory, and one still inside is the lock — run the script below.
 
 `pwsh <ouro>/bin/Remove-LandedBranch.ps1 -Pr $PR`
 
-It confirms the PR reads MERGED and that no open PR is based on the branch, deletes the branch on
-origin where origin still lists it, removes the worktree under `.claude/worktrees/` that holds the
-branch and checks the directory is gone **from the filesystem** (`git worktree list` cannot see an
-orphan a locked removal leaves), and deletes the local branch and each `backup/<branch>-*` branch
-step 2 or 10 named. `STOP: left on disk` means a shell still sat inside: move it out and delete the
-directory by hand, in **separate calls**, since one call that both changes directory and deletes
-can be refused wholesale by a host's safety guard. A worktree a shell cannot leave is deferred:
+It confirms the PR reads MERGED and that no open PR is based on the branch, and lists the
+processes whose current directory is inside the worktree, stopping and naming them before it
+deregisters anything. It deletes the branch on origin where origin still lists it, removes the
+worktree under `.claude/worktrees/` that holds the branch and checks the directory is gone **from
+the filesystem** (`git worktree list` cannot see an orphan a locked removal leaves), and deletes
+the local branch and each `backup/<branch>-*` branch step 2 or 10 named. `STOP: left on disk`
+means a shell still sat inside: move it out and delete the directory by hand, in **separate
+calls**, since one call that both changes directory and deletes can be refused wholesale by a
+host's safety guard. A worktree a shell cannot leave is deferred:
 tell the user the command; step 14's sweep reports it until it is gone.
+
+After the merge of a pull request opening `Part k/n of #N`, the session ticks the part's box in
+the issue body with the pull request number (`- [x] 1. ... (PR #M)`) and removes the part's
+`Part k:` anchor lines, whose fragments no longer grep. The last part is ticked the same way after
+its merge, where its `Fixes` has closed the issue, whose body stays editable. The edit goes through
+a body file: fetch the body to a file, edit it, upload with `--body-file`, re-read and compare
+sizes. Whoever reverts a part's pull request unticks its box in the same step.
 
 ### 12. File follow-ups
 Every finding outside the diff takes the severity floor (contract §3) first. Below it, it is one

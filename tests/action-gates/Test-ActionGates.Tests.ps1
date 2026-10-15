@@ -224,10 +224,10 @@ else {
             if ($LASTEXITCODE -ne 0) { throw "git $args in $Sel failed (exit $LASTEXITCODE)" }
         }
         Invoke-SelGit init -q
-        foreach ($f in @('a/f.txt', 'b/f.txt', 'z/f.txt', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml', '.claude/ouro.toml')) {
+        foreach ($f in @('a/f.txt', 'b/f.txt', 'z/f.txt', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml', 'actions/gates-x/f.txt', '.claude/ouro.toml')) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent (Join-Path $Sel $f)) | Out-Null
         }
-        foreach ($f in @('a/f.txt', 'b/f.txt', 'z/f.txt', 'top.md', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml')) {
+        foreach ($f in @('a/f.txt', 'b/f.txt', 'z/f.txt', 'top.md', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml', 'actions/gates-x/f.txt')) {
             Set-Content -LiteralPath (Join-Path $Sel $f) -Encoding utf8 -Value '# base'
         }
         Set-Content -LiteralPath (Join-Path $Sel '.claude/ouro.toml') -Encoding utf8 -Value @(
@@ -306,12 +306,17 @@ else {
         Assert-NoMatch 'every gate runs' $r.Text 'a changed binding: no full set'
 
         $r = Invoke-SelectRow -Change '.github/workflows/w.yml'
-        Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a change under .github/workflows/'
-        Assert-Match 'select-by-paths: every gate runs: the diff touches' $r.Text 'a changed workflow: the log names the reason'
+        Assert-Selection $r @('C') @('A', 'B', 'D') 'a change under .github/workflows/'
+        Assert-NoMatch 'every gate runs' $r.Text 'a changed workflow: no full set'
 
         $r = Invoke-SelectRow -Change 'actions/gates/action.yml'
         Assert-Selection $r @('A', 'B', 'C', 'D') @() 'a change under actions/gates/'
-        Assert-Match 'select-by-paths: every gate runs: the diff touches' $r.Text 'a changed gates Action: the log names the reason'
+        Assert-Match 'select-by-paths: every gate runs: the diff touches actions/gates/' $r.Text 'a changed gates Action: the log names the reason'
+
+        # A sibling directory sharing the prefix is not the Action.
+        $r = Invoke-SelectRow -Change 'actions/gates-x/f.txt'
+        Assert-Selection $r @('C') @('A', 'B', 'D') 'a change under actions/gates-x/'
+        Assert-NoMatch 'every gate runs' $r.Text 'a sibling of the gates Action: no full set'
 
         # A push selects by the diff against the tip the branch had before it, github.event.before;
         # GitHub fills no pull_request base on a push.

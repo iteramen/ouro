@@ -112,7 +112,8 @@ dependent PR can be closed instead.
 `pwsh <ouro>/bin/Invoke-LandBatch.ps1 add -Pr <n> -Branch <head branch> -Message <file>`
 
 One call per PR, in merge order, with that PR's commit message written to a file — subject
-`type(scope): summary (#PR)`, body ending with `Closes #N`. The call refuses, before the squash, a
+`type(scope): summary (#PR)`, body ending with `Closes #N`, or without it for a pull request
+whose body opens `Part k/n of #N` with k below n. The call refuses, before the squash, a
 malformed message, a head that moved since the fetch (a PR nobody validated: refetch and start the
 batch over), a base that is neither `$DEFAULT` nor a branch already in the batch, and a range with
 no author (already landed, or merge commits only: drop it) or more than one; its STOP line says
@@ -131,7 +132,8 @@ row's `SQUASH` sits on the pre-batch tip.
 
 `Closes #N` in the body makes GitHub close the issue when the commit lands on
 `$DEFAULT` — close nothing by hand, but **verify** afterwards. A PR with no issue
-omits it.
+omits it, and so does a PR whose body opens `Part k/n of #N` with k below n: the batch ticks that
+part's box after the merge, as `/ouro:land` step 11 says.
 
 ## 3. Conflict recipe  ⚠️ the batch's sharp edges
 
@@ -331,7 +333,8 @@ PR with the landing comment and `--delete-branch`.
 - Then the sweep, as `/ouro:land` step 14 runs it: report mode from the main checkout
   (`pwsh <ouro>/bin/Invoke-BranchSweep.ps1`), relayed to the owner; `-Delete` only when the owner
   asks. It also finds what this cleanup missed or deferred.
-- Verify the `Closes #N` issues actually closed.
+- Verify the `Closes #N` issues actually closed and each landed part's box ticked, as
+  `/ouro:land` step 11 says.
 
 ## 6. Watch default-branch CI
 

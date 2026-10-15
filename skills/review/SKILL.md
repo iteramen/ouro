@@ -1,6 +1,6 @@
 ---
 name: review
-description: Adversarial review of a commit range, before pushing — a subagent (Opus by default, `[models].reviewer`) briefed to refute each commit's stated goal, with a sibling-doc sweep. Probe format for an executed diff over contract §4's bound (CI scripts, workflows, release machinery, gates) — executed probes and a mandatory REJECTED ledger as its evidence; `--sized` for an executed diff within that bound — probes at the changed hunks only, one PROBED line per hunk as its evidence; `--light` for a diff that changes only documentation, skill text, rules or comments — no probes, and a per-commit files-read line as its evidence.
+description: Adversarial review of a commit range, before the pull request is marked ready — a subagent (Opus by default, `[models].reviewer`) briefed to refute each commit's stated goal, with a sibling-doc sweep. The weight follows the issue's Flow class (contract §4). Probe format for a full change (CI scripts, workflows, release machinery, gates) — executed probes and a mandatory REJECTED ledger as its evidence; `--sized` for a standard change — probes at the changed hunks only, no build, gate or suite the pull request's checks already ran, one PROBED line per hunk as its evidence; `--light` for an express change (documentation, skill text, rules or comments, or a test-accepted change within the S shape) — no probes, and a per-commit files-read line as its evidence.
 ---
 
 # review
@@ -30,12 +30,12 @@ marketplace checkout.
 ## Steps
 
 0. **Read the binding.** `.claude/ouro.toml` at the repo root (schema: `docs/binding.md` in the
-   plugin); refuse without it. Its `[[gate]]` commands are the session's run on the commit and
-   CI's, the two re-runs the contract names, never the reviewer's: the prompt's tools-available
-   line names git and the targeted commands the brief asks for, a single test or a probe at the
-   changed lines, with each `<ouro>` replaced by the plugin root, since the reviewer resolves
-   nothing. `[models].reviewer` (via `ouro-binding.py get`; `no such key` at
-   exit 1 means unset: default `opus`) is the dispatch's model, step 2. `[overlays].review` is
+   plugin); refuse without it. Its `[[gate]]` commands belong to the two re-runs the contract
+   names (§7), never to the reviewer: the prompt's tools-available line names git and the
+   targeted commands the brief asks for, a single test or a probe at the changed lines, with each
+   `<ouro>` replaced by the plugin root, since the reviewer resolves nothing. `[models].reviewer`
+   (via `ouro-binding.py get`; `no such key` at exit 1 means unset: default `opus`) is the
+   dispatch's model, step 2. `[overlays].review` is
    the list of standards files: read each and fill the prompt's Standards block with them whole,
    or drop the block when the list is empty or absent. Nothing else in the binding is the
    reviewer's business.
@@ -52,16 +52,13 @@ marketplace checkout.
    add up to four more, the specific semantics this commit makes you least sure of. The vectors
    most often needed next were, in order: A test that cannot go red, Tool behaviour, Step order,
    Shell semantics. An unnamed front is invisible to the critic even when
-   it walks past the evidence. Build the prompt from [`REVIEWER-PROMPT.md`](REVIEWER-PROMPT.md);
-   its `{changed lines}` is the range's `git diff --shortstat`, insertions plus deletions, over
-   the files under review — a version bump and its changelog entry left out.
+   it walks past the evidence. Build the prompt from [`REVIEWER-PROMPT.md`](REVIEWER-PROMPT.md).
    Where the brief forbids the only way to get something the task needs, it names the allowed
    one — a throwaway repository, a stub first on PATH that refuses the call it forbids.
 2. **Dispatch** one subagent (`Agent`, `model:` set from step 0's `[models].reviewer`, default
    `opus`) with that prompt, its `{turn budget}` the one the plugin's `docs/contract.md` sets.
-   Read-only: it may run probes but never edit, stage or commit — and it runs them on this
-   machine, so don't run a heavy local gate while the review is in flight. Keep working; the
-   result arrives as a notification.
+   Read-only: it may run probes but never edit, stage or commit. Keep working; the result
+   arrives as a notification.
 3. **Verify every CONFIRMED finding yourself** before touching code — open the cited
    `path:line`, reproduce the trigger. A finding you cannot reproduce is a question back to the
    reviewer, not a fix. Reading the cited line reproduces nothing when the trigger needs state
@@ -92,16 +89,17 @@ marketplace checkout.
    guard, a branch or a test row, the fix is not made in this change: the finding goes where the
    severity floor (contract §3) sends it and step 6 names it, unless the finding is itself that
    the check is missing.
-5. **Reread the REJECTED ledger and the UNTESTED list.** Any vector rejected by reasoning instead
-   of a probe, or reported untested, is still open: probe it yourself or send it back. Only one
-   that nothing here can reach — a behaviour only another platform or a CI runner exercises,
-   or code with no test host, which no test project in the repository can load (UI code-behind,
-   host glue) — stays untested after that: name it, with why and with what covers it, where
+5. **Reread the REJECTED ledger and the UNTESTED list.** Any vector rejected by reasoning instead of
+   a probe, or reported untested, is still open: probe it yourself or send it back. Only one that
+   nothing here can reach — a behaviour only another platform or a CI runner exercises, or code with
+   no test host, which no test project in the repository can load (UI code-behind, host glue), less
+   a workflow step's `run:` block whose probe (`skills/execute/references/mutation-rows.md`) gave
+   two different exits — stays untested after that: name it, with why and with what covers it, where
    step 6 records, and never count it as rejected. A coverer is either a CI leg that runs on the
    pull request and must be green before it merges, or the PR record. Where code has no test host
    the coverer is a `Smoke by hand:` item in the PR body's Merge danger section, which is the PR
-   record; in a `trivial` run, which no person merges, it counts as uncovered. A vector that
-   nothing covers is named as uncovered.
+   record; in a `trivial` run, which no person merges, it counts as uncovered. A vector that nothing
+   covers is named as uncovered.
 6. **Record**: the reviewer's full report, and each verification's answer, post as one PR comment
    each, written with the file-write tool and sent with `gh pr comment --body-file` once the PR
    exists; until then they wait in the session's scratch directory, where the session saves each
@@ -133,14 +131,18 @@ marketplace checkout.
    comment tokens removed is identical to the commit the standing verdict read, beside a
    control: the same comparison against a commit whose executed lines in those files differ
    reports a difference, or the identity has shown nothing; a file no earlier commit holds has
-   no control, and its round is ordinary. It is an
-   ordinary round instead when any token differs; when the fix touched something executed that
-   cannot be tokenized that way (a workflow, a template, a command block, a build file, a
-   fixture, data, a configuration file); when the fix reworded a docstring the file itself
+   no control, and its round is ordinary. A comment-only change in a script, a workflow (a
+   workflow template included), a gate file or a command block that no tokenizer covers is shown
+   by reading every changed line instead. It is an
+   ordinary round instead when any token differs; when the fix touched a build file, a fixture,
+   data or a configuration file, comment-only or not;
+   when the fix reworded a docstring the file itself
    reads, which a comparison blanks but the code prints; or when it changed a comment something
-   else executes — a `#requires`, a shebang, an encoding line, a lint pragma, a marker a gate
-   greps. Unsure means ordinary. The gates re-run on the fix commit as after any fix:
-   comment-based help is comment to a tokenizer and is still what a help gate reads. A
+   executes or reads — a `#requires`, a shebang, an encoding line, a lint pragma, a marker a
+   gate greps, comment-based help a help gate reads. Unsure means ordinary. The pull request's
+   checks re-run on the push that carries it; the verification does not wait on them, and no
+   gate re-runs locally under any class except one the pull request's checks do not run at all
+   or run only to print a skip (contract §4 Gates). A
    verification that finds anything executed did change shows the round was not prose, and it
    counts. The bound is two prose passes on a sentence, then the sentence is deleted rather than
    reworded a third time — a sentence the issue's acceptance requires is a STOP instead.
@@ -156,42 +158,45 @@ commands it ran — light mode's evidence that it looked. Every CONFIRMED findin
 so light mode reads it the same way), and the stale-doc sweep stays. Steps 3–4 apply unchanged; step 5 becomes: every commit in the range has
 a READ line naming the files that commit changed — a commit without one was not reviewed, send
 it back — a vector listed UNTESTED is still open, check it yourself or send it back; one that
-stays untested (a behaviour only another platform or a CI runner exercises,
-or code with no test host, which no test project in the repository can load (UI code-behind,
-host glue)) is named with why and with what covers it, a CI leg or the PR record, or as
+stays untested (a behaviour only another platform or a CI runner exercises, or code with no test
+host, which no test project in the repository can load (UI code-behind, host glue), less a workflow
+step's `run:` block whose probe (`skills/execute/references/mutation-rows.md`) gave two different
+exits) is named with why and with what covers it, a CI leg or the PR record, or as
 uncovered if nothing does; where code has no test host the coverer is a `Smoke by hand:` item in
 the PR body's Merge danger section, which is the PR record, and in a `trivial` run, which no
-person merges, it counts as uncovered; and a fix that makes the diff executed sends the range
-back in the probe format, which is that change's one probe review; step 6 posts the light report
-as it posts any; step 7's verification is a reading one, its answer a READ line for the fix
-commit. A prose round (step 7) is verified this way after a probe-format review too. The
+person merges, it counts as uncovered; and a fix that tightens the change's Flow class sends the
+range back at that class's weight, which is that change's one probing review; step 6 posts the
+light report as it posts any; step 7's verification is a reading one, its answer a READ line for
+the fix commit. A prose round (step 7) is verified this way after a probe-format review too. The
 session's own hand-back of a light review, to the user and in the record, opens by naming the
 mode (light), the range and the files the reviewer read, then the verdict: a reader must know
-which weight the review took without opening the transcript.
+which weight the review took without opening the transcript. Under express the range is
+local and pushed only at convergence.
 
-Which weight a diff takes, light, sized (below) or the probe format, is contract §4's rule, cited
-and not restated here. Which issue takes this review at all, by its size and `[ship].review`, is
-the table in `docs/binding.md` "Choosing ship.review".
+Which weight a review takes, light, sized (below) or the probe format, follows the issue's Flow
+class: contract §4's rule, cited and not restated here. Which issue takes this review at all, by
+its size and `[ship].review`, is the table in `docs/binding.md` "Choosing ship.review".
 
 ## Sized review
 
 `/ouro:review --sized <range>` is the probe format cut to the diff: the same reviewer, the same
-read-only brief, the claims block and the stale-doc sweep. Step 1 writes one paragraph per
-commit, what it must do and what must stay unchanged, and names at most two attack vectors, the
-ones the session is least sure of, in place of the four defaults. The prompt's output item 2 is
+read-only brief, the claims block and the stale-doc sweep. Its budget is hard: probes stand only
+at the changed hunks, and it runs no build, gate or suite the pull request's checks already ran.
+Step 1 writes one paragraph per commit, what it must do and what must stay unchanged, and names
+at most two attack vectors, the ones the session is least sure of, in place of the four defaults.
+The prompt's output item 2 is
 the sized variant in [`REVIEWER-PROMPT.md`](REVIEWER-PROMPT.md): one `PROBED` line per changed
 hunk, the probe run at it and what shows it ran, or the reading where a reading suffices, then
 `UNTESTED`. Steps 3, 4 and 7 apply unchanged; step 5 rereads the `PROBED` lines as it rereads a
 ledger, and a hunk with no line is unreviewed, sent back; step 6 records it as the probe format
 does, marked sized, the `PROBED` lines standing where the ledger's count stands. A fix that
-takes the diff over the bound sends the range back in the probe format.
+tightens the change's Flow class to full sends the range back in the probe format.
 
 ## When not to use
 
 - A contract seam (IPC, C-ABI, serialization, public API) → `/ouro:seam`.
 - A plan or design, judged on its merits rather than against a diff.
 - A one-line question ("is this regex right") that needs no repository read.
-- The weight is not a choice: a diff that changes nothing but documentation, skill text, rules
-  or comments takes **light mode** (`--light`), an executed diff within contract §4's bound the
-  **sized review** (`--sized`), and every other diff the probe format.
+- The weight is not a choice: it follows the issue's Flow class (contract §4), express taking
+  **light mode** (`--light`), standard the **sized review** (`--sized`), and full the probe format.
   `external-audit` in a scoped `--paths` round is the external alternative to light mode.

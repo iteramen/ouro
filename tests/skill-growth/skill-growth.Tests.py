@@ -149,7 +149,7 @@ table = TMP / "table.txt"
 table.write_text("fx 0.1.0\n  Description: fixture\n\nPer-component (rounded)\n"
                  "  component       always-on  on-invoke\n"
                  "  m                    ~310      ~1.8k\n"
-                 "  n                    ~200     ~12.2k\n"
+                 "  n                    < 20     ~12.2k\n"
                  "  verifier             ~100        ~2k\n\n"
                  "  On-invoke cost is paid each time a skill or agent fires.\n", encoding="utf-8")
 argv_file = TMP / "argv.json"

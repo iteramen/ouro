@@ -14,6 +14,10 @@ Usage:
         Print the `run` command of every [[gate]] whose areas contain the label or "*",
         one per line, in binding order, each with every <ouro> replaced by this script's
         own plugin root.
+    python3 ouro-binding.py direct <path>... [--binding <path>]
+        Read ship.direct and print, one per line, each given path that matches no glob
+        (fnmatch.fnmatchcase on the path as given). Exit 1 when any is printed, 0 when all
+        match, 2 with an error on stderr when ship.direct is empty or absent.
     python3 ouro-binding.py --selftest
         Run the in-memory self-check.
 
@@ -29,6 +33,7 @@ cannot be read is one `error: <path>: <reason>` line.
 
 Stdlib only, Python 3.11+ (tomllib).
 """
+import fnmatch
 import json
 import os
 import re
@@ -67,6 +72,33 @@ LANDINGS = {f"{sync}-{merge}": (sync, merge) for sync in SYNCS for merge in MERG
 # ship.forbidden_check: whether bin/apply-manifest.py matches what it posts against the private
 # token list. Absent follows the target repository's visibility (see docs/binding.md).
 FORBIDDEN_CHECKS = ("required", "off")
+# ship.direct: globs of the files the direct lane may push without a pull request or a review. A
+# glob is matched with fnmatchcase against the repository-relative path in forward slashes, so `*`
+# crosses `/`. `check` refuses one that matches any of these paths, which full's list covers: the
+# CI definitions, the hook registry and a hook, release machinery, the binding itself, and (added
+# per binding) every path a [[gate]] run or ci line names; and one whose literal prefix, the text
+# before its first `*`, `?` or `[`, starts with a directory below, since a wildcard there reaches
+# files the probes do not name.
+DIRECT_PROBES = (".github/workflows/x.yml", ".github/workflows/x.yaml", ".github/actions/x/action.yml",
+                 ".github/actions/x/action.yaml", "actions/x/action.yml", "hooks/hooks.json", "hooks/x.py",
+                 "hooks/x.sh", "release/x.py", "release/x.ps1", ".claude/ouro.toml",
+                 ".claude/ouro.local.toml", ".claude/settings.json")
+DIRECT_PREFIXES = (".github/", "actions/", "hooks/", "release/", ".claude/")
+
+
+def gate_paths(data):
+    """The repository paths the [[gate]] run lines name: tokens with a slash or an extension."""
+    out = []
+    for g in data.get("gate", []):
+        lines = [g.get(k) for k in ("run", "ci")] if isinstance(g, dict) else []
+        for tok in [t for line in lines if isinstance(line, str) for t in line.split()]:
+            tok = tok.strip("\"'")
+            tok = tok[len(OURO_TOKEN) + 1:] if tok.startswith(OURO_TOKEN + "/") else tok
+            if not tok.startswith("-") and (("/" in tok and not tok.endswith("/")) or re.search(r"\.\w+$", tok)):
+                out.append(tok)
+    return out
+
+
 # [models] roles and the aliases each may hold -- never a pinned version, so a role follows the
 # current model. Absent is the skill's own default, named beside each role in docs/binding.md.
 MODEL_ROLES = ("builder", "builder_trivial", "reviewer", "verifier", "weekly")
@@ -88,7 +120,7 @@ SCHEMA = {
     "gate": {"areas": list, "run": str, "ci": str, "paths": list},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
-             "test_first_for_bugs": bool, "forbidden_check": str},
+             "test_first_for_bugs": bool, "forbidden_check": str, "direct": list},
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
     "models": {role: str for role in MODEL_ROLES},
@@ -263,6 +295,26 @@ def validate(data):
         errors.append("ship.external_model: must be a non-empty string")
     if "forbidden_check" in ship and ship["forbidden_check"] not in FORBIDDEN_CHECKS:
         errors.append(f"ship.forbidden_check: must be one of {', '.join(FORBIDDEN_CHECKS)}")
+    if isinstance(ship.get("direct"), list):
+        probes = DIRECT_PROBES + tuple(gate_paths(data))
+        for glob in ship["direct"]:
+            if not isinstance(glob, str):
+                continue
+            prefix = re.split(r"[*?\[]", glob, maxsplit=1)[0]
+            rule = next((d for d in DIRECT_PREFIXES if prefix.startswith(d)), None)
+            if rule:
+                errors.append(f"ship.direct: {glob!r} has the literal prefix {prefix!r}, under {rule!r}, which the direct lane never pushes (full's list: CI definitions, hooks, release machinery, the binding)")
+                continue
+            hit = next((p for p in probes if fnmatch.fnmatchcase(p, glob)), None)
+            if hit:
+                errors.append(f"ship.direct: {glob!r} matches {hit!r}, which the direct lane never pushes (full's list: CI definitions, hooks, release machinery, the binding, the gates' own scripts)")
+                continue
+            # A wildcard or class in the first segment reaches every top-level directory, the
+            # protected ones included (`*.js` reaches a JavaScript action; `[.]github` spells one),
+            # and can miss every probe: such a glob is refused, named for what it reaches.
+            first = glob.split("/", 1)[0]
+            if re.search(r"[*?\[]", first):
+                errors.append(f"ship.direct: {glob!r} has a wildcard in its first path segment, so it reaches every top-level directory, the ones the direct lane never pushes included (full's list: CI definitions, hooks, release machinery, the binding); name the directory")
     models = data.get("models") if isinstance(data.get("models"), dict) else {}
     for role in MODEL_ROLES:
         if role in models and models[role] not in MODEL_VALUES:
@@ -391,9 +443,26 @@ def check(path):
 
 
 def main(argv):
-    if not argv or argv[0] not in ("check", "get", "gates"):
+    if not argv or argv[0] not in ("check", "get", "gates", "direct"):
         sys.exit(__doc__.strip())
     cmd, rest = argv[0], argv[1:]
+    if cmd == "direct":
+        where = None
+        if "--binding" in rest:
+            i = rest.index("--binding")
+            where, rest = rest[i + 1] if i + 1 < len(rest) else sys.exit("usage: --binding needs a path"), rest[:i] + rest[i + 2:]
+        try:
+            globs = load(where).get("ship", {}).get("direct") or []
+        except SystemExit as e:  # load() exits with its message (already prefixed); here that is exit 2, never 1
+            print(e.code, file=sys.stderr)
+            return 2
+        if not globs:
+            print("error: ship.direct is empty or absent: the direct lane is off", file=sys.stderr)
+            return 2
+        missed = [p for p in rest if not any(fnmatch.fnmatchcase(p, g) for g in globs)]
+        if missed:
+            print("\n".join(missed))
+        return 1 if missed else 0
     if cmd == "check":
         warning, errors = check(rest[0] if rest else None)
         if warning:
@@ -799,6 +868,70 @@ report_only = ["S9"]
                         ("false", ["ship.forbidden_check: expected str", "ship.forbidden_check: must be one of required, off"])):
         errs = validate(tomllib.loads(base.replace("[ship]\n", f"[ship]\nforbidden_check = {value}\n")))
         assert errs == want, (value, errs)
+
+    # ship.direct is optional and empty when absent; a docs glob passes, `**` and a glob naming a
+    # gate's own script are refused with the glob and the probe it matched.
+    def with_ship(lines):
+        return tomllib.loads(base.replace("[ship]\n", "[ship]\n" + lines + "\n"))
+    absent = tomllib.loads(base)
+    assert "direct" not in absent["ship"] and validate(absent) == []
+    assert validate(with_ship("direct = []")) == []
+    assert validate(with_ship('direct = ["docs/rationale.md", "README.md"]')) == []
+    errs = validate(with_ship('direct = ["**"]'))
+    assert len(errs) == 1 and errs[0].startswith("ship.direct: '**' matches '.github/workflows/x.yml'"), errs
+    scripted = base.replace('run = "make core-test"', 'run = "python3 tools/check.py --all"').replace("[ship]\n", '[ship]\ndirect = ["tools/*.py", "tools/other.py"]\n')
+    errs = validate(tomllib.loads(scripted))
+    assert len(errs) == 1 and "'tools/*.py' matches 'tools/check.py'" in errs[0], errs
+    # A wildcard under a directory full's list owns is refused by its literal prefix, so the holes
+    # the probes alone left (another extension, another name) are shut; a literal one is too.
+    for glob in ("hooks/*", "hooks/*.py", "hooks/guard-*.py", "hooks/*.sh", "hooks/guard-commit.py", "release/*",
+                 "release/export*.py", "release/**/*.py", ".claude/*", ".claude/*.json", ".claude/hooks/*",
+                 ".github/workflows/*.yaml", ".github/*", "actions/**"):
+        errs = validate(with_ship(f'direct = ["{glob}"]'))
+        assert len(errs) == 1 and "has the literal prefix" in errs[0] and f"{glob!r}" in errs[0], (glob, errs)
+    errs = validate(with_ship('direct = ["*.yaml"]'))
+    assert len(errs) == 1 and "'*.yaml' matches '.github/workflows/x.yaml'" in errs[0], errs
+    # A wildcard or class in the first segment reaches every top-level directory (`*.js` reaches a
+    # JavaScript action, `[.]github` spells the directory): refused by that segment, named.
+    for glob in ("[.]github/workflows/c*.yml", ".git[h]ub/workflows/c*.yml", "?ooks/guard-*.py", "[h]ooks/guard-*.py",
+                 "[r]elease/export*.py", "*/guard-x.py", "*.js", "*.md", "?.txt"):
+        errs = validate(with_ship(f'direct = ["{glob}"]'))
+        assert len(errs) == 1 and "has a wildcard in its first path segment" in errs[0], (glob, errs)
+    for glob in ("docs/**", "docs/notes/*.md", "README.md", "docs/docs-governance.md"):
+        assert validate(with_ship(f'direct = ["{glob}"]')) == [], glob
+    # A script named only on a gate's ci line is a probe, and so is one named through <ouro>/.
+    ci_only = base.replace('run = "make core-test"', 'run = "make core-test"\nci = "python3 tools/ci.py"').replace("[ship]\n", '[ship]\ndirect = ["tools/ci.py"]\n')
+    errs = validate(tomllib.loads(ci_only))
+    assert len(errs) == 1 and "'tools/ci.py' matches 'tools/ci.py'" in errs[0], errs
+    through = base.replace('run = "make core-test"', 'run = "python3 <ouro>/bin/x.py"').replace("[ship]\n", '[ship]\ndirect = ["bin/*"]\n')
+    errs = validate(tomllib.loads(through))
+    assert len(errs) == 1 and "'bin/*' matches 'bin/x.py'" in errs[0], errs
+    assert validate(with_ship("direct = [1]")) == ["ship.direct: every entry must be a string"]
+
+    # `direct` prints the paths no glob matches and exits 1; fnmatch's own class syntax, where
+    # [^d] is the set of ^ and d, not a negation; an empty key is exit 2 with the reason.
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        def direct(globs, *paths):
+            f = Path(tmp) / "b.toml"
+            f.write_text(base.replace("[ship]\n", "[ship]\n" + globs + "\n"), encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = main(["direct", *paths, "--binding", str(f)])
+            return code, out.getvalue().splitlines(), err.getvalue()
+        assert direct('direct = ["docs/*", "README.md"]', "docs/a/b.md", "README.md") == (0, [], "")
+        assert direct('direct = ["docs/*"]', "docs/a.md", "src/b.txt", "Docs/c.md") == (1, ["src/b.txt", "Docs/c.md"], "")
+        code, out, _ = direct('direct = ["[^d]*"]', "dx", "x")
+        assert (code, out) == (1, ["x"]), (code, out)
+        code, out, err = direct("direct = []", "docs/a.md")
+        assert (code, out) == (2, []) and "ship.direct is empty or absent" in err, (code, out, err)
+        code, out, err = direct("", "docs/a.md")
+        assert code == 2 and "ship.direct is empty or absent" in err, (code, err)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["direct", "docs/a.md", "--binding", str(Path(tmp) / "missing.toml")])
+        assert code == 2 and out.getvalue() == "" and err.getvalue().startswith("error:"), (code, err.getvalue())
 
     # [models] is optional, and so is every key in it; each key holds one of MODEL_VALUES.
     # Absent means the reading skill's own default (docs/binding.md), never a pinned version.

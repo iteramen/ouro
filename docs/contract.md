@@ -48,7 +48,24 @@ names it under `[authority].local` and the skills cite it rather than restate it
 
 - **One issue = one deliverable**, plus a **`Doc impact on close:`** line naming the doc(s)
   that get the forward-facing edit when the work lands. Written at creation, executed at close
-  in the same PR. `none` is a valid value — say it explicitly.
+  in the same PR. `none` is a valid value — say it explicitly. A deliverable may list parts:
+  triage fuses parts that change the same skill file, hook, script or mechanism into one
+  issue, except a part that is an open decision or is blocked on a different trigger, which stays
+  its own issue. A deliverable with more than one part carrying a risk surface (a new executable
+  file, a schema or binding change, a refusal or validation rule, a stand-in for an external
+  surface, a consumer-contract part, or any part on full's list or §5's never-trivial list) is a
+  checklist,
+  `- [ ] 1. **<part title> (Flow: <class>).** <the part>`, one Flow per part and never `direct`;
+  a deliverable with one risk surface is a plain deliverable. Each such part lands in a cycle of
+  its own, at its own Flow, on a branch cut from the default branch after the previous part
+  merged, its pull request's body opening `Part k/n of #N` and carrying `Fixes #N` only when k
+  equals n; text parts (documentation, skill text, rules, comments) share a cycle with any part.
+  The issue's own `Flow:` line is the loosest class among the parts and its `Size:` measures the
+  largest part; L stays a SPLIT verdict for a part that does not fit one session. The anchor
+  lines of a checklist deliverable start with `Part k:`. The issue stays open until its last part
+  lands, and the checklist carries the progress: the landing session ticks each part's box after
+  its merge, the last included, and whoever reverts a part's pull request unticks it in the same
+  step. SPLIT stays for a task that is two tasks.
 - **Cite by content, not position.** Code references anchor on **symbol + a short verbatim
   fragment** (`file — Symbol — "verbatim text"`); line numbers are advisory, stamped with the
   commit they were read at (`:171 @ <sha>`). **A fragment that no longer greps *is* the
@@ -171,27 +188,93 @@ lets an `L` ride on `agent-ready`. An `L` that triage finds no split lines for g
 owner-driven session re-triages it to `human-ready` while the owner drives it, and `/ouro:execute`
 never runs it.
 
-**`S` and `M` differ in what the run does.** An issue built by `/ouro:fuse` takes that skill's
-build, gate and review steps in place of this paragraph's. `S` builds inline — the session edits
-and commits itself — and runs the gates once, on the commit; `M` dispatches one builder and
-re-runs the gates on the commit. Who reviews each, by `[ship].review`, is the one table in
+**`S` and `M` differ in how the run builds.** An issue built by `/ouro:fuse` takes that skill's
+build, gate and review steps in place of this paragraph's and the Flow paragraph's, except what a
+builder's brief names, which the Flow paragraph's Gates bullet gives; the Flow class is its
+region's, the tightest among the region's issues and never direct, and the gate run and the
+review's weight follow it (`/ouro:fuse` §4, §5). `S` builds
+inline — the session edits and commits itself; `M` dispatches one builder, whose gate run comes
+back with its diff. Who reviews each, by `[ship].review`, is the one table in
 `docs/binding.md` "Choosing ship.review"; every `M` takes `/ouro:review` there, before the PR is
 marked ready, whatever the binding names.
 
-**Review weight follows the class of change and its size.** Wherever `/ouro:review` runs, a
-diff that changes nothing but documentation, skill text, rules or comments takes light mode
-(`/ouro:review --light`). An executed diff takes the **sized review** at twenty changed text
-lines or fewer, and the **probe format** above that: the count is the reviewer prompt's, lines
-added plus removed with a reworded line counting twice, and a binary change counts as over the
-bound. The sized review is one reviewer reading the diff and probing only the lines it changed
-and the claims it makes, with no attack-vector menu and no REJECTED ledger, its evidence one
-line per changed hunk, and one verification message after a fix; the probe format is the full
-campaign `/ouro:review` defines. A change is **executed** when
+**`Flow: direct|express|standard|full`** is a body line beside `Size:`, stamped at triage. `Size` picks
+the build path, `Flow` the ceremony around it, and `trivial` (§5) stays the autonomy grant,
+orthogonal to both. A change is **executed** when
 something runs it: scripts, workflows and gate files, CI or build configuration, gate code and
 gate fixtures, parsers, release machinery, product code, and any command block a skill or
-template tells a session to run. A comment-only change inside a script, a workflow, a gate file
-or such a command block is executed; a comment-only change anywhere else (product code, parsers)
-is a comments change and takes light mode. Executed wins when both could apply.
+template tells a session to run. A comment-only change inside a script, a workflow (a shipped
+workflow template included), a gate file or such a command block is executed; a comment-only
+change anywhere else (product code, parsers) is a comments change. Executed wins when both could
+apply. In a fix round, a comment-only change in a script, a workflow, a gate file (a gate's own
+script, not its fixtures) or a command block counts as nothing executed changing, so the round is
+§7's prose round, unless it changed a comment something executes or reads: a `#requires`, a
+shebang, an encoding line, a lint pragma, a marker a gate greps, comment-based help a help gate
+reads.
+
+- **direct**: every path the deliverable and its Doc impact line change matches a `[ship].direct`
+  glob (`docs/binding.md`), never a checklist part (§3). No worktree, no PR and no review: the
+  session commits on the default branch with `Fixes #N`, runs locally the gates the diff selects,
+  and pushes through `bin/Push-Direct.ps1`; CI on the default branch is the check, and
+  `/ouro:execute`'s Direct section gives the order, the red-run rule and the fallback to express.
+- **express**: nothing executed changes — documentation, skill text, rules, comments — at any
+  size; or an executed change within the S shape whose whole acceptance is a same-PR test or a
+  gate, touching nothing on full's list.
+- **full**: a change to what runs the checks — CI workflows, the gates Action, hooks, gate code,
+  release machinery, the binding schema — or to what §5 already names never-trivial: migrations,
+  flag defaults, authorization.
+- **standard**: every other executed change — no same-PR test, over the S shape, or acceptance
+  by a measurement.
+
+What each class runs:
+
+- **Gates.** Under express and standard the session runs no gate itself: the checks the pull
+  request runs are the gate run; a dispatched builder
+  still runs the gates its brief names in its worktree, and that run is §7's second re-run. The
+  draft PR opens at the first push under standard and full, and at convergence under express,
+  the point `/ouro:execute` §4 defines. The
+  brief names, under express and standard, the change's own acceptance run (its red-then-green
+  test, or the command the issue names, even when that command is a gate the checks also run)
+  and the selected gates the pull request's checks do not run at all or run only to print a
+  skip; under full it also names each selected gate whose own code the change changes (the file
+  a gate's `run` names and what that file reads), which the builder reads from its own
+  uncommitted changes, new files included, against the commit the build starts from; no other
+  selected gate the checks run goes in the brief, and a list that comes out empty is the
+  builder's run. Under
+  full the session runs, on the commit, the gates whose own code the diff changes — the file a
+  gate's `run` names and what that file reads: the suite, its fixtures, the script under test —
+  since the thing under change is the checker; the pull request's checks are the rest. In every
+  class, a gate the pull request's checks do not run at all, or run only to print a skip, runs
+  locally, selected by its paths.
+- **Review**, where the table names a session review: express takes light mode
+  (`/ouro:review --light`), for code too; standard the **sized review**; full the **probe
+  format**. Wherever the table names the external reader, in every class, it runs with a
+  timeout of at most 600 s. The sized review is one
+  reviewer reading the diff and probing only the hunks it changed and the claims it makes, with
+  no attack-vector menu and no REJECTED ledger, its evidence one line per changed hunk, and one
+  verification message after a fix; it runs no build, gate or suite the pull request's checks
+  already ran. The probe format is the full campaign `/ouro:review` defines.
+- **A fix commit.** express: committed locally, one push at convergence, and the reviewer's
+  verification is a reading one; a fix after that push (a red check, a late finding) is pushed
+  as under standard. standard: pushed, the checks re-run, and the reviewer verifies it. full: the gates whose paths the fix touches re-run locally on it,
+  then the checks and the verification. A prose round (§7) re-runs no gate locally under any
+  class, except a gate the pull request's checks do not run at all or run only to print a skip
+  (Gates above), and its verification does not wait on the pull request's checks.
+- **After the merge.** full: the default branch's runs are watched to their verdicts, unless the
+  pull request's green run still applies, by the three conditions a gate run on file stands under:
+  the merge commit's tree (`git rev-parse <merge commit>^{tree}`) equals the tree of the head those
+  checks ran green on, `<merge commit>^1` is an ancestor of that head, and the default branch's
+  runs, read once the list holds no new run and each has listed its jobs, run no workflow, job or
+  step the pull request's run did not run (one that run skipped counts as not run) and none that
+  reads the commit message; then the report cites that run, its head and the tree match beside
+  the default branch's run URLs, and the run does not wait. express and standard: cleanup, and
+  the run's URL goes in the report.
+
+Flow is re-derived from the diff after the commit, the way Size is below, and only tightens:
+direct to express to standard to full; a direct run whose diff reaches a path outside the globs is
+express or tighter, by these classes. A tightening is recorded in one sentence in the PR body. An
+issue with no `Flow:` line reads as standard. When the pull request's checks cannot run, the
+session runs the whole selected set locally, and the PR body says so.
 
 **The S shape** is no more than three files and about sixty changed lines — a starting point that
 measured loop runs move. The file count excludes a file that changed **only** because a policy or
@@ -216,7 +299,8 @@ behavior change beyond that coverage, **no new API**, and **no workflow edits**.
 
 It pre-authorizes the **full loop with no human in it**: PR → CI green → the bound review
 (`[ship].review`) triaged with zero unresolved findings → the merge `[ship].merge` or
-`[ship].landing` names (squash by default) → branch delete → issue closed via `Fixes #N`.
+`[ship].landing` names (squash by default) → branch delete → issue closed via `Fixes #N` (a
+part's pull request that is not the last carries none, §3).
 
 - **A landing that must rewrite the branch is not unattended.** Two landings rewrite a branch
   origin already has. One syncs by rebase — `[ship].sync = "rebase"`, which the `rebase-squash`
@@ -255,9 +339,14 @@ violation has a command shape is also enforced by a guard the plugin ships as a 
 
 - **Author ≠ reviewer, always adversarial.** Whoever wrote a change, someone else reviews it
   (for an `S` built inline the session may be the author, never the reviewer), prompted to
-  break it, with file:line evidence. **The loop re-runs the checks** — the session's gate run
-  on the commit and CI, between them. A reviewer reads or probes; a review that only reads
-  satisfies that half of the loop.
+  break it, with file:line evidence. The one exception is `Flow: direct` (§4): it has no
+  review, and CI on the default branch is its check. **The loop re-runs the checks**, twice:
+  CI, and under
+  express or standard (§4) the change's own acceptance run on the commit — its red-then-green
+  test, or the acceptance command the issue names, recorded in the PR body (`S`) — or the
+  builder's run (`M`), CI alone for an `S` that executes nothing, under full the session's gate
+  run on the commit. A reviewer reads or probes; a review that only reads satisfies that
+  half of the loop.
 - **Deterministic done-condition + STOP rule in every dispatch.** A builder that cannot meet its
   done-condition STOPs and reports; an honest STOP routes the call to a human, silent tuning buries
   it. **Every dispatch also carries a turn budget: 100 turns.** Reaching it is that same STOP —
@@ -279,10 +368,12 @@ violation has a command shape is also enforced by a guard the plugin ships as a 
   floor (§3) sends it.
   A **prose round** — one whose every remaining finding is about comments, docstrings,
   documentation wording or skill text, so that nothing executed changes — does not count toward
-  the three. Its fix commit is shown to leave the executable tokens of every source and test
-  file identical to the commit the standing verdict read, and its verification is a reading one.
-  The class-of-change paragraph above sets the weight of a review of a diff; that token
-  comparison is what licenses a reading verification of a fix commit. A verification that finds
+  the three. Its fix commit is shown comment-only: by the token comparison, the executable tokens
+  of every source and test file identical to the commit the standing verdict read, where the file
+  tokenizes, and by reading every changed line of a script, a workflow, a gate file or a command
+  block (§4) where it does not; its verification is a reading one.
+  The Flow class (§4) sets the weight of a review of a diff; that
+  showing is what licenses a reading verification of a fix commit. A verification that finds
   anything executed did change shows the round was not prose, and it counts. A prose round has
   its own bound: two prose passes on a sentence, then the sentence is deleted rather than
   reworded a third time — a sentence the issue's acceptance requires is a STOP instead. It still
@@ -448,8 +539,10 @@ unattended run's. Specifically:
   `-Demote` mode, and the target states why: the anchor gate demotes to `needs-ruling` (a graded
   spec the code moved out from under needs a re-grade), the shape gate to `needs-triage` (a
   structural failure means triage never happened). The anchor gate's `-Demote` is a sweep-wide
-  switch; the shape gate's works only in its single-issue mode (a labeled-event workflow).
-  Neither is on in the weekly template; a consumer opts in per workflow. An unattended
+  switch; the shape gate's works only in its single-issue mode, which
+  `templates/agent-ready-shape.yml` runs on the `labeled` event. The weekly template turns on neither; a consumer opts into the
+  shape gate's demotion by copying that template, and into the anchor gate's `-Demote` in a
+  workflow of its own. An unattended
   `/ouro:execute` run may make the same removal on a dead anchor, on
   a judgment call found mid-work, on a gate-coverage gap and on the
   fix-round cap, swapping `agent-ready` for `needs-ruling` and removing
@@ -481,7 +574,7 @@ stated then, and resolves to exactly one outcome, the first of these that holds:
 
 | Outcome | Signal |
 |---|---|
-| Landed, reversed | The work landed (a merged pull request, or a first-parent `(#PR)` subject, whose body has a `Fixes #N` line), and within 14 days a revert landed or a later `bug` issue (a title holding both `sweep` and `ledger line`, a cleanup-ledger sweep child, excluded) cites an anchor whose line blames to that landing |
+| Landed, reversed | The work landed (a merged pull request, a first-parent `(#PR)` subject, or a first-parent direct-lane commit whose subject ends in no `(#PR)`, whose body or message has a `Fixes #N` line), and within 14 days a revert landed or a later `bug` issue (a title holding both `sweep` and `ledger line`, a cleanup-ledger sweep child, excluded) cites an anchor whose line blames to that landing |
 | Landed, assisted | Landed, and an approver's `**Ruling**` comment, or an approver's reply before an `unlabeled needs-ruling`, was posted on the issue or its pull request between the promotion and the landing |
 | Landed clean | Landed, with neither |
 | Finding delivered | A `checkpoint` attempt that posted a `**Checkpoint finding**` comment, as the bot or an approver |

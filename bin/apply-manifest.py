@@ -31,8 +31,9 @@ giving a key twice, nesting too deep to parse -- is refused by name ahead of eve
 A manifest that is not a list, or a step in it that is not an object, is refused naming what was
 found, ahead of every check.
 Steps run in the order the manifest lists them. Order them create | comment | edit | close |
-subissue: the shape gate fires on the `labeled` event and wants the `**Triage**` provenance
-comment already there, so an edit that adds a state label must come AFTER that issue's comment.
+subissue: the shape gate, run on the `labeled` event by the plugin's agent-ready shape-gate
+template, wants the `**Triage**` provenance comment already there, so an edit that adds a state
+label must come AFTER that issue's comment.
 This is checked before anything runs -- see check_order. So is each step's shape: a step with no op,
 an op the applier does not know, one missing a field its op requires, a create key a reference
 cannot name (not a string, only digits, or not only letters, digits and underscores), a create key a
@@ -83,7 +84,8 @@ removes only labels the issue carries -- see resolve_labels; a declared removal 
 carry is dropped, with a line naming it. gh writes one edit's additions and removals as two
 independent halves, and a label the repository lacks fails only its own half, so the step sends
 two calls and checks each exit: the body and the removals, then the additions. The shape gate
-fires on the second call's `labeled` event, so it reads the body the first call set.
+runs on the second call's `labeled` event, where the plugin's agent-ready shape-gate template
+is installed, so it reads the body the first call set.
 gh writes the body in its own half beside the label halves, so a first call that fails may still
 have landed its removals, and its message says so when they name a state.
 State and modifier names match case-insensitively, as gh matches labels; a removal names the label
@@ -621,8 +623,8 @@ def check_writable(d, steps):
 def check_order(d, steps):
     """Refuse a manifest whose state label lands before its **Triage** comment.
 
-    The shape gate runs on the `labeled` event and demotes a promotion with no provenance
-    comment, so an edits-first manifest silently un-promotes everything it just promoted.
+    The plugin's agent-ready shape-gate template runs the shape gate on the `labeled` event, and
+    it demotes a promotion with no provenance comment, so an edits-first manifest un-promotes everything it just promoted.
     Refusing here beats reordering: a manifest may legitimately want an edit before some
     unrelated comment, and only the author knows which.
     A comment counts as provenance when its first line, normalized as the comment step posts it
@@ -642,8 +644,9 @@ def check_order(d, steps):
         raise SystemExit(
             "manifest order: " + ", ".join(f"issue {k}" for k in bad) +
             " label the issue before posting its **Triage** comment.\n"
-            "The shape gate fires on `labeled` and demotes a promotion whose provenance comment\n"
-            "is not there yet. Move each comment step ahead of that issue's edit step.")
+            "The plugin's agent-ready shape-gate template runs the shape gate on `labeled`, and it\n"
+            "demotes a promotion whose provenance comment is not there yet. Move each comment\n"
+            "step ahead of that issue's edit step.")
 
 
 def check_refs(d, steps):
@@ -1164,7 +1167,7 @@ def main():
                 stateless = off_state and not any(l.casefold() in STATES for l in current if l not in removes)
                 # gh writes one call's additions and removals independently, and a label the
                 # repository lacks fails only its own half: the body and removals go first, the
-                # additions second, so the shape gate's `labeled` run reads the new body.
+                # additions second, so the shape-gate template's `labeled` run reads the new body.
                 if body or removes:
                     try:
                         gh("issue", "edit", str(n), *body, *(a for l in removes for a in ("--remove-label", l)))

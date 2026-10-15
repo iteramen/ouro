@@ -10,7 +10,7 @@ inputs:
       request's diff against its base, a push's against the tip the branch had before it. A
       changed path no gate claims selects nothing more. Every gate runs on any other event, on a
       push with no previous tip (a new branch, a tag), when the diff cannot be read, and when it
-      touches .github/workflows/ or actions/gates/.
+      touches actions/gates/.
     required: false
     default: 'false'
   setup-python:
@@ -132,8 +132,8 @@ runs:
           else { $why = "the event is $eventName, not pull_request or push" }
           if (-not $why) {
             try {
-              if (& $touches '.github/workflows/', 'actions/gates/') {
-                $why = 'the diff touches .github/workflows/ or actions/gates/'
+              if (& $touches 'actions/gates/') {
+                $why = 'the diff touches actions/gates/'
               }
               else {
                 $toRun = @()

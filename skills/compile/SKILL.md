@@ -14,10 +14,10 @@ description: >
 
 # Plan the queue, read-only — `/ouro:compile`
 
-`/ouro:e2e` runs one issue; `/ouro:fuse` builds several that share files. Ordering a queue and
-choosing what to run together belong one level up, and this skill is that level, as a proposal
-only. It never chooses work for itself (contract §9): the owner names what runs. Like
-`/ouro:drift` run interactively, it reports in chat and applies nothing.
+`/ouro:e2e` runs one issue; `/ouro:fuse` builds several that share files, or an area batch.
+Ordering a queue and choosing what to run together belong one level up, and this skill is that
+level, as a proposal only. It never chooses work for itself (contract §9): the owner names what
+runs. Like `/ouro:drift` run interactively, it reports in chat and applies nothing.
 
 The program is printed by `<ouro>/bin/Get-CompileProgram.ps1`, a deterministic renderer of the
 analyzer's JSON, which is too large to read whole on a real queue. This skill binds, runs the two
@@ -103,5 +103,11 @@ analyzer's help, and that this is a proposal, never a guarantee, to re-check
 against the diff after each build, as `/ouro:fuse` §2 does. With no `agent-ready` issue read, the
 next line says the menu is empty and that, as contract §10 says, the next action is triage. A
 batch is a proposed fuse set, not a region, and it is not conflict-free: batches land one after
-another, and `/ouro:fuse` §2 asks the owner before a region of more than five issues. Nothing here
-runs: the owner names what runs.
+another, and `/ouro:fuse` §2 asks the owner before a region of more than five issues. A batch never
+holds a `checkpoint` issue: a checkpoint run edits no file, so the analyzer links it to none, and
+an area batch leaves one out. An area batch is a proposed fuse set of one area's express and
+standard issues that share no file, printed under `Area batches` after the analyzer's batches; the
+owner names it with `/ouro:fuse`. Beside each printed batch of the analyzer's the session names
+its members as a FUSE candidate for `/ouro:triage <N>…`, which applies the fuse; compile still
+writes nothing. An area batch's members are no FUSE candidate for `/ouro:triage`.
+Nothing here runs: the owner names what runs.

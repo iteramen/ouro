@@ -40,7 +40,9 @@
     mirrored, issues, collisions, batches, waves, unplaced, leverage. Every list is sorted, so the
     same input gives byte-identical output whatever order the issues arrive in. An issue carrying
     both labels counts as agent-ready; an issue carrying neither is skipped with a warning on
-    stderr.
+    stderr. An issue carrying `checkpoint` keeps its footprint but links nothing, as a mirrored
+    file links nothing: a checkpoint run edits no file, so the issue is in no collision, no batch
+    and no leverage.
 
     Exit 0 on output; 1 on a failed read or when no repository can be named (stdout is then
     empty, so a failed read never reads as an empty backlog); 2 on a usage error. Diagnostics go
@@ -220,13 +222,15 @@ try {
                 $footprint.Add($p)
             }
             $fp = Get-OrdinalSorted $footprint.ToArray()
+            # A checkpoint run is read-only (contract section 3): it edits no file, so it links nothing.
+            $links = if ($names -icontains 'checkpoint') { @() } else { @($fp | Where-Object { -not $mirroredNorm.Contains($_) }) }
             $issues.Add([pscustomobject]@{
                 number     = [int]$r.number
                 title      = if ($null -eq $r.title) { '' } else { "$($r.title)" }
                 state      = $state
                 footprint  = $fp
                 unresolved = [string[]]@($fp | Where-Object { -not $tracked.Contains($_) })
-                linking    = [System.Collections.Generic.HashSet[string]]::new([string[]]@($fp | Where-Object { -not $mirroredNorm.Contains($_) }), [StringComparer]::Ordinal)
+                linking    = [System.Collections.Generic.HashSet[string]]::new([string[]]@($links), [StringComparer]::Ordinal)
             })
         }
 

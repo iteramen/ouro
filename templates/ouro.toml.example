@@ -27,6 +27,13 @@ review = "adversarial-review"
 # author. [ship].sync and [ship].merge may be declared
 # instead, or beside this where they agree with it. Table: ouro/docs/binding.md.
 landing = "merge-squash"
+# Globs of the files the direct lane may push to the default branch with no pull request and no
+# review (Flow: direct). Absent or empty: the lane is off. `check` refuses a glob that matches a CI
+# definition, a hook or the hook registry, release machinery, this binding or a gate's own script,
+# and any glob whose literal prefix, before its first `*`, `?` or `[`, starts with `.github/`,
+# `actions/`, `hooks/`, `release/` or `.claude/`, or whose first segment holds a wildcard (it
+# reaches every top-level directory). Table: ouro/docs/binding.md.
+# direct = ["docs/notes/*.md"]
 
 [models]
 # Optional, like every table below but [owner]. Absent means each role runs the reading

@@ -59,6 +59,11 @@
     The lock is a process whose current directory is inside the worktree on Windows, and a
     worktrees directory without write permission elsewhere; as root, where permissions do not
     stop a removal, that case prints a skip line.
+
+    Where /proc exists (Linux; elsewhere that row prints a skip line), a worktree with a process
+    whose current directory is inside it stays in both modes with a skip line naming the PID and
+    its directory, its branch with it, and is removed once the process is gone. Windows is not
+    scanned, so there the lock row above is the one that pins the held directory.
 #>
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -530,6 +535,40 @@ try {
         Assert-Equal 'feat/held,master' (Get-Heads $w.Origin) 'the branch stays on origin'
     }
     else { Write-Host '  skip: running as root, a worktrees directory without write permission is no lock' -ForegroundColor DarkGray }
+
+    # ── a process inside a worktree ─────────────────────────────────────────────────────────
+    Write-Host 'a worktree with a process inside it stays, naming the PID'
+    if (Test-Path -LiteralPath '/proc/self/cwd') {
+        $w = New-World 'w3-busy'; $m = $w.Main
+        $busyDir = Join-Path $m '.claude/worktrees/busy'
+        $null = G $m worktree add -q -b feat/busy .claude/worktrees/busy master
+        $busyHead = New-Commit $busyDir 'busy.txt'
+        $null = G $busyDir push -q origin feat/busy
+        Set-Answer $w 'feat/busy' @(New-PrRow 31 MERGED $busyHead)
+        Set-BaseAnswer $w 'feat/busy'
+        $busy = Start-Process -FilePath $Pwsh -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 300' -WorkingDirectory $busyDir -PassThru
+        try {
+            Start-Sleep -Seconds 2
+            if ($busy.HasExited) { throw "the sleeper exited at once (exit $($busy.ExitCode)); the row has no process to find" }
+            $why = 'a process has its current directory inside .claude/worktrees/busy: pid ' + $busy.Id + ' in '
+            foreach ($mode in 'report mode', '-Delete') {
+                $run = Invoke-Sweep $w @(if ($mode -eq '-Delete') { $mode })
+                Assert-Equal 0 $run.Code "$mode exits 0"
+                Assert-Line $run "skip: worktree .claude/worktrees/busy - $why" -Prefix
+                Assert-Line $run "skip: local feat/busy - $why" -Prefix
+                Assert-Equal 0 @($run.Lines -match '^(finished|deleted): worktree').Count "$mode does not call the worktree finished"
+                Assert-Equal $true (Test-Path -LiteralPath (Join-Path $busyDir 'busy.txt')) "$mode leaves the worktree whole"
+                Assert-Equal 'feat/busy,master' (Get-Heads $m) "$mode keeps its branch"
+            }
+            Stop-Process -Id $busy.Id -Force
+            $busy.WaitForExit()
+            $run = Invoke-Sweep $w @('-Delete')
+            Assert-Line $run 'deleted: worktree .claude/worktrees/busy (feat/busy, PR #31 MERGED)'
+            Assert-Equal $false (Test-Path -LiteralPath $busyDir) 'with the process gone the worktree is removed'
+        }
+        finally { Stop-Process -Id $busy.Id -Force -ErrorAction Ignore; $busy.WaitForExit() }
+    }
+    else { Write-Host '  skip: no /proc here, so no process is read' -ForegroundColor DarkGray }
 
     # ── the worktree the sweep runs from ────────────────────────────────────────────────────
     Write-Host 'the worktree holding the current directory stays'

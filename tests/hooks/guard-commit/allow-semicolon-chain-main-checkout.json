@@ -3,13 +3,12 @@
   "event": {
     "session_id": "fixture",
     "transcript_path": "${FIXTURES}/transcript.jsonl",
-    "cwd": "${TEMP}/ouro-hooks/.claude/worktrees/w1",
+    "cwd": "${TEMP}/ouro-hooks/main",
     "hook_event_name": "PreToolUse",
     "tool_name": "Bash",
     "tool_input": {
-      "command": "cd /tmp && sleep 5",
-      "description": "a recorded call",
-      "run_in_background": true
+      "command": "make test; git commit -F m",
+      "description": "a recorded call"
     }
   }
 }

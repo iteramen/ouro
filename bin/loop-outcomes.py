@@ -32,8 +32,15 @@ Definitions, all UTC:
  * Landing: a pull request with a line starting `Fixes #N`, with or without a leading backtick and
    in any case, names issue N. It landed when it merged (at mergedAt, on its merge commit) or
    when a first-parent commit's subject ends in its `(#PR)` (at the committer date, on that
-   commit); the merge wins. An attempt's landing is the earliest one from its promotion up to the
-   next promotion. Many attempts may share one landing commit (a fuse region, a batch).
+   commit); the merge wins. A direct-lane commit lands too: a first-parent commit whose message
+   has a line starting `Fixes #N` and whose subject ends in no `(#PR)`, at its committer date, on
+   that commit; a pull request's own merge commit is not counted a second time. An attempt's
+   landing is the earliest one from its promotion up to the next promotion. Many attempts may
+   share one landing commit (a fuse region, a batch). A line starting `Part k/n of #N`, with or
+   without a leading backtick and in any case, in a landed pull request's body is a part landing of
+   issue N and lands nothing by itself; the last part's `Fixes` line does. An attempt that reads
+   open carries `parts`: the highest k among the part landings from its promotion up to the next
+   promotion, with that line's n, else None.
  * Reversed: within W = 14 days after the landing, a first-parent commit whose message holds
    `This reverts commit <landing sha>` or whose subject is `Revert "<landing subject>"`, or a
    `bug`-labelled issue created in that window whose body cites an anchor (a list item whose first
@@ -105,6 +112,7 @@ DECISION_STOPS = ("open decision", "dead anchor", "gate uncovered")
 REASONS = STOP_REASONS + ("triage reversal", "unclassified")
 OTHER_STATES = ("blocked", "idea", "human-ready", "umbrella", "architecture")
 FIXES = re.compile(r"^`?Fixes #([0-9]+)", re.IGNORECASE | re.MULTILINE)
+PART = re.compile(r"^`?Part ([0-9]+)/([0-9]+) of #([0-9]+)", re.IGNORECASE | re.MULTILINE)
 STOP_LINE = re.compile(r"\*\*Stop:\*\* (" + "|".join(STOP_REASONS) + ")")
 SIZE_LINE = re.compile(r"^Size:[^\S\r\n]*(\S+)", re.MULTILINE)
 LANDED_SUBJECT = re.compile(r"\(#([0-9]+)\)\s*$")
@@ -306,8 +314,8 @@ def size_of(body):
     return m.group(1) if m and m.group(1) in ("S", "M") else "none"
 
 
-def landed_prs(prs, commits):
-    """[((time, landing sha, PR number), PR, {issues its Fixes lines name})], one per landed PR with a Fixes line."""
+def landed_any(prs, commits):
+    """[((time, landing sha, PR number), PR)], one per landed PR."""
     by_subject = {}
     for c in commits:
         m = LANDED_SUBJECT.search(c["subject"])
@@ -318,23 +326,42 @@ def landed_prs(prs, commits):
         n = p["number"]
         merge = (p.get("mergeCommit") or {}).get("oid")
         if p.get("mergedAt") and merge:
-            land = (utc(p["mergedAt"]), merge, n)
+            out.append(((utc(p["mergedAt"]), merge, n), p))
         elif n in by_subject:
-            land = (by_subject[n]["date"], by_subject[n]["sha"], n)
-        else:
-            continue
+            out.append(((by_subject[n]["date"], by_subject[n]["sha"], n), p))
+    return out
+
+
+def landed_prs(prs, commits):
+    """[((time, landing sha, PR number), PR, {issues its Fixes lines name})], one per landed PR with a Fixes line."""
+    out = []
+    for land, p in landed_any(prs, commits):
         issues = {int(x) for x in FIXES.findall(p.get("body") or "")}
         if issues:
             out.append((land, p, issues))
     return out
 
 
+def part_landings(prs, commits):
+    """issue number -> sorted [(time, k, n)], one per `Part k/n of #N` line of a landed PR."""
+    out = collections.defaultdict(list)
+    for land, p in landed_any(prs, commits):
+        for k, total, issue in PART.findall(p.get("body") or ""):
+            out[int(issue)].append((land[0], int(k), int(total)))
+    return {k: sorted(v) for k, v in out.items()}
+
+
 def landings(prs, commits):
-    """issue number -> sorted [(time, landing sha, PR number)]."""
+    """issue number -> sorted [(time, landing sha, PR number)]; the PR number is None for a direct commit."""
     out = collections.defaultdict(list)
     for land, _, issues in landed_prs(prs, commits):
         for issue in issues:
             out[issue].append(land)
+    merges = {(p.get("mergeCommit") or {}).get("oid") for p in prs}
+    for c in commits:
+        if c["sha"] not in merges and not LANDED_SUBJECT.search(c["subject"]):
+            for issue in {int(x) for x in FIXES.findall(c["message"])}:
+                out[issue].append((c["date"], c["sha"], None))
     return {k: sorted(v) for k, v in out.items()}
 
 
@@ -448,7 +475,7 @@ def assisted_by(attempt, issue, land, approvers, comments_of_pr):
     return any(t <= e for t, _ in ruled for e in cleared)
 
 
-def classify(attempt, issue, lands, now, approvers, comments_of_pr, commits, bugs, blamer):
+def classify(attempt, issue, lands, parts, now, approvers, comments_of_pr, commits, bugs, blamer):
     t, limit = attempt["start"], attempt["limit"]
     attempt["checkpoint"] = "checkpoint" in labels_at(issue, t + timedelta(minutes=10))
     attempt["week"] = "%d-W%02d" % t.isocalendar()[:2]
@@ -482,6 +509,8 @@ def classify(attempt, issue, lands, now, approvers, comments_of_pr, commits, bug
         return
     attempt["outcome"] = "open"
     attempt["age"] = (now - t).days
+    done = [x for x in parts.get(issue["number"], []) if t <= x[0] < limit]
+    attempt["parts"] = max(done, key=lambda x: x[1])[1:] if done else None
 
 
 def stop_reason(issue, end, approvers):
@@ -500,6 +529,7 @@ def analyze(issue_nodes, pr_nodes, commits, approvers, now, since):
     """(attempts promoted at or after since, each classified; the count of anchors skipped)."""
     issues = {n["number"]: prep_issue(n) for n in issue_nodes}
     lands = landings(pr_nodes, commits)
+    parts = part_landings(pr_nodes, commits)
     comments_of_pr = {p["number"]: sorted(((utc(c["createdAt"]), (c.get("author") or {}).get("login"), c["body"] or "")
                                            for c in p["comments"]["nodes"]), key=lambda c: c[0]) for p in pr_nodes}
     bugs = [i for i in issues.values() if any(n == "bug" for _, n in i["labeled"]) and not sweep_child(i)]
@@ -509,7 +539,7 @@ def analyze(issue_nodes, pr_nodes, commits, approvers, now, since):
         attempts = attempts_of(issue, now)
         for a in attempts:
             if a["start"] >= since:
-                classify(a, issue, lands, now, approvers, comments_of_pr, commits, bugs, blamer)
+                classify(a, issue, lands, parts, now, approvers, comments_of_pr, commits, bugs, blamer)
                 out.append(a)
     return sorted(out, key=lambda a: (a["start"], a["issue"])), blamer.skipped
 

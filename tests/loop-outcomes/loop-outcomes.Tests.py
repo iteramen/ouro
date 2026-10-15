@@ -331,6 +331,39 @@ def landing_rows():
     a1, a2 = of(res, 92)
     check("control: a landing a second before the next promotion is the first attempt's",
           a1["outcome"] == "landed" and a2["outcome"] == "open")
+    repo, shas = make_repo([
+        {"msg": "init", "date": d(1), "files": {"a.txt": "x\n"}},
+        {"msg": "docs: direct lane\n\nFixes #96", "date": d(12), "files": {"a.txt": "y\n"}},
+        {"msg": "docs: a pull request squash (#97)\n\nFixes #98", "date": d(12), "files": {"a.txt": "z\n"}},
+        {"msg": "docs: mid-line\n\nSee Fixes #99 in the text", "date": d(12), "files": {"a.txt": "w\n"}},
+        {"msg": "docs: merged without the suffix\n\nFixes #101", "date": d(12), "files": {"a.txt": "v\n"}},
+    ])
+    res, _ = analyze([promoted(n) for n in (96, 98, 99, 101)], [pr(100, "Fixes #101", merged=d(13), oid=shas[4])], lo.first_parent("origin/main"))
+    check("a first-parent commit with a Fixes line and no (#PR) subject lands, at its committer date, on that commit",
+          first(res, 96)["outcome"] == "landed" and first(res, 96)["landing"] == shas[1] and first(res, 96)["land_time"] == lo.utc(d(12)))
+    check("a subject ending in (#PR) is not a direct landing", first(res, 98)["outcome"] == "open")
+    check("a mid-line Fixes in a commit message does not land", first(res, 99)["outcome"] == "open")
+    check("a pull request's own merge commit is not counted a second time as a direct landing",
+          first(res, 101)["landing"] == shas[4] and first(res, 101)["land_time"] == lo.utc(d(13)))
+    parts = [pr(70, "Part 1/3 of #110\n\nbody", merged=d(11), oid=fake(70)),
+             pr(71, "`Part 2/3 of #110`", merged=d(12), oid=fake(71)),
+             pr(72, "Part 1/3 of #110", state="CLOSED"),
+             pr(73, "Part 1/2 of #111", merged=d(11), oid=fake(73)),
+             pr(74, "Part 2/2 of #111\nFixes #111", merged=d(13), oid=fake(74))]
+    res, _ = analyze([promoted(110), promoted(111)], parts)
+    check("merged part pull requests 1/3 and 2/3 with no closing one read open, with 2 of 3 landed",
+          first(res, 110)["outcome"] == "open" and first(res, 110)["parts"] == (2, 3))
+    check("the closing pull request after the parts (Part 2/2 and Fixes) reads landed on it, at its merge",
+          first(res, 111)["outcome"] == "landed" and first(res, 111)["landing"] == fake(74)
+          and first(res, 111)["land_time"] == lo.utc(d(13)))
+    check("control: an open attempt with no part line carries no parts", analyze([promoted(112)], parts)[0][0]["parts"] is None)
+    res, _ = analyze([promoted(113)], [pr(75, "Part 1/3 of #113", merged=d(9), oid=fake(75))])
+    check("a part landed before the promotion does not count", first(res, 113)["outcome"] == "open" and first(res, 113)["parts"] is None)
+    swap = [(d(10, 12), "-", "agent-ready"), (d(10, 12), "+", "needs-ruling"), (d(11, 10), "+", "agent-ready")]
+    res, _ = analyze([promoted(114, events=swap)], [pr(76, "Part 1/3 of #114", merged=d(10, 18), oid=fake(76))])
+    a1, a2 = of(res, 114)
+    check("a part landed in an earlier attempt does not count for the next",
+          a1["outcome"] == "refused" and a2["outcome"] == "open" and a2["parts"] is None)
 
 
 # ---- reversal -------------------------------------------------------------------------------

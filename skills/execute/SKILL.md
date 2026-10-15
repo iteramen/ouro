@@ -3,7 +3,8 @@ name: execute
 description: >
   Execute one agent-ready GitHub issue end to end: re-verify its anchors, branch, implement
   to the spec with the binding's gates and overlays, and deliver a PR with `Fixes #N` —
-  never a direct push to the default branch. Invoked as `/ouro:execute <N>`. Use when the
+  never a direct push to the default branch, except the `Flow: direct` lane's. Invoked as
+  `/ouro:execute <N>`. Use when the
   user says "execute issue N", "work issue N", "run issue N", "do the agent-ready queue",
   or an automation harness hands over an agent-ready issue number. Refuses issues without
   the agent-ready label (route those to /ouro:triage first). `trivial` and `checkpoint`
@@ -46,7 +47,8 @@ when the binding turns out to be missing. This skill uses:
   repository can load, or whose rule needs a capability the session's tools lack, cannot be shown
   that way. Such an issue is not refused: the run warns, naming each such item before it builds,
   in its report and, for code with no test host, as the `Smoke by hand` bullet of the PR's Merge
-  danger; under Merge danger otherwise.
+  danger; under Merge danger otherwise. A change inside a workflow step's `run:` block is not such
+  an item: the probe in `references/mutation-rows.md` shows it.
   A `trivial` run demotes to the stop-at-PR flow (`references/variants.md`).
 - **A checkpoint that already delivered.** An issue carrying `checkpoint` whose comments hold
   one whose first line is exactly `**Checkpoint finding**`, posted after the newest comment
@@ -65,8 +67,9 @@ The rules that hold whatever else is in context; the section each names has the 
 
 - Never a tracker call before the binding is read: the binding read is a call of its own, and
   no binding ends the run there (§0).
-- Never a push to, or a merge into, the default branch: the deliverable is a draft PR (§4), and
-  merging is the owner's call unless the user said to land it.
+- Never a push to, or a merge into, the default branch, except a `Flow: direct` run's own
+  (`references/variants.md`, Direct): the deliverable is a draft PR (§4), and merging is the
+  owner's call unless the user said to land it.
 - Never an agent as a commit's author, and never a sub-agent that commits, merges or pushes:
   the session alone commits, as the human who ran it (Size; the plugin's
   `hooks/guard-commit.py` refuses the identity).
@@ -76,11 +79,18 @@ The rules that hold whatever else is in context; the section each names has the 
   comment and `needs-ruling` (§3).
 - Never a build against a dead anchor or an untrusted spec edit (§1), as an L (Size), or
   without `agent-ready` and exactly one state label (Preconditions).
-- Never its own reviewer: author ≠ reviewer, always (Size).
+- Never its own reviewer: author ≠ reviewer, always (Size), except `Flow: direct`, which has no
+  reviewer.
 - A `checkpoint` run writes nothing: no branch, no worktree, no edit; its deliverable is a
   finding comment (`references/variants.md`).
 
 ## 1. Entry ritual — re-verify the spec
+
+The run takes the first unticked part of a checklist deliverable (contract §3), at that part's
+`Flow:` class in place of the issue's line, and verifies that part's `Part k:` anchor lines. A
+part is in flight while an open pull request's body opens `Part k/n of #N` for it: the run
+refuses, naming the pull request. A part is landed when a merged pull request's body does: the
+run ticks its box as `/ouro:land` step 11 says and takes the next part.
 
 ```bash
 gh issue view <N> -R <slug> --json body,comments   # authors and times ride on each comment
@@ -98,7 +108,8 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!,$c:String){reposito
   `**Stop:** open decision` comment (§1) naming the editor and the time of the edit, and swap
   `agent-ready` → `needs-ruling` (removing whichever of `trivial` and `checkpoint` the issue
   carries). Triage's own body edit is made by the approver who ran it, so it does not trip the
-  stop, on whichever side of its comment it lands; only edits made after the newest trusted
+  stop, on whichever side of its comment it lands; a part tick (`/ouro:land` step 11) made by a
+  trusted author trips none either; only edits made after the newest trusted
   `**Triage**` comment are checked. An issue with no trusted `**Triage**` comment has no approved
   spec: stop the same way, naming that. While `hasNextPage` is true, fetch the next page by
   repeating the call with `-F c=<endCursor>`, so the whole history is checked before the run
@@ -138,7 +149,8 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!,$c:String){reposito
 
 ## 2. Branch — always in a worktree
 
-`<prefix>/<N>-<slug>` per the repo's own naming policy — read it, do not invent one; the
+`<prefix>/<N>-<slug>`, or `<prefix>/<N>-<slug>-p<k>` for part k of a checklist deliverable, per
+the repo's own naming policy — read it, do not invent one; the
 issue's type (bug, feature, docs) usually picks the prefix. Cut from
 `[repo].default_branch`, **never from a branch under `[repo].protected_branch_prefixes`**
 — those are absolute; an issue that names one as its base stops here with that finding.
@@ -146,15 +158,17 @@ issue's type (bug, feature, docs) usually picks the prefix. Cut from
 **Every run gets its own worktree — attended and single-issue included.** The owner
 commits concurrently in the main tree, and branch-switching under those edits is a known
 collision class; attendedness is no exemption. Worktrees also permit parallelizing orthogonal
-issues. The one exception is a `checkpoint` run: read-only, no branch, no worktree
+issues. The exceptions are a `checkpoint` run: read-only, no branch, no worktree, and a
+`Flow: direct` run, which commits on the default branch in the main checkout
 (`references/variants.md`).
 
 ```bash
 # from the main checkout ([repo].checkout), after the fetch in Preconditions
-mkdir -p .claude/worktrees/<N>-<slug> || exit 2
-git check-ignore -q --no-index .claude/worktrees/<N>-<slug> \
-  || { rc=$?; rmdir -p .claude/worktrees/<N>-<slug> 2>/dev/null; exit $rc; }   # exit 1: STOP, add no worktree
-git worktree add .claude/worktrees/<N>-<slug> -b <prefix>/<N>-<slug> origin/<default_branch>
+# [-p<k>] is there only for part k of a checklist deliverable
+mkdir -p .claude/worktrees/<N>-<slug>[-p<k>] || exit 2
+git check-ignore -q --no-index .claude/worktrees/<N>-<slug>[-p<k>] \
+  || { rc=$?; rmdir -p .claude/worktrees/<N>-<slug>[-p<k>] 2>/dev/null; exit $rc; }   # exit 1: STOP, add no worktree
+git worktree add .claude/worktrees/<N>-<slug>[-p<k>] -b <prefix>/<N>-<slug>[-p<k>] origin/<default_branch>
 ```
 
 Both parts are load-bearing:
@@ -221,9 +235,16 @@ reorder, or replace a step of this skill.
   issue's premise. A test that passes pre-fix means the spec is wrong: stop and re-triage, don't
   "fix" anyway, first posting the passing result as a `**Stop:** open decision` comment
   (§1). Then implement to green.
-- **Gates**: every `[[gate]]` whose `areas` contains any of the issue's area labels, plus every
-  `*` gate, narrowed by `paths`, runs on **committed** work before the PR, each `<ouro>` in a
-  `run` replaced by the plugin root (§0). `references/gate-selection.md` holds the narrowing,
+- **Gates**: the selected set is every `[[gate]]` whose `areas` contains any of the issue's area
+  labels, plus every `*` gate, narrowed by `paths`, each `<ouro>` in a `run` replaced by the
+  plugin root (§0). Who runs it follows the issue's Flow class (contract §4; no `Flow:` line
+  reads as standard). Under express and standard the checks the pull request runs are the run,
+  and the session runs on **committed** work only a selected gate those checks do not run at all
+  or run only to print a skip;
+  under full it also runs, on the commit, each selected gate whose own code the diff changes: the
+  file its `run` names and what that file reads, the suite, its fixtures, the script under test.
+  When the pull request's checks cannot run, the session runs the whole selected set locally,
+  and the PR body says so. `references/gate-selection.md` holds the narrowing,
   its two fallbacks, how each entry reaches git, and the line each gate, run or skipped, leaves
   in the PR body. A gate that cannot run locally is a finding, not a skipped step — say so. The
   run follows the Gate environment, What CI checks, Two reads and Coverer sections of
@@ -231,8 +252,9 @@ reorder, or replace a step of this skill.
 - **Name the scenario the change exists to catch, and show it firing there.** A gate, lint, filter
   or test proves nothing by passing on the PR that introduces it. When the thing added **is** a
   test, that scenario is a mutation of the code the test covers, one row per test in the PR
-  body's `**Mutation-tested**` table; `references/mutation-rows.md` holds the doctrine, the four
-  shapes that stay green, code with no test host, the stage-before-mutating rule and the table.
+  body's `**Mutation-tested**` table; `references/mutation-rows.md` holds the doctrine, the five
+  shapes that stay green, code with no test host and the probe a workflow step's `run:` block
+  owes, the stage-before-mutating rule and the table.
 - **Doc impact executes in this PR**: the issue's `Doc impact on close:` line names
   the doc(s) — edit them in the same branch ("none" means none). **That line is the
   starting list, not the whole one.** The Sweep section of `references/dispatch-rules.md` applies:
@@ -247,7 +269,7 @@ reorder, or replace a step of this skill.
 - **Files another issue edits.** Before the review, the session lists the other open `agent-ready`
   issues with `gh issue list -R <slug> --label agent-ready --state open --limit 1000 --json number,body`
   (without `--limit`, `gh` returns only its default page of 30), less the issues the PR's
-  `Fixes #N` lines close. It checks each path in the diff
+  `Fixes #N` lines close, or its `Part` line names. It checks each path in the diff
   (`git -c core.quotepath=false diff --name-only $(git merge-base origin/$DEFAULT HEAD)..HEAD`)
   against each of those bodies' Deliverable section and `Doc impact on close:` line. A path
   either part names, mirrored files aside (`/ouro:fuse` §2), is a match once the session has
@@ -265,10 +287,12 @@ the issue as a `**Stop:** open decision` comment (§1), swap `agent-ready` → `
 (removing whichever of `trivial` and `checkpoint` the issue carries), and say in the hand-over
 exactly what is parked. Never pick silently.
 
-## 4. Deliver — PR, never the default branch
+## 4. Deliver — a PR, or the direct lane's push
 
 Push the branch and open the PR per `/ouro:land`'s conventions (labels, body shape), with
-`Fixes #<N>` in the body, **as a draft**, at the point the draft paragraph below names. Verification
+`Part k/n of #<N>` as the body's first line when the deliverable is a checklist (contract §3) and
+`Fixes #<N>` in the body only when k equals n (always, for a deliverable with no checklist), **as
+a draft**, at the point the draft paragraph below names. Verification
 evidence (tests run, gates run) goes in the PR body. Review per `[ship].review`, as the table in
 `docs/binding.md` "Choosing ship.review" gives it for the issue's size:
 
@@ -276,46 +300,59 @@ A run that opens no PR still runs the review this section names, on the range
 `$(git merge-base origin/$DEFAULT HEAD)..HEAD`, before it reports, once the branch §2 made
 holds a commit of its own; where that review is `copilot`, `/ouro:review` takes its place.
 
-**The draft opens early, so CI runs beside the review.** Open it with `gh pr create --draft`:
-before `/ouro:review` for a change whose only proof is a runner (a workflow, a row one platform
-alone runs); after the review's first report, before its first fix, otherwise; and, for a change
-no `/ouro:review` runs on (an S whose cell in the table, after the availability rule, names no
-`/ouro:review`), once the gates pass.
+**Under standard and full the draft opens at the first push**, with `gh pr create --draft`, so
+CI runs beside the review; the workflow cancels a run a later push supersedes, so an early draft
+costs nothing. **Under express the review reads the local range before any push**, fix rounds
+are committed locally, and the one push comes at convergence, where the draft opens with
+`gh pr create --draft` and CI first runs. Convergence is the point where `/ouro:review` step 7's
+verification passes, or, where no `/ouro:review` runs, where the gates pass (an empty set at
+once); a run that stops before convergence pushes what it holds onto a draft before it reports,
+and a fix made after that push (a red check, a reviewer's finding on the PR) is pushed as under
+standard.
+In this section *the gates* are those §3 has the session run itself under the issue's Flow
+class.
 Mark it ready (`gh pr ready`) once `/ouro:review` step 7's verification passes — of the last fix
 commit, or, where the review found nothing to fix, of the record against the head it read — and
-the gates are re-run on that head; where no `/ouro:review` runs, once the gates pass.
-Fix commits made while the PR is open are pushed together, once a round's verification passes,
-or, where no `/ouro:review` runs, once the gates pass on them: each push to an open PR starts a
-CI run. A run that stops before then pushes what it holds onto a draft before it reports; on a
-ready PR it leaves those commits local, and its report names them.
-Under `external-audit`, whatever the size, it is marked ready only once the audit's findings are
-triaged and the gates re-run.
+the gates are re-run on that head (an empty set passes at once; the pull request's checks are
+waited on below); where no `/ouro:review` runs, once the gates pass, an empty set at once.
+Under standard and full, fix commits made while the PR is open are pushed together, once a
+round's verification passes, or, where no `/ouro:review` runs, once the gates pass on them: each
+push to an open PR starts a CI run. A run that stops before then pushes what it holds onto a
+draft before it reports; on a ready PR it leaves those commits local, and its report names them.
+Under `external-audit`, it is marked ready only once the reviewer the table gives its size (the
+reader for an S, `/ouro:review` for an M) has its findings triaged and the gates re-run.
 
-**A green gate run stands when its tree still matches.** This governs every re-run of the gates
-in this skill, including the fix re-run below while waiting at the PR: before re-running, check
-whether the run on file still applies. It stands when `git rev-parse HEAD^{tree}` equals the tree
+**A fix commit's re-run follows the Flow class.** Under express it is committed locally and goes
+out with the one push at convergence, and a fix after that push is pushed as under standard;
+under standard it is pushed, and the checks the pull request runs re-run on it. Under full a green gate run stands when its tree
+still matches. This governs every re-run of the gates in this skill under full, including the fix
+re-run below while waiting at the PR: before re-running, check whether the run on file still
+applies. It stands when `git rev-parse HEAD^{tree}` equals the tree
 that run gated, the base (`git merge-base origin/$DEFAULT HEAD`) is unchanged, and the step needs
 no gate that run did not include. The PR body then cites that run, its commit and the tree match,
-instead of a new one. Any tree difference re-runs the gates — a changed comment included — and so
-does a gate whose input is not the tree and the base, such as one that reads commit messages.
+instead of a new one. A tree difference re-runs the gates whose paths it touches, a comment-only
+one excepted as a prose round (contract §4, §7), and so does a gate whose input is not the tree and
+the base, such as one that reads commit messages.
 
 The `[ship].review` reviewer that works on a pull request (`copilot`) is requested after that,
 on the ready PR, and its findings are triaged there. Nothing in the loop merges a draft:
 `/ouro:land` §10 stops on one and passes only `MERGEABLE CLEAN`. A red CI run on the draft is not a round of
 its own: diagnose it with `/ouro:land` §9's flaky-versus-real drill, and a real failure joins the
-current round's findings.
+current round's findings, or, under express, where CI first runs after convergence, takes a fix
+round counted toward the cap.
 
 - `copilot` → request the review, wait for it in the foreground up to the limit (below), triage
   every finding. `/ouro:land` §6 has the mechanics: GraphQL `requestReviews` with `botIds`,
   not `userIds` — the REST `requested_reviewers` route returns 200 with an empty array and
   silently no-ops.
 - `adversarial-review` → `/ouro:review` on the range `$(git merge-base origin/$DEFAULT HEAD)..HEAD`,
-  at the weight contract §4 selects, for S and M alike; the review's report posts
-  as a PR comment (`/ouro:land` step 5). `/ouro:land` §6 has the ordering — gates →
+  at the weight the issue's Flow class selects (contract §4), for S and M alike; the review's
+  report posts as a PR comment (`/ouro:land` step 5). `/ouro:land` §6 has the ordering — gates →
   review → fix → verify (review step 7) → re-run step 3 → ready; cite it, don't reorder around it.
-- `external-audit` → the external repo-reading audit the binding names (`/ouro:external-audit`).
-  An unavailable reader falls back to `/ouro:review`, by the availability rule beside the table
-  in `docs/binding.md`, and the record says so.
+- `external-audit` → for an S not fused, the reader (`/ouro:external-audit`); for an M not
+  fused, `/ouro:review` alone, as the table in `docs/binding.md` gives; a fused change takes what
+  `/ouro:fuse` step 5 gave it. An unavailable reader falls back to `/ouro:review`, by the
+  availability rule beside the table in `docs/binding.md`, and the record says so.
 - `none` → no reviewer beyond what the table gives an M, so nothing merges unattended.
 
 **Effective ship policy = min(`[ship].policy`, issue labels).** Under `stop-at-pr` a
@@ -323,12 +360,9 @@ current round's findings.
 owner's call** — stop after CI is green and the review is triaged, unless the user
 explicitly said to land it (then follow `/ouro:land` to the end). A run that stops at the PR
 waits for both **in the foreground**: once the PR is marked ready, it blocks on its checks
-(which have been running on the draft beside the review) and, under `copilot`, on the review,
+(which have been running on the draft, beside the review under standard and full) and, under `copilot`, on the review,
 re-issuing the blocking calls as needed — never a background watcher
-or a scheduled wake-up. A background command started while the shell's current directory is inside
-a worktree begins with `cd <absolute path outside .claude/worktrees/>` (the main checkout or the
-scratch directory), so it never pins the worktree; the plugin's `hooks/guard-worktree.py` refuses
-one that does not. Under `adversarial-review` and `external-audit` the run performs the review
+or a scheduled wake-up. Under `adversarial-review` and `external-audit` the run performs the review
 itself, and under `none` there is no reviewer to wait for, so only the checks wait. A check that ends red
 is diagnosed as `/ouro:land` §9 does, then fixed or re-run. The run triages every finding —
 fixes it, or declines it with the reason — re-runs the gates after a fix, has the fix verified
@@ -351,30 +385,40 @@ the run changes no label.
 ## Size
 
 The `Size:` line triage stamped picks the build path and, with `[ship].review`, who reviews: the
-table in `docs/binding.md` "Choosing ship.review". The class of change and its size pick the
-review weight (contract §4).
+table in `docs/binding.md` "Choosing ship.review". The `Flow:` line picks the ceremony: which
+gates the session runs itself (§3), the review's weight, a fix commit's re-run (§4) and the watch
+after the merge (contract §4); no `Flow:` line reads as standard.
 No `Size:` line → treat as M (and expect the shape gate to flag the issue for re-triage).
 
 **S builds inline.** The session edits in the worktree itself — no builder dispatch, no brief,
-no audit of another party's diff — commits, and **runs every matching `[[gate]]` once, on the
-commit**; that run's evidence is what the PR body carries, and CI is the independent re-run.
-The push is a command of its own, run only once that gate run has exited 0 and its own summary
-has been read, never chained into the command that edits, commits or runs the gates (contract
-§7). Building inline never makes the session its own reviewer: the reviewer, or the owner at the PR
-under `stop-at-pr`, is the other party.
+no audit of another party's diff — commits, and **runs on the commit the gates §3 has it run**
+under the issue's Flow class; that run's evidence, where there is one, is what the PR body
+carries, and CI is the independent re-run. The push is a command of its own, run only once any
+such gate run has exited 0 and its own summary has been read, never chained into the command
+that edits, commits or runs the gates (contract §7). Building inline never makes the session its
+own reviewer: the reviewer, or the owner at the PR under `stop-at-pr`, is the other party.
 
 **M dispatches the build.** Step 3 goes to **one** sub-agent — `model:` set from
 `[models].builder` (default `sonnet`), or `[models].builder_trivial` (default `sonnet`) when the
 issue carries `trivial` — briefed with the issue body, the worktree
 path, the commit the build starts from, the path of its state note in the session's scratch
-directory, the `[overlays].implement` files, the `[[gate]]` commands, where it may create files,
+directory, the `[overlays].implement` files, the gate commands the issue's Flow class gives the
+brief (contract §4 Gates: under express and standard the change's own acceptance run, even when
+that command is a gate the checks also run, and the selected gates the pull request's checks do
+not run at all or run only to print a skip; under full also each selected gate whose own code the
+change changes, read from the builder's own uncommitted changes, new files included, against the
+commit the build starts from; no other selected gate the checks run, and a list that comes out
+empty is the builder's run), where it may create files,
 and the STOP rules below. It returns the diff, the verbatim gate output, for a bug the trigger
-measurement (§3), for a test it adds the mutation table (§3), and a claims table: each sentence
+measurement (§3), for a test it adds the mutation table (§3), for a diff that touches a workflow
+step's `run:` block the probe row (§3), the `Settled by the spec` section the STOP rule below
+names, and a claims table: each sentence
 it wrote that says what code or a tool does — in a comment, a docstring, help text, a doc,
 or a changelog entry (one row per clause of an entry) —
 beside the probe that shows it, and the results of the self-checks the brief carries below. A
 sentence with no probe is cut, not kept on reasoning. The session audits the diff, commits, and
-**re-runs the gates on the commit** — that run's evidence is what the PR body carries. An S built
+runs on the commit the gates §3 has it run under the issue's Flow class — the builder's gate
+output and that run's evidence are what the PR body carries. An S built
 inline holds its own prose to the same table, and itself to the sweep, delete and self-check rules
 the brief carries below, whose results it shows in its claims table. The session's own record — the
 squash subject and the PR body — joins the claims through the verification message of `/ouro:review`
@@ -405,18 +449,19 @@ its own work: an `/ouro:review` pass is `[models].reviewer` (default `opus`) who
 `/ouro:review` dispatches that key — and the other `[ship].review` values name their own
 reviewer.
 
-- **S** — build inline, gate once on the commit. Then the review below, and CI.
-- **M** — dispatch the build, re-run the gates on the commit, then **one adversarial pass by a
+- **S** — build inline, run §3's gates on the commit. Then the review, where the table names a
+  session review, and CI.
+- **M** — dispatch the build, run §3's gates on the commit, then **one adversarial pass by a
   different party** — `/ouro:review` on the range `$(git merge-base origin/$DEFAULT HEAD)..HEAD`,
-  at contract §4's weight — *before* the PR is marked ready, with CI running on the draft beside it (§4); the PR body carries its verdict
+  at the Flow class's weight — *before* the PR is marked ready, under express on the local range with one push at convergence, otherwise with CI running on the draft beside it (§4); the PR body carries its verdict
   and links its report comment. Then the reviewer the table adds, if any.
 - **L** — stop. The issue should have been SPLIT at triage; an L is never executed as L.
   Re-run `/ouro:triage <N>` and say so in the report. An owner-driven multi-ticket effort
   is opt-in mechanics, not this path: `references/build-tiers.md`.
 
-**The review weight is contract §4's**, by the class of change and its size: decide it after the
-commit, from the diff, and pass it as `/ouro:review --light`, `--sized`, or neither for the probe
-format. Who takes `/ouro:review` at all, before the PR is marked ready, is the table in
+**The review weight follows the Flow class** (contract §4), as re-derived after the commit
+(below): direct takes none, express passes `/ouro:review --light`, standard `--sized`, full
+neither, for the probe format. Who takes `/ouro:review` at all, before the PR is marked ready, is the table in
 `docs/binding.md` "Choosing ship.review".
 
 **Size is re-derived from the diff after the commit**, the way the contract re-grants
@@ -432,16 +477,28 @@ eligibility rule was triage's call. Unsure means M. A demotion is recorded: the 
 it in one sentence, so triage and the loop metrics see the mis-size. The build is done either
 way, and the demoted S takes the table's M row.
 
+**Flow is re-derived from the diff after the commit** the same way, by contract §4's classes, and
+only tightens: direct to express to standard to full. A tightening is recorded in one sentence in
+the PR body, and the run takes the tighter class's gates, review and re-runs.
+
 Law of the road, every size:
 
 - **Author ≠ reviewer, always adversarial.** Whoever wrote a change, someone else reviews
   it — for an S built inline the session is the author, never the reviewer — prompted to break
-  it, with file:line evidence. **The loop re-runs the checks** — the session's gate run on the
-  commit and CI, between them. A reviewer reads or probes; a review that only reads satisfies
-  that half of the loop.
+  it, with file:line evidence; `Flow: direct` is the one exception (contract §7). **The loop
+  re-runs the checks**, twice: CI, and under express or
+  standard the change's own acceptance run on the commit — its red-then-green test, or the
+  acceptance command the issue names, recorded in the PR body (S) — or the builder's run (M),
+  CI alone for an S that executes nothing, under full the session's gate run on the commit.
+  A reviewer reads or probes; a review that only reads satisfies that half of the loop.
 - **Deterministic done-condition + STOP rule in any dispatch.** A sub-agent that cannot meet its
   done-condition STOPs and reports; silent tuning buries the call. The brief states the turn budget
-  the plugin's `docs/contract.md` sets, and reaching it is the same STOP.
+  the plugin's `docs/contract.md` sets, and reaching it is the same STOP. A choice the spec's own
+  clauses already decide is settled, not a STOP: an exit code its table assigns, an error class it
+  names, a default it states. The builder lists every such choice, with the clause that decides
+  it, under one hand-back section headed `Settled by the spec`. The session reads that section
+  against the spec before the commit and carries an item into the PR body where it bears on
+  acceptance. A choice no clause decides stays a STOP.
 - **≤ 3 fix rounds per change, then STOP.** A fourth failure is a finding for the issue,
   posted as a `**Stop:** review cap` comment (§1) with the issue swapped to `needs-ruling`,
   not another attempt. A reviewer's finding on the pull request after `/ouro:review` has

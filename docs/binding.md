@@ -51,7 +51,7 @@ type = ["bug", "enhancement", "documentation"]   # type labels the repo's policy
 areas = ["sdk"]
 run = "wsl -e bash -lc 'dotnet test Sdk/Sdk.sln -c Debug'" # dev-box only: the CI runner has no wsl
 ci = "dotnet test Sdk/Sdk.sln -c Debug"  # optional — what CI runs in place of `run`, as a pwsh command line
-paths = ["Sdk/"]                         # optional — git pathspecs; `execute` and `land`, and CI with selection on, run this gate only when a diff changes one
+paths = ["Sdk/"]                         # optional — git pathspecs; `execute`, `land` and `fuse`, and CI with selection on, run this gate only when a diff changes one
 
 [[gate]]
 areas = ["*"]
@@ -74,6 +74,9 @@ forbidden_check = "required"             # required | off — whether the manife
                                          # posts against the private token list — see "The
                                          # forbidden-token check" (default: follows the target's
                                          # visibility)
+direct = ["docs/notes/*.md"]             # optional — globs of the files the direct lane may
+                                         # push; off when absent — see "Rules the validator
+                                         # enforces"
 
 [models]                                 # every key optional — the model tier per role, an alias
                                          # never a pinned version, so a role follows the current
@@ -169,14 +172,15 @@ at most, a third only for a new blocker, with the triage of round 1 given to rou
 
 **Who reviews what**, by the value, the issue's `Size:` line (contract §4) and whether
 `/ouro:fuse` built it, is this table and nowhere else: contract §4, `/ouro:execute`,
-`/ouro:review`, `/ouro:fuse`, `/ouro:triage`, `/ouro:land` and `/ouro:e2e` cite it. Every
-`/ouro:review` pass takes the weight contract §4 assigns the diff, light, sized or the probe
-format, whatever the cell.
+`/ouro:review`, `/ouro:fuse`, `/ouro:triage`, `/ouro:land` and `/ouro:e2e` cite it. The table
+picks which reviewer a cell gets; the review's weight within the cell follows the issue's
+`Flow:` class (contract §4): the reading brief for express, sized with its budget for standard,
+the probe format for full.
 
 | | `adversarial-review` | `copilot` | `external-audit` | `none` |
 |---|---|---|---|---|
 | **S**, not fused | `/ouro:review` | Copilot on the PR | the reader | no reviewer |
-| **M**, not fused | `/ouro:review` | `/ouro:review`, then Copilot on the PR | `/ouro:review` and the reader | `/ouro:review` |
+| **M**, not fused | `/ouro:review` | `/ouro:review`, then Copilot on the PR | `/ouro:review` | `/ouro:review` |
 | **S or M, fused** (`/ouro:fuse` step 5, per file cluster) | `/ouro:review` per cluster | `/ouro:review` per cluster, then Copilot on the PR | the reader per cluster | `/ouro:review` per cluster |
 
 **The availability rule.** An unavailable reader — the CLI `ship.external_cli` names is not
@@ -326,6 +330,25 @@ sees as a directory. The overlay entry is unchecked.
 - `ship.landing` must name one of the four pairs above, and an explicit `ship.sync` or
   `ship.merge` beside it must agree with the pair it names — the error names both keys. All three
   are optional; absent means today's behaviour, which is what `merge-squash` names.
+- `ship.direct` is optional: a list of globs, empty when absent, and the direct lane (contract §4,
+  `Flow: direct`) is off while it is empty. A glob is matched with `fnmatch.fnmatchcase` against the
+  repository-relative path written with forward slashes, so `*` also crosses `/`; there is no
+  negation, so a new file under a directory joins the lane by a binding edit. `check` refuses a
+  glob whose literal prefix, the text before its first `*`, `?` or `[`, starts with '.github/',
+  'actions/', 'hooks/', 'release/' or '.claude/' (the prefix rule: a literal path there is
+  refused too), a glob with a wildcard or a class in its first path segment (`*.md` or `[.]github/…`
+  reaches every top-level directory, the protected ones included: name the directory, as
+  `docs/*.md`), and a glob that matches any of these probes: '.github/workflows/x.yml',
+  '.github/workflows/x.yaml', '.github/actions/x/action.yml', '.github/actions/x/action.yaml',
+  'actions/x/action.yml', 'hooks/hooks.json', 'hooks/x.py', 'hooks/x.sh', 'release/x.py',
+  'release/x.ps1', '.claude/ouro.toml', '.claude/ouro.local.toml', '.claude/settings.json', or a
+  repository path a `[[gate]]` `run` or `ci` line names (a token not starting with `-` that holds
+  a slash and does not end in one, or that ends in a file extension, `<ouro>/` stripped). The
+  error names the glob and the rule or the probe it matched.
+  `python3 bin/ouro-binding.py direct <path>...` reads `ship.direct` and prints each given path
+  that no glob matches, one per line, by the same `fnmatch.fnmatchcase` reading: exit 1 when it
+  printed any, 0 when every path matches, 2 with a message on stderr when the key is empty or
+  absent; `Push-Direct.ps1` asks it. Like every key but `repo.checkout`, the overlay may not set it.
 - Every `[[gate]]` needs a non-empty `areas` and `run`. An issue carrying an area label that matches
   no gate, with no `"*"` gate, is not executable; `execute` stops and says so. A `run` may contain
   `<ouro>`, the plugin root, replaced before the command runs — that is how a gate the plugin ships
@@ -351,14 +374,17 @@ sees as a directory. The overlay entry is unchecked.
   with `paths` runs only when the pull request changes a path that one of its entries matches, and
   is skipped otherwise. A changed path that no gate's `paths` claims selects no path-scoped gate:
   with only such paths changed, only the gates without `paths` run. The gates Action reads
-  `paths` when its selection input is on, and `execute` and `land` always read them, to narrow
-  their area-selected set with the same fallbacks; `gates`, `land-batch` and `fuse` never read
+  `paths` when its selection input is on, and `execute`, `land` and `fuse` always read them, to
+  narrow their area-selected set with the same fallbacks; `gates` and `land-batch` never read
   them. With selection on, a pull request's diff is read against its base and a push's against
   the tip the branch had before it, and every gate runs in these cases: an event that is neither;
   a push with no previous tip, such as a tag or a new branch; a diff that cannot be read; and a
-  change to a workflow or the gates Action. A gate that reads the binding names `.claude/ouro.toml`
+  change to the gates Action. A gate that reads the binding names `.claude/ouro.toml`
   in its `paths`. A path-scoped gate whose list misses a file it depends on is skipped wrongly
   when only that file changes, so a list names everything its gate reads.
+  A gate whose CI leg is path-filtered declares as its `paths` pathspecs that select the same paths
+  as that filter, and every file the gate reads: without them, `execute`, `land` and `fuse` run it
+  locally whenever it is selected and the diff misses the filter.
 - `owner.ruling_approvers` is non-empty.
 - No `[labels]` set names one of the eight states or the two modifiers — the contract fixes those
   — and `area` and `type` are disjoint. Both are compared case-insensitively, because GitHub label

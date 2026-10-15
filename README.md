@@ -83,16 +83,16 @@ re-opens.
 | Skill | Does |
 |---|---|
 | `/ouro:init` | Onboard a repo: asks what `Install-Ouro.ps1` needs, runs it, and reports each file written, skipped or refused, then reports whether the repo has Issues and whether it deletes a merged PR's branch, offering to turn either on when it is off. Re-run to add the docs-freshness workflow, the CI workflow or the issue intake files. |
-| `/ouro:triage` | Grade issues against the contract: PROMOTE / NEEDS-RULING / CHECKPOINT / SPLIT / STALE. Report-and-approve. |
+| `/ouro:triage` | Grade issues against the contract: PROMOTE / NEEDS-RULING / CHECKPOINT / SPLIT / FUSE / STALE. Report-and-approve. |
 | `/ouro:e2e <N>` | One `agent-ready` issue, autonomously: entry ritual, execute, review to convergence, land, cleanup, and the follow-ups the landing surfaces. One issue only — queue order, waves and parallelism are not its business. |
 | `/ouro:execute <N>` | One `agent-ready` issue → one PR. Re-verifies anchors first; a dead anchor stops the run. `trivial` and `checkpoint` variants. |
 | `/ouro:land` | One branch to the default branch through the full PR flow. |
 | `/ouro:land-batch` | Several reviewed PRs, one validated composition — the composed tree is checked, not each PR; each PR then lands through GitHub's squash-merge, checked against its local squash, or in one push when GitHub cannot reproduce the set. |
-| `/ouro:fuse <N> <N>…` | Build several `agent-ready` issues that share files together: regions by shared files, one brief per region and one commit per issue, review split by file cluster, one PR per region landed through `/ouro:land`. |
+| `/ouro:fuse <N> <N>…` | Build several `agent-ready` issues together: regions by shared files, or an area batch the owner names, one brief per region and one commit per issue, review split by file cluster, an area batch as one, one PR per region landed through `/ouro:land`. |
 | `/ouro:compile` | Read-only queue planner: runs the footprint analyzer and prints, in chat, which `agent-ready` issues can run at once, which `/ouro:fuse` sets to build together, which rulings hold blocked issues and what ready work their build would collide with, and what an umbrella or area still needs. Writes nothing and runs no work; the owner names what runs. |
 | `/ouro:drift` | LLM audit of doc claims against artifacts. Report-only; the ledger's entries are append-only comments. |
 | `/ouro:seam` | Adversarial review of a contract seam — both sides locally right, the defect in the gap. |
-| `/ouro:review` | Adversarial second reviewer. Light mode for a diff that changes only documentation, skill text, rules or comments; the sized review, probes at the changed hunks only, for an executed diff within contract §4's bound; probe format, REJECTED ledger mandatory, above it. |
+| `/ouro:review` | Adversarial second reviewer, at the weight the issue's Flow class selects (contract §4). Light mode for an express change; the sized review, probes at the changed hunks only and nothing the pull request's checks already ran, for a standard one; probe format, REJECTED ledger mandatory, for a full one. |
 | `/ouro:external-audit` | The `ship.review = "external-audit"` reader: a repo-reading, JSON-verdict adversarial review, over a CLI adapter `ship.external_cli` names (`grok`, `claude`, `codex`, `copilot` shipped), capped at two rounds. Diff mode judges a change against a goal; claims mode refutes a plan's factual assertions about the code. |
 | `/ouro:intake` | The unattended weekly entry: gates, then intake grading. Uncredentialed — it proposes a manifest (`needs-triage`/`needs-ruling` only) that a model-free step applies; never promotes. |
 
@@ -117,7 +117,9 @@ The labels: eight states, two modifiers, defined in the contract.
   push, the head's checks watched to a verdict, the compression of a fix-up range before an
   explicit merge, the guarded merge, the branch and worktree cleanup — and read the binding
   through `Get-LandBinding.ps1` beside them; `Invoke-LandBatch.ps1` is `/ouro:land-batch`'s
-  deterministic work as subcommands over the batch files in the git directory.
+  deterministic work as subcommands over the batch files in the git directory. `Push-Direct.ps1`
+  is the direct lane's push (`Flow: direct`): it pushes the default branch, or a branch for a pull
+  request, only for a range inside `[ship].direct`.
   `forbidden-tokens.py` is the private-token matcher the scan gate and the applier run (see The
   private token list below).
   The other `python3` tools: `apply-manifest.py` executes a triage manifest against GitHub from
@@ -151,14 +153,14 @@ The labels: eight states, two modifiers, defined in the contract.
   `land-scripts/` drives the landing scripts in-process over a gh stand-in, one suite per script;
   `hooks/` runs every registered hook over recorded events, one directory per hook.
 - `templates/` — the issue form and its template chooser config, the intake workflow, the
-  weekly-pass workflow, the docs-freshness gate workflow, the CI gate-loop workflow, the
+  weekly-pass workflow, the agent-ready shape-gate workflow, the docs-freshness gate workflow, the CI gate-loop workflow, the
   documentation rule, the example binding. `Install-Ouro.ps1` writes the binding from the example,
   the docs-freshness workflow with -DocsFreshness, the CI workflow with -CI, and with -IssueIntake
   the issue form to .github/ISSUE_TEMPLATE/, the chooser config to
   .github/ISSUE_TEMPLATE/config.yml (the only name GitHub reads it under) and the intake workflow
   to .github/workflows/; `Vendor-Ouro.ps1` copies the documentation rule into .claude/rules/. The
-  weekly-pass workflow is copied by hand to .github/workflows/, the
-  destination its header names.
+  weekly-pass and agent-ready shape-gate workflows are copied by hand to .github/workflows/, the
+  destination their headers name.
 - `release/` — this repository's own release tools, which the consumer release leaves out:
   `export.py`, which moves one tagged version to the consumer release channel;
   `Test-TrackerReferences.ps1`, the check that no shipped file cites this tracker's numbers;

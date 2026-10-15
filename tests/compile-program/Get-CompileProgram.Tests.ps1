@@ -12,7 +12,11 @@
     ruling and those that do not; an umbrella's children, fences and a closed child; cleanup's
     duplicate boundary at two thirds; a limit-sized read; the self-checks, which exit 3 with
     nothing on stdout; a schema other than 2, a read that fails, the usage errors, and
-    byte-identical output from standard input and from -Graph.
+    byte-identical output from standard input and from -Graph; the area batches (rows 28 to 48):
+    their form and place after the analyzer's batches, the Flow lines, checkpoint, checklist,
+    analyzer-batch, in-flight, scope and agent-ready rules that leave an issue out, the first of
+    several areas, the group of five and the group of one, the label match, a null body, and the
+    fields of the issue read, seen through a recording gh stand-in.
     It needs pwsh only, so a Windows leg with no bash runs every row.
 #>
 $ErrorActionPreference = 'Stop'
@@ -68,6 +72,31 @@ function Invoke-Prog($GraphJson, [string[]]$Extra = @(), [string]$Prs = '[]') {
     Invoke-Cp (@('-PrsJson', $Prs) + $Extra) $GraphJson
 }
 function Get-Section([string]$Text) { ($Text -split "`n\n", 2)[1] }
+
+# The graph of ready issues numbered $Nums, each with a file of its own, in one analyzer wave.
+function New-ReadyGraph([int[]]$Nums, [string]$Batches = '[]', [string]$Collisions = '[]') {
+    New-Graph @($Nums | ForEach-Object { , @($_, 'agent-ready', @("f$_")) }) -Collisions $Collisions -Batches $Batches -Waves ('[[' + ($Nums -join ',') + ']]')
+}
+# An issue list as raw JSON. Issues are [number, labels[], body].
+function New-IssueList($Issues) {
+    $rows = foreach ($i in $Issues) {
+        [ordered]@{ number = $i[0]; title = "t$($i[0])"; state = 'OPEN'; labels = @(@($i[1]) | ForEach-Object { @{ name = $_ } }); body = $i[2] }
+    }
+    ConvertTo-Json -Compress -Depth 5 -InputObject @($rows)
+}
+# The batch intent over a graph and an issue list, with areas skills and gates declared.
+function Invoke-Area($GraphJson, $ListJson, [string]$Prs = '[]', [string[]]$Extra = @()) {
+    Invoke-Prog $GraphJson (@('-Intent', 'batch', '-Areas', 'skills,gates', '-IssuesJson', $ListJson) + $Extra) $Prs
+}
+# The area batches of an output as '1 2 3 (skills)', joined by ' | ': a /ouro:fuse line with an area
+# line under it. The analyzer's batches have none under them, so they are left out.
+function Get-AreaSets([string]$Text) {
+    $lines = @($Text -split "`n")
+    $sets = for ($k = 0; $k -lt $lines.Count - 1; $k++) {
+        if ($lines[$k].StartsWith('/ouro:fuse ') -and $lines[$k + 1] -cmatch '^  area: (.+)$') { "$($lines[$k].Substring(11)) ($($Matches[1]))" }
+    }
+    @($sets) -join ' | '
+}
 
 $scratch = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('compile-program-test-' + [guid]::NewGuid().ToString('n')))
 try {
@@ -502,6 +531,196 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     Assert-Match '(?m)^  #31 t31 -- agent-ready, in flight, PR #9, outside the scope$' $r.Out 'row 26: a ready child in flight and outside the scope carries both marks'
     $r = Invoke-Prog $finS @('-Intent', 'finish', '-Target', '29', '-TargetJson', $umbS, '-IssuesJson', $allS, '-BlockedJson', '[]') '[{"number":9,"body":"Fixes #31"}]'
     Assert-Match '(?m)^  #31 t31 -- agent-ready, in flight, PR #9$' $r.Out 'row 26 control: unscoped, the in-flight ready child carries only the flight mark'
+
+    # --- row 28: an area batch prints as a fuse line with its area line under it ----------------------------
+    $exp = "Size: S`nFlow: express"
+    $arList = New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'skills'), $exp))
+    $r = Invoke-Area (New-ReadyGraph 1, 2) $arList
+    Assert-Equal 0 $r.Code 'row 28: exit 0'
+    Assert-Match '(?m)^Area batches \([^\n]*\):\n/ouro:fuse 1 2\n  area: skills$' $r.Out 'row 28: two express issues of one area that share no file make one area batch, a fuse line with its area line under it'
+
+    # --- row 29: an area batch is not a "No batch to print" -------------------------------------------------
+    Assert-NoMatch 'No batch to print' $r.Out 'row 29: with an area batch printed and no analyzer batch, the output does not say there is no batch'
+    $r = Invoke-Area (New-ReadyGraph 1, 2) (New-IssueList @(@(1, @('agent-ready'), $exp), @(2, @('agent-ready', 'docs'), $exp)))
+    Assert-Match 'No batch to print' $r.Out 'row 29 control: with areas declared and no issue carrying one, it does'
+    Assert-NoMatch 'Area batches' $r.Out 'row 29 control: and no Area batches heading prints'
+
+    # --- row 30: the area batches follow the analyzer's -----------------------------------------------------
+    $r = Invoke-Area (New-ReadyGraph 1, 2, 10, 11 -Batches '[[10,11]]' -Collisions '[{"a":10,"b":11,"files":["f"]}]') (New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'skills'), $exp), @(10, @('agent-ready', 'skills'), $exp), @(11, @('agent-ready', 'skills'), $exp)))
+    Assert-Equal 0 $r.Code 'row 30: an analyzer batch beside an area batch exits 0'
+    Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 30: the analyzer''s members are in the analyzer batch only'
+    $anaAt = $r.Out.IndexOf("/ouro:fuse 10 11`n")
+    $areaAt = $r.Out.IndexOf("/ouro:fuse 1 2`n  area: skills")
+    Assert-Equal $true (($anaAt -ge 0) -and ($anaAt -lt $areaAt)) 'row 30: and the area batch prints after the analyzer''s batch'
+
+    # --- row 31: an area's issues are in ascending order, as numbers ----------------------------------------
+    $r = Invoke-Area (New-ReadyGraph 12, 3, 7) (New-IssueList @(@(12, @('agent-ready', 'skills'), $exp), @(3, @('agent-ready', 'skills'), $exp), @(7, @('agent-ready', 'skills'), $exp)))
+    Assert-Equal '3 7 12 (skills)' (Get-AreaSets $r.Out) 'row 31: issues listed 12, 3, 7 print as 3 7 12'
+
+    # --- row 32: only a Flow line of express or standard stays; no line reads as standard -------------------
+    $flowList = New-IssueList @(
+        @(1, @('agent-ready', 'skills'), "Size: S`nFlow: express`nDoc impact on close: none"),
+        @(2, @('agent-ready', 'skills'), "Size: S`r`nFlow: standard`r`nDoc impact on close: none`r`n"),
+        @(3, @('agent-ready', 'skills'), "Size: S`nDoc impact on close: none"),
+        @(4, @('agent-ready', 'skills'), "Size: M`nFlow: full"),
+        @(5, @('agent-ready', 'skills'), "Size: S`nFlow: direct"),
+        @(6, @('agent-ready', 'skills'), "Size: S`nFlow: Express"),
+        @(7, @('agent-ready', 'skills'), "Size: S`nFlow: express`nFlow: full"),
+        @(8, @('agent-ready', 'skills'), "Size: M`r`nFlow: full`r`n"))
+    $r = Invoke-Area (New-ReadyGraph (1..8)) $flowList
+    Assert-Equal '1 2 3 (skills)' (Get-AreaSets $r.Out) 'row 32: express, standard (with CRLF line ends) and no Flow line stay; full, direct, a case variant, a second line that is full and a CRLF full are left out'
+
+    # --- row 33: a Flow line inside a fenced block is not a Flow line ---------------------------------------
+    $r = Invoke-Area (New-ReadyGraph 1, 2, 3, 4, 5) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), $exp),
+            @(2, @('agent-ready', 'skills'), "Size: S`nExample:`n${f3}text`nFlow: full`n${f3}`nFlow: express"),
+            @(3, @('agent-ready', 'skills'), "Size: S`nExample:`n~~~`nFlow: full`n~~~"),
+            @(4, @('agent-ready', 'skills'), "Size: S`nFlow: full"),
+            @(5, @('agent-ready', 'skills'), "Size: S`nFlow: express`n${f3}`n- [ ] 1. **First part.** a`n${f3}")))
+    Assert-Equal '1 2 3 5 (skills)' (Get-AreaSets $r.Out) 'row 33: a Flow: full or a checklist line inside a backtick or tilde fence leaves the issue in, a bare Flow: full leaves it out'
+
+    # --- row 34: a Flow line starts its line ----------------------------------------------------------------
+    $r = Invoke-Area (New-ReadyGraph 1, 2, 3, 4, 5) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), $exp),
+            @(2, @('agent-ready', 'skills'), "Size: S`n> Flow: full"),
+            @(3, @('agent-ready', 'skills'), "Size: S`n- Flow: full"),
+            @(4, @('agent-ready', 'skills'), "Size: S`n  Flow: full"),
+            @(5, @('agent-ready', 'skills'), "Size: S`nThe stamp reads Flow: full here")))
+    Assert-Equal '1 2 3 4 5 (skills)' (Get-AreaSets $r.Out) 'row 34: a Flow: full in a quote, a list item, an indented line and mid-line leaves the issue in'
+
+    # --- row 35: a checkpoint issue is left out -------------------------------------------------------------
+    $r = Invoke-Area (New-ReadyGraph 1, 2, 3, 4) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), $exp),
+            @(2, @('agent-ready', 'skills'), $exp),
+            @(3, @('agent-ready', 'skills', 'checkpoint'), $exp),
+            @(4, @('agent-ready', 'skills', 'Checkpoint'), $exp)))
+    Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 35: an issue carrying checkpoint, in either case, is left out; the two without it make the batch'
+
+    # --- row 36: a checklist issue is left out --------------------------------------------------------------
+    $r = Invoke-Area (New-ReadyGraph (1..5)) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), $exp),
+            @(2, @('agent-ready', 'skills'), $exp),
+            @(3, @('agent-ready', 'skills'), "Size: M`nFlow: express`n- [ ] 1. **First part (Flow: express).** a`n- [ ] 2. **Second part (Flow: express).** b"),
+            @(4, @('agent-ready', 'skills'), "Size: M`nFlow: express`n- [x] 1. **First part (Flow: express).** a`n- [ ] 2. **Second part (Flow: express).** b"),
+            @(5, @('agent-ready', 'skills'), "Size: M`nFlow: express`n- [X] 1. **First part (Flow: express).** a")))
+    Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 36: an issue with a - [ ], - [x] or - [X] part line is left out'
+
+    # --- row 37: a line that is not a checklist part line leaves the issue in -------------------------------
+    $r = Invoke-Area (New-ReadyGraph (1..4)) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), "Size: S`nFlow: express`n- [ ] write the test"),
+            @(2, @('agent-ready', 'skills'), "Size: S`nFlow: express`n- [ ] 1 **First**"),
+            @(3, @('agent-ready', 'skills'), "Size: S`nFlow: express`n1. **First**"),
+            @(4, @('agent-ready', 'skills'), "Size: S`nFlow: express`n> - [ ] 1. **First part.** a`nDone - [ ] 1. **First**")))
+    Assert-Equal '1 2 3 4 (skills)' (Get-AreaSets $r.Out) 'row 37: a box with no part number or no dot, a part line with no box, a quoted one and a mid-line one are not a checklist'
+
+    # --- row 38: an issue in an analyzer batch is left out, printed or not ----------------------------------
+    $in7 = New-IssueList @(1..7 | ForEach-Object { , @($_, @('agent-ready', 'skills'), $exp) })
+    $r = Invoke-Area (New-ReadyGraph (1..7) -Batches '[[1,2],[5,6]]' -Collisions '[{"a":1,"b":2,"files":["f"]}]') $in7 '[{"number":9,"body":"Fixes #6"}]'
+    Assert-Equal 0 $r.Code 'row 38: exit 0'
+    Assert-Match '(?m)^/ouro:fuse 1 2\n  shared: ' $r.Out 'row 38: the analyzer batch of 1 and 2 prints'
+    Assert-Match 'dropped from the batch of #5 #6: #6' $r.Out 'row 38: the batch of 5 and 6, left with one member by the pull request, is dropped'
+    Assert-Equal '3 4 7 (skills)' (Get-AreaSets $r.Out) 'row 38: 1 and 2, and 5 of the dropped batch, are in no area batch'
+
+    # --- row 39: an issue in flight is left out -------------------------------------------------------------
+    $in3 = New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(11, @('agent-ready', 'skills'), $exp), @(12, @('agent-ready', 'skills'), $exp))
+    $r = Invoke-Area (New-ReadyGraph 1, 11, 12) $in3 '[{"number":9,"body":"Fixes #12"}]'
+    Assert-Equal '1 11 (skills)' (Get-AreaSets $r.Out) 'row 39: the issue a pull request fixes is left out, and #1 and #11 are not taken for #12'
+    $r = Invoke-Area (New-ReadyGraph 1, 11, 12) $in3
+    Assert-Equal '1 11 12 (skills)' (Get-AreaSets $r.Out) 'row 39 control: with no pull request all three make the batch'
+
+    # --- row 40: an issue outside the scope is left out -----------------------------------------------------
+    $inGS = New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'skills'), $exp), @(3, @('agent-ready', 'gates'), $exp), @(4, @('agent-ready', 'gates'), $exp))
+    $r = Invoke-Area (New-ReadyGraph (1..4)) $inGS '[]' @('-Scope', 'skills')
+    Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 40: under -Scope skills the gates issues are left out'
+    $r = Invoke-Area (New-ReadyGraph (1..4)) $inGS
+    Assert-Equal '1 2 (skills) | 3 4 (gates)' (Get-AreaSets $r.Out) 'row 40 control: unscoped, each area makes its batch, in the order of -Areas'
+
+    # --- row 41: only an agent-ready issue is in an area batch ----------------------------------------------
+    $nr = New-Graph @(@(1, 'agent-ready', @('f1')), @(2, 'agent-ready', @('f2')), @(3, 'needs-ruling', @('f3'))) -Waves '[[1,2]]' -Leverage '[{"number":3,"count":0,"gates":[]}]'
+    $r = Invoke-Area $nr (New-IssueList @(1..3 | ForEach-Object { , @($_, @('skills'), $exp) }))
+    Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 41: a needs-ruling issue carrying the area and an express line is left out'
+
+    # --- row 42: an issue carrying several areas goes under the first of -Areas it carries ------------------
+    $r = Invoke-Area (New-ReadyGraph (1..5)) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), $exp),
+            @(2, @('agent-ready', 'skills'), $exp),
+            @(3, @('agent-ready', 'gates', 'skills'), $exp),
+            @(4, @('agent-ready', 'gates'), $exp),
+            @(5, @('agent-ready', 'gates'), $exp)))
+    Assert-Equal '1 2 3 (skills) | 4 5 (gates)' (Get-AreaSets $r.Out) 'row 42: #3 carries gates and skills and goes under skills, the first of -Areas, though its labels list gates first'
+
+    # --- row 43: a group holds at most five -----------------------------------------------------------------
+    $r = Invoke-Area (New-ReadyGraph (1..7)) (New-IssueList @(1..7 | ForEach-Object { , @($_, @('agent-ready', 'skills'), $exp) }))
+    Assert-Equal '1 2 3 4 5 (skills) | 6 7 (skills)' (Get-AreaSets $r.Out) 'row 43: seven issues of one area make a group of five and one of two'
+    $r = Invoke-Area (New-ReadyGraph (1..5)) (New-IssueList @(1..5 | ForEach-Object { , @($_, @('agent-ready', 'skills'), $exp) }))
+    Assert-Equal '1 2 3 4 5 (skills)' (Get-AreaSets $r.Out) 'row 43 control: exactly five make one group'
+
+    # --- row 44: a group of one is not printed --------------------------------------------------------------
+    $r = Invoke-Area (New-ReadyGraph (1..6)) (New-IssueList @(1..6 | ForEach-Object { , @($_, @('agent-ready', 'skills'), $exp) }))
+    Assert-Equal '1 2 3 4 5 (skills)' (Get-AreaSets $r.Out) 'row 44: six issues make a group of five and leave #6, which is not printed'
+    Assert-NoMatch '(?m)^/ouro:fuse 6' $r.Out 'row 44: and no fuse line carries it'
+    $r = Invoke-Area (New-ReadyGraph 1, 2) (New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'gates'), $exp)))
+    Assert-NoMatch '(?m)^/ouro:fuse' $r.Out 'row 44: one issue in each of two areas prints no batch'
+
+    # --- row 45: an issue carries a declared area by its whole label name -----------------------------------
+    $r = Invoke-Area (New-ReadyGraph (1..6)) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), $exp),
+            @(2, @('agent-ready', 'skills'), $exp),
+            @(3, @('agent-ready', 'skill'), $exp),
+            @(4, @('agent-ready', 'skills-extra'), $exp),
+            @(5, @('agent-ready', 'docs'), $exp),
+            @(6, @('agent-ready'), $exp)))
+    Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 45: a prefix of a declared area, a longer name, an undeclared label and no label do not put an issue in a batch'
+    $r = Invoke-Area (New-ReadyGraph 1, 2) (New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'Skills'), $exp)))
+    Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 45 control: a case variant of a declared area counts, as for -Scope, under the declared spelling'
+
+    # --- row 46: with no area declared there is no area batch, and nothing is read for one ------------------
+    $r = Invoke-Cp @('-PrsJson', '[]', '-Repo', 'o/n', '-Intent', 'batch') (New-ReadyGraph 1, 2) -Environment @{ PATH = $scratch.FullName }
+    Assert-Equal 0 $r.Code 'row 46: the batch intent with no -Areas makes no issue read, so with no gh it exits 0'
+    Assert-NoMatch 'Area batches' $r.Out 'row 46: and prints no Area batches section'
+    $r = Invoke-Cp @('-PrsJson', '[]', '-Repo', 'o/n', '-Intent', 'batch', '-Areas', 'skills') (New-ReadyGraph 1, 2) -Environment @{ PATH = $scratch.FullName }
+    Assert-Equal 1 $r.Code 'row 46 control: with an area declared the same run reads the issues, and with no gh the read fails'
+    Assert-Equal '' $r.Out 'row 46 control: with nothing on stdout'
+
+    # --- row 47: a null, an empty and an absent body read alike ---------------------------------------------
+    $nb = '[{"number":1,"title":"t1","state":"OPEN","labels":[{"name":"skills"}],"body":null},{"number":2,"title":"t2","state":"OPEN","labels":[{"name":"skills"}],"body":""},{"number":3,"title":"t3","state":"OPEN","labels":[{"name":"skills"}]}]'
+    $r = Invoke-Area (New-ReadyGraph (1..3)) $nb
+    Assert-Equal 0 $r.Code 'row 47: exit 0'
+    Assert-Equal '1 2 3 (skills)' (Get-AreaSets $r.Out) 'row 47: a null body, an empty one and none read as no Flow line and no checklist, so the three make the batch'
+
+    # --- row 48: the issue read names body for the batch intent only; the gh stub records its calls ---------
+    $ghStub = New-Item -ItemType Directory -Path (Join-Path $scratch.FullName 'ghstub')
+    [IO.File]::WriteAllText((Join-Path $ghStub.FullName 'gh.ps1'), @'
+$line = $args -join ' '
+Add-Content -LiteralPath (Join-Path $PSScriptRoot 'gh-calls.txt') -Value $line
+if ($args[0] -eq 'issue' -and $args[1] -eq 'list') {
+    '[{"number":1,"title":"t1","state":"OPEN","labels":[{"name":"stub-area"}],"body":"Flow: express"},{"number":2,"title":"t2","state":"OPEN","labels":[{"name":"stub-area"}],"body":""}]'
+    exit 0
+}
+[Console]::Error.WriteLine("gh stub refuses: $line")
+exit 9
+'@, [Text.UTF8Encoding]::new($false))
+    $ghCalls = Join-Path $ghStub.FullName 'gh-calls.txt'
+    function Get-GhCalls { if (Test-Path -LiteralPath $ghCalls) { @(Get-Content -LiteralPath $ghCalls) -join '|' } else { '(no call)' } }
+    $r = Invoke-Cp @('-PrsJson', '[]', '-Repo', 'o/n', '-Intent', 'batch', '-Areas', 'stub-area') (New-ReadyGraph 1, 2) -Environment @{ PATH = $ghStub.FullName }
+    Assert-Equal 0 $r.Code 'row 48: the batch intent over the stub exits 0'
+    Assert-Equal '1 2 (stub-area)' (Get-AreaSets $r.Out) 'row 48: the stub''s own labels make the batch, so the stub answered the read'
+    Assert-Equal 'issue list --state all --limit 1000 --json number,title,state,labels,body -R o/n' (Get-GhCalls) 'row 48: and it was asked once, for the fields number,title,state,labels,body'
+    Remove-Item -LiteralPath $ghCalls -ErrorAction SilentlyContinue
+    $r = Invoke-Cp @('-PrsJson', '[]', '-Repo', 'o/n', '-Scope', 'stub-area', '-Areas', 'stub-area') (New-ReadyGraph 1, 2) -Environment @{ PATH = $ghStub.FullName }
+    Assert-Equal 0 $r.Code 'row 48 control: a scoped throughput over the stub exits 0'
+    Assert-Match '(?m)^Wave 1 \(2\):\n  #1 t1\n  #2 t2$' $r.Out 'row 48 control: the stub''s own labels scope it, so the stub answered the read'
+    Assert-Equal 'issue list --state all --limit 1000 --json number,title,state,labels -R o/n' (Get-GhCalls) 'row 48 control: another intent asks for the fields number,title,state,labels, no body'
+
+    # --- row 49: a Flow line with no value reads as neither express nor standard ----------------------------
+    $r = Invoke-Area (New-ReadyGraph (1..6)) (New-IssueList @(
+            @(1, @('agent-ready', 'skills'), "Size: S`nFlow: express"),
+            @(2, @('agent-ready', 'skills'), "Size: S`nFlow:"),
+            @(3, @('agent-ready', 'skills'), "Size: S`nFlow:   `nDoc impact on close: none"),
+            @(4, @('agent-ready', 'skills'), "Size: S`nFlow:`t"),
+            @(5, @('agent-ready', 'skills'), "Size: S`r`nFlow:`r`nDoc impact on close: none`r`n"),
+            @(6, @('agent-ready', 'skills'), "Size: S`nFlow:express")))
+    Assert-Equal '1 6 (skills)' (Get-AreaSets $r.Out) 'row 49: a Flow: line with no value, bare, with spaces, a tab or a CRLF end, leaves the issue out; Flow: express with no space stays'
 
     # --- row 27: the script puts back the console code pages it changed -------------------------------------------------------------
     # CreateNoWindow gives the driver a console of its own, so the run cannot change this suite's.

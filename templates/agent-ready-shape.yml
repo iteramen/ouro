@@ -1,0 +1,56 @@
+name: Agent-Ready Shape Gate
+
+# ouro template — copy to .github/workflows/. Copying it is the opt-in docs/contract.md §9 in
+# the ouro plugin describes.
+# Runs the shape gate's single-issue -Demote mode on each `agent-ready` promotion: a promotion
+# that skipped triage goes back to needs-triage with the gate's own comment. The run exits 1 when
+# it demotes.
+#
+# The job runs on GitHub's `ubuntu-latest` unless the repository variable `OURO_RUNS_ON` names
+# other runners. That variable holds JSON: a label string or an array of labels. A runner of
+# your own needs pwsh, gh and git. OURO_REF, a repository variable, names the same release as
+# the weekly pass.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  shape:
+    name: Demote a promotion that skipped triage
+    if: github.event.label.name == 'agent-ready'
+    runs-on: ${{ vars.OURO_RUNS_ON && fromJSON(vars.OURO_RUNS_ON) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Nothing in this job pushes, so no step needs a credential left in .git/config.
+          persist-credentials: false
+
+      # The plugin is checked out INSIDE the repo tree so the gates (which take the repo root
+      # from the working directory) run from the root with `ouro/bin/...` paths. OURO_REF is a
+      # repo variable (a tag or SHA — pin it; a branch name drifts under you).
+      - name: Check out the ouro plugin
+        uses: actions/checkout@v7
+        with:
+          repository: iteramen/ouro
+          ref: ${{ vars.OURO_REF }}
+          path: ouro
+          persist-credentials: false   # as above: the checkout fetches with the job's own token, which must not stay in its .git/config
+
+      # The gate's binding read calls python3 and needs 3.11+, and a runner image ships whatever python it ships.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Shape gate, demoting (single issue)
+        shell: pwsh
+        env:
+          NUMBER: ${{ github.event.issue.number }}
+        run: pwsh -NoProfile -File ouro/bin/Test-AgentReadyShape.ps1 -Issue $env:NUMBER -Demote

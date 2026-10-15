@@ -38,14 +38,17 @@ re-stamped at the fix commit — the same evidence `/ouro:review` asks of a prob
 
 ## Shapes that stay green
 
-Four shapes keep staying green, and a test in one of them owes the row its shape names:
+Five shapes keep staying green, and a test in one of them owes the row its shape names:
 
 - a condition around an assertion: the row sets the condition to the value that makes it skip;
 - an asserted key or line: the row moves it one block over;
 - an empty-input guard: the row runs an empty fixture;
 - a claim about a path, a name or an encoding: the row sets up that case (a non-ASCII name, a
   symbolic link, a short 8.3 path, a hostile code page), with a skip line naming the OS where
-  the OS refuses it.
+  the OS refuses it;
+- a predicate ported from one language to another: the row is a differential one, the same
+  inputs through both implementations with every disagreement red, or the port is replaced by a
+  call to the original.
 
 The opposite shape goes red and proves nothing: a test that restates the code, by asserting a
 constant equals its own literal, reading a module's source as text where running it could show
@@ -57,11 +60,20 @@ can reach.
 
 ## Code with no test host
 
-Code with no test host (no test project in the repository can load it) owes no mutation row.
-First move every piece of logic you can into code a test reaches, so only glue stays untested.
-The hand-back names each untested line and why no test host reaches it, and the PR body's
+Code with no test host (no test project in the repository can load it) owes no mutation row,
+except a change inside a workflow step's `run:` block, which owes the probe below. First move
+every piece of logic you can into code a test reaches, so only glue stays untested. The
+hand-back names each untested line and why no test host reaches it, and the PR body's
 `Smoke by hand:` line lists what the merger checks in the running app. That code stays UNTESTED
 and is never counted as rejected.
+
+**A `run:` block's probe.** Extract the step's literal `run:` block verbatim and run it against a
+stub of the CLI it calls, in a scratch workspace, once with the change and once without it, and
+read each run's exit. The stub proves itself first, as `dispatch-rules.md` has it under Writes off
+this machine. Where the two exits differ, the row goes in the table below in place of the
+untested-line note (the hand-back's
+and the `Smoke by hand:` line): Mutation names the change taken out, Test the extracted block with
+its stub, Result the two exits, How the commands.
 
 ## Stage before mutating
 

@@ -14,7 +14,9 @@
     (rows 12 to 15); a
     failing read, through a gh stand-in function that answers every call it is given and records
     each one (exit 1, empty stdout, the stand-in's own text on stderr, and the usage and no-
-    repository exits beside it); and a read that returns 500 rows, with a 499-row control.
+    repository exits beside it); and a read that returns 500 rows, with a 499-row control. Row 21:
+    an issue carrying `checkpoint` links nothing (no collision, batch or leverage, one wave), with
+    row 1 as its control and a label that only holds the word as the near miss.
     It needs pwsh and git only, so a Windows leg with no bash runs every row.
 #>
 $ErrorActionPreference = 'Stop'
@@ -357,6 +359,18 @@ exit $LASTEXITCODE
     Assert-Equal 2 @($ok.Calls -split "`n" | Where-Object { $_ -match '^ENV label=' }).Count 'row 20: the stand-in recorded the environment of both issue reads'
     Assert-Equal 2 @($ok.Calls -split "`n" | Where-Object { $_ -match '^ENV label=\S+ GH_REPO=o/n ' }).Count 'row 20: each read ran with GH_REPO set to the slug the origin names'
     Assert-NoMatch 'caller/other' $ok.Calls 'row 20: and neither read addressed the caller''s own GH_REPO'
+
+    # --- row 21: a checkpoint issue links nothing; row 1 is the control ---------------------------
+    $ckpt = New-Issue 1 'agent-ready' "- ${bt}src/a.txt${bt} -- the file"; $ckpt.labels = @(@{ name = 'agent-ready' }, @{ name = 'Checkpoint' })
+    $g = Invoke-Graph @($ckpt, (New-Issue 2 'agent-ready' "- ${bt}src/a.txt${bt} -- the same file"), (New-Issue 3 'needs-ruling' "- ${bt}src/a.txt${bt} -- the ruling's file"))
+    Assert-Equal '' (Format-Collisions $g.Json) 'row 21: a checkpoint issue collides with nothing, whatever the label case'
+    Assert-Equal '[]' (Format-Value $g.Json.batches) 'row 21: and joins no batch'
+    Assert-Equal '[[1,2]]' (Format-Value $g.Json.waves) 'row 21: so one wave holds both'
+    Assert-Equal '3:1:[2]' (Format-Leverage $g.Json) 'row 21: and only the issue without checkpoint counts in the ruling''s leverage'
+    Assert-Equal '[src/a.txt]' (Get-Footprint $g.Json 1) 'row 21: its footprint stays in the output'
+    $near = New-Issue 1 'agent-ready' "- ${bt}src/a.txt${bt}"; $near.labels = @(@{ name = 'agent-ready' }, @{ name = 'checkpoints' })
+    $g = Invoke-Graph @($near, (New-Issue 2 'agent-ready' "- ${bt}src/a.txt${bt}"))
+    Assert-Equal '1-2:[src/a.txt]' (Format-Collisions $g.Json) 'row 21 near miss: a label that only holds the word still links'
 
     # --- row 10: a failing read exits 1 with empty stdout -----------------------------------------
     foreach ($mode in 'fail-first', 'fail-second') {

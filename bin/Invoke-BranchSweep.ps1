@@ -37,7 +37,10 @@
     worktree stays, and so does the branch checked out in it, when that branch has no commit yet
     (unborn: no tip to judge), when it holds this script's current directory, holds another worktree
     (which would go with it), is locked (`git worktree lock`), is prunable (its directory is gone:
-    `git worktree prune` is the owner's call), or has uncommitted changes. Ignored files do not keep
+    `git worktree prune` is the owner's call), has a process whose current directory is inside it
+    (read from /proc on Linux, from `lsof -a -d cwd` on macOS; the skip line names each PID and its
+    directory; Windows is not scanned, and a removal there that hits such a process is reported
+    "left on disk"), or has uncommitted changes. Ignored files do not keep
     it: a worktree is made per issue, so they are disposable, and `git worktree remove` deletes them
     with it -- a .env, a local overlay, a bin/__pycache__/. The worktree's finished and deleted
     lines list every ignored path, as `git status --ignored` names them (an ignored directory is one
@@ -114,6 +117,27 @@ function Test-Within([string]$Path, [string]$Root) {
         $Path.StartsWith($Root + [System.IO.Path]::DirectorySeparatorChar, $PathCompare)
 }
 function Get-Tag($Pr) { "PR #$($Pr.number) $($Pr.state)" }
+
+# One 'pid N in <cwd>' per process whose current directory is $Root or inside it. Windows is not
+# scanned. Remove-LandedBranch.ps1 carries the same function: this is a single script.
+function Get-ProcessesInside([string]$Root) {
+    if ($IsLinux) {
+        foreach ($dir in [System.IO.Directory]::GetDirectories('/proc')) {
+            $id = [System.IO.Path]::GetFileName($dir)
+            if ($id -notmatch '^\d+$') { continue }
+            # A process of another user, or one that exited since the listing, has no readable link.
+            $cwd = try { (Get-Item -LiteralPath "$dir/cwd" -ErrorAction SilentlyContinue).LinkTarget } catch { $null }
+            if ($cwd -and (Test-Within $cwd $Root)) { "pid $id in $cwd" }
+        }
+    }
+    elseif ($IsMacOS) {
+        $id = $null
+        foreach ($l in (& lsof -a -d cwd -Fpn 2>$null)) {
+            if ($l -cmatch '^p(\d+)$') { $id = $Matches[1] }
+            elseif ($l.StartsWith('n') -and (Test-Within $l.Substring(1) $Root)) { "pid $id in $($l.Substring(1))" }
+        }
+    }
+}
 
 # The first of the finished pull requests whose head commit is $Tip or a descendant of it. A head
 # commit this clone does not have can only be compared for equality.
@@ -340,6 +364,9 @@ try {
                 elseif ($wt.Locked) { "locked: $($wt.Locked)" }
                 elseif ($wt.Prunable) { 'prunable: its directory is gone - run git worktree prune' }
                 elseif ($inner) { "holds worktree $(Get-Rel $inner[0].Path)" }
+                elseif ($busy = @(Get-ProcessesInside $wt.Path)) {
+                    "a process has its current directory inside ${wtRel}: $($busy -join '; ') - move the shell out of it or let the job finish, then run again"
+                }
             if (-not $localWhy) {
                 # -z: every path unquoted, as it is on disk. An ignored directory is one entry.
                 $status = Invoke-Native git @('-C', $wt.Path, 'status', '--porcelain', '-z',

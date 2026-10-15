@@ -2,8 +2,10 @@
 
 Fill every `{…}`; an `{Optional: …}` block is filled whole or dropped whole, braces included; keep
 the contract paragraphs verbatim — they are what makes the output verifiable. One prompt per
-range; one numbered section per commit. The light and the sized variants (below) each swap
-exactly one output item and nothing else.
+range; one numbered section per commit. The prompt as written is the probe format, a full
+change's; the light variant (express) swaps exactly one output item and nothing else, and the
+sized variant (standard) swaps that item and adds its budget paragraph — the Flow class of
+contract §4.
 
 - [The prompt](#the-prompt)
 - [Light variant](#light-variant)
@@ -34,12 +36,6 @@ time}
 Your state note's path is {state note path}.
 
 {the State note section of execute's references/dispatch-rules.md, read in at dispatch time}
-
-The diff under review is {changed lines} added and removed text lines (a reworded line counts twice;
-a binary change counts none). A small diff — 20 or fewer by that count, and no binary change —
-takes work sized to it: a handful of targeted probes — readings of the changed lines, in a light
-review — at the lines it changed and the claims it makes, not a campaign over the file; the
-budget above is the ceiling, not the target.
 
 A probe counts only if it demonstrably ran: one that silently does nothing looks exactly like one
 that found nothing. For every probe you rely on, show each of these that applies to it:
@@ -104,8 +100,8 @@ It is not ranked against `CONFIRMED`, and a violation needs no trigger or wrong 
 
 ## Light variant
 
-`/ouro:review --light` sends the prompt above with every paragraph verbatim except output item 2,
-which becomes:
+`/ouro:review --light`, for an express change, sends the prompt above with every paragraph
+verbatim except output item 2, which becomes:
 
 ```
 2. `READ` — one line per commit: the files you opened and the commands you ran against it — this
@@ -118,8 +114,8 @@ reading the change, not probes it must run.
 
 ## Sized variant
 
-`/ouro:review --sized` sends the prompt above with every paragraph verbatim except output item 2,
-which becomes:
+`/ouro:review --sized`, for a standard change, sends the prompt above with every paragraph
+verbatim except output item 2, which becomes:
 
 ```
 2. `PROBED` — one line per changed hunk: the probe you ran at it, the `path:line` it exercised
@@ -127,8 +123,16 @@ which becomes:
    covered the change. Then `UNTESTED`: each hunk or vector you did not finish, and why.
 ```
 
-The small-diff paragraph above already sizes the work; this variant sizes the evidence to match,
-so a hunk with no line is visibly unreviewed.
+and with this paragraph after the turn-budget one:
+
+```
+Your work is sized to the change: probes only at the hunks it changed and the claims it makes,
+not a campaign over the file, and no build, gate or suite the pull request's checks already ran.
+The turn budget above is the ceiling, not the target.
+```
+
+The budget paragraph sizes the work and output item 2 the evidence to match, so a hunk with no
+line is visibly unreviewed.
 
 ## Verification message
 

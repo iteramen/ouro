@@ -1138,6 +1138,13 @@ else:
         os.chmod(shared, 0o755)
 
 
+# --- the --timeout default, read off --help -------------------------------------------------
+r = run_driver(["--help"])
+check("--help names the 600-second --timeout default on that option's own line (contract s4's reader cap; "
+      "a help text naming 600 by hand beside another default would pass too)",
+      r.returncode == 0 and "--timeout TIMEOUT seconds (default 600)" in " ".join(r.stdout.split()))
+
+
 # --- the per-run fence and the data rule: --dry-run writes the prompt the reviewer would get -----
 INJECT_DIFF_REPO = pathlib.Path(tempfile.mkdtemp(prefix="external-audit-injectrepo-", dir=PARENT_TMP))
 subprocess.run(["git", "init", "-q"], cwd=INJECT_DIFF_REPO, capture_output=True, check=True)

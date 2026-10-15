@@ -15,6 +15,130 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v0.12.1] - 2026-10-15
+
+- An area's express and standard issues can build as one batch. The batch intent of `/ouro:compile`
+  prints `Area batches` after the analyzer's batches: the issues the graph reads as `agent-ready`,
+  in no analyzer batch, not in flight and in scope, that carry a declared area label, no
+  `checkpoint` label, no checklist line and no `Flow:` line other than express or standard, grouped
+  under the first of `-Areas` an issue carries, in ascending order, in groups of at most five with a
+  group of one left out, each as a `/ouro:fuse` line with an `area:` line under it. The renderer
+  reads the issue list with `body` for it, and `-IssuesJson` takes `body`. `/ouro:fuse` takes an
+  area batch the owner names as one region though its members share no file, the five-issue ask
+  still its only cap, reviews it as one cluster at the region's class under contract §7's three
+  rounds, and records each landed region's issues, changed lines, files, minutes and rounds as one
+  comment on the `[rolling_issues].loop_runs` issue, posting nothing where the key is unset or no
+  issue carries the title. Removed with it: §7's stop of the run for an issue whose findings do not
+  converge. The issue is reverted out with `git revert`, newest commit first, its `Fixes` line
+  leaves the pull request body, it gets the `**Stop:** review cap` comment and `needs-ruling`, a
+  member that builds on it leaves with it, and the rest land.
+
+- A change inside a workflow step's `run:` block owes a probe row in the `**Mutation-tested**` table
+  in place of the untested-line note: the step's literal `run:` block, run against a stub of the CLI
+  it calls in a scratch workspace once with the change and once without, each run's exit read; the M
+  brief asks for it where the diff touches such a block. A choice the spec's own clauses already
+  decide, an exit code its table assigns, an error class it names or a default it states, is
+  settled, not a STOP: the builder lists each under a `Settled by the spec` hand-back section, which
+  the session reads against the spec before the commit, and `/ouro:fuse` step 3 reads a hand-back
+  the same way. A gate whose CI leg is path-filtered declares as its `paths` pathspecs that select
+  the same paths as that filter, and every file the gate reads; no check compares the two.
+  `/ouro:fuse` follows the Flow class: a region takes the tightest class among its issues, never
+  direct, the region pull request's checks are the gate run, its fresh clone runs only what
+  `/ouro:execute` runs for that class, narrowed by `paths`, and a real failure in those checks takes
+  a fix round counted toward the review cap. The mutation reference names a fifth shape that stays
+  green, a predicate ported from one language to another, whose row is a differential one. Removed
+  with it: the fused region's run of every `[[gate]]` whatever its `areas`, and `fuse` in the list
+  of skills that never read `paths`.
+
+- A deliverable's parts land one cycle each: a part carrying a risk surface is its own pull
+  request, which opens with a `Part k/n of #N` line and carries `Fixes` only when it is the last
+  part, and the session ticks the part's box in the issue's checklist after the merge, unticking
+  it when it reverts the pull request. Triage writes such a deliverable as a checklist with one
+  Flow per part and a `Part k:` prefix on its anchor lines, and `/ouro:e2e` takes the next
+  unticked part; `/ouro:fuse` refuses a checklist issue, and a checklist part is never direct. Of
+  the fuse exceptions only an open decision and a different blocking trigger remain: a full-class
+  or consumer-contract part is a risk surface staged inside the same issue. The outcomes reader
+  reads a `Part k/n of #N` line in a landed pull request as a part landing: an open attempt's record
+  carries the highest part landed since its promotion and its n, and only a `Fixes` line lands.
+
+## [v0.12.0] - 2026-10-15
+
+- A fourth Flow value, `direct`, is a lane for text-only changes: no worktree, no PR and no
+  review; the session commits on the default branch with `Fixes #N`, runs locally the gates the
+  diff selects, and pushes with the new `bin/Push-Direct.ps1`, and CI on the default branch is the
+  check. `Push-Direct.ps1` stops on a path outside the binding's `[ship].direct` globs, pushes
+  plainly where the default branch requires no pull request, pushes a `direct/<issue>` branch where
+  it requires one without an approving review, and exits 3 with `fallback: express` where an
+  approval is required or the protection read fails. Triage stamps `Flow: direct` only when the
+  whole deliverable lies inside the globs; `bin/loop-outcomes.py` counts a first-parent commit
+  with a `Fixes #N` line and no `(#PR)` subject as a landing; contract §7's author-reviewer rule
+  names the lane as its exception.
+  **Consumer contract:** the binding had no `[ship].direct`; it now takes a list of globs, empty
+  when absent (the lane is off), and `ouro-binding.py check` refuses one that matches a CI
+  definition, the hook registry or a hook, release machinery, the binding or a gate's own script,
+  and one whose literal prefix, before its first `*`, `?` or `[`, starts with `.github/`,
+  `actions/`, `hooks/`, `release/` or `.claude/`, or whose first path segment holds a wildcard
+  (it reaches every top-level directory); `ouro-binding.py direct <path>...` is new and prints
+  the paths no glob matches; no migration.
+
+- Triage gains a FUSE verdict: issues that change the same skill file, hook, script or mechanism
+  become one issue listing their parts, and a part that is an open decision, sits on full's list
+  while the rest does not, is blocked on a different trigger or must be revertible alone stays its
+  own issue; `/ouro:compile` names each batch's members as FUSE candidates. Under express
+  the review reads the local range, fix rounds are committed locally, and one push at convergence
+  opens the draft; standard and full open it at the first push.
+- The gates Action's path selection keeps the narrowing on a workflow edit: with `select-by-paths`
+  on, a diff that touches a workflow and nothing under `actions/gates/` in the checked-out
+  repository runs the `paths`-narrowed set; every gate still runs when the diff touches that
+  path, cannot be read, has no previous tip, or belongs to another event.
+  **Consumer contract:** with `select-by-paths` on, every gate ran when the diff touched a
+  workflow under `.github/workflows/`; it now runs the narrowed set, so a pin bump in a workflow
+  runs the narrowed set under the new Action; a consumer that wants the full set on a workflow
+  change runs the Action with `select-by-paths` off.
+- The external-audit driver's `--timeout` default is 600 s, the reader's cap in every class, and
+  `--help` prints it; a run that passes no flag no longer waits up to 900 s.
+  **Consumer contract:** `bin/external-audit.py --timeout` defaulted to 900 s; it now defaults to
+  600 s; pass `--timeout 900` to keep the old bound.
+- An M under `ship.review = "external-audit"` takes `/ouro:review` alone: the review table drops
+  the external reader from that row, and an S and a fused change keep it. The reader runs with
+  `--timeout 600` in every class, not only under full, and the full-only rule that it runs first
+  and alone is gone with the second reviewer it ordered.
+- A new opt-in workflow template, `templates/agent-ready-shape.yml`, runs the shape gate's
+  demoting mode on each `agent-ready` promotion and sends one that skipped triage back to
+  `needs-triage`; the weekly-pass template's shape-gate comment now points to it, and the triage
+  skill, the applier and the contract describe the labeled-event demotion as that template's.
+  The triage skill's description says the anchor or shape gate demoted the issue, not a weekly
+  gate: the weekly template runs neither in its demoting mode.
+
+## [v0.11.5] - 2026-10-14
+
+- Triage stamps a flow class, `Flow: express|standard|full`, beside `Size:`, and every later
+  step's weight follows it: express (nothing executed changes, or an S-shaped change a same-PR
+  test or a gate accepts) and standard run no gate in the session, open the draft at the first
+  push and take the pull request's checks as the run, with a gate those checks do not run still
+  run locally by its paths; full (a change to what runs the checks, or a migration, flag default
+  or authorization change) runs locally the gates whose own code the diff changes and watches the
+  default branch's run. Execute re-derives the class from the diff and only tightens it; an issue
+  with no `Flow:` line reads as standard; with no checks to run, the session runs the selected
+  set locally and says so. The review's weight within the reviewer the binding's table names is
+  the reading brief for express, sized with a budget that re-runs nothing the checks already ran
+  for standard, and the probe format for full, with an external reader run first and alone,
+  capped at 600 s. Removed with it: the 20-line sized bound and the derive-the-weight-at-review
+  paragraph, "any tree difference re-runs the gates" for express and standard, the review's "no
+  heavy local gate while a review is in flight", and the three-way draft timing.
+- `hooks/guard-commit.py` refuses a non-draft `gh pr create` and a publishing call chained after
+  `;` or `&` or inside a pipeline only when the call's directory is inside a `.claude/worktrees/`
+  worktree, where every loop run lives; a developer's own checkout keeps plain `gh pr create` and
+  pipelines. The agent-identity rule still applies everywhere.
+- `hooks/guard-worktree.py` no longer refuses a background command started inside a worktree; in
+  its place `bin/Remove-LandedBranch.ps1` and `bin/Invoke-BranchSweep.ps1` list the processes
+  whose current directory is inside the worktree before deregistering it, on Linux and macOS,
+  and stop naming them. On Windows the removal's own refusal stays the stop.
+- `bin/Get-FootprintGraph.ps1` links nothing for an issue carrying `checkpoint`: a checkpoint run
+  edits no file, so the issue keeps its footprint but is in no collision, no batch and no ruling's
+  leverage. `/ouro:compile` could print a `/ouro:fuse` set holding a checkpoint issue, which
+  `/ouro:fuse` refuses.
+
 ## [v0.11.4] - 2026-10-13
 
 - `bin/forbidden-tokens.py hook` honours a binding's `ship.forbidden_check = "off"` on a machine

@@ -1,7 +1,8 @@
 """Unit test for apply-manifest.py's manifest-safety rules.
 
 Most exist because a manifest that looks right un-promotes what it just promoted:
-the shape gate fires on `labeled` and wants the **Triage** comment already there, and
+the shape gate, which the agent-ready shape-gate template runs on `labeled`, wants the
+**Triage** comment already there, and
 an intake automation may stamp a state label on `opened` that no manifest author saw --
 possibly after the edit's own read, which the post-apply state check re-reads for.
 The body-file guard exists because a failed transform uploads an empty file as a blank body.

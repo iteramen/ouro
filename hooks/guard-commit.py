@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """guard-commit.py -- a PreToolUse guard on Bash and PowerShell: a commit carries the human who
-ran the session as its author, a publishing call runs only once the step before it succeeded,
-and a pull request opens as a draft.
+ran the session as its author, and in a loop worktree a publishing call runs only once the step
+before it succeeded and a pull request opens as a draft.
 
     python3 hooks/guard-commit.py  < PreToolUse event (JSON)
 
-Refused, with the reason on stderr and exit 2:
+Refused, with the reason on stderr and exit 2, wherever the event's `cwd` is:
 
 - an author or committer identity naming an agent (`claude`, `anthropic`, `copilot`, `codex`,
   `[bot]`, `noreply@anthropic.com`, case-insensitive) in `git commit --author`, `git -c
   user.name=` or `user.email=`, `git config user.name` or `user.email`, or a `GIT_AUTHOR_*` or
-  `GIT_COMMITTER_*` assignment; `--author="$AUTHOR"` passes, since a variable names nobody;
+  `GIT_COMMITTER_*` assignment; `--author="$AUTHOR"` passes, since a variable names nobody.
+
+Refused only when the event's `cwd` is inside a `.claude/worktrees/` directory, where every loop
+run lives; in a plain checkout both of these pass:
+
 - `git commit`, `git push`, and `gh issue` or `gh pr` with a write verb (`create`, `new`,
   `comment`, `edit`, `close`, `reopen`, `merge`, `review`, `revert`, `ready`) when the operator
   before it is `;` or `&`, or when it is a stage of a pipeline (`|` or `|&` before or after it, a
@@ -36,6 +40,7 @@ IDENTITY = re.compile(
     r"|-c\s+[\"']?user\.(?:name|email)=(\"[^\"]*\"|'[^']*'|\S+)"
     r"|\bconfig\b[^\n;|&]*?\buser\.(?:name|email)\s+(\"[^\"]*\"|'[^']*'|\S+)"
     r"|\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*(\"[^\"]*\"|'[^']*'|\S+)")
+WORKTREES = re.compile(r"[/\\]\.claude[/\\]worktrees[/\\]", re.IGNORECASE)
 HEREDOC = re.compile(r"<<-?\s*(['\"])([^'\"\n]+)\1")
 GH_WRITE = {"create", "new", "comment", "edit", "close", "reopen", "merge", "review", "revert", "ready"}
 
@@ -80,7 +85,7 @@ def check(tool_name, tool_input, cwd):
         if AGENT.search(value):
             return (f"an agent is never a commit's author: the identity {value} names one; a commit carries the human "
                     f"who ran the session, with no --author, user.name, user.email or GIT_*_NAME override naming an agent")
-    return scan(command)
+    return scan(command) if WORKTREES.search(cwd + "/") else None
 
 
 def scan(text):

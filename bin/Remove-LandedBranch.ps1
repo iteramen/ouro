@@ -16,9 +16,13 @@
         prefix, and no open pull request is based on it -- deleting the branch another open PR
         targets closes or strands that PR, and a failed count keeps the branch;
       - the worktree that has the branch checked out, when there is one, sits under the main
-        checkout's .claude/worktrees/ (one elsewhere is not this script's to remove), and this
-        script's own current directory is not inside it; and the main checkout is not itself on
-        the branch (switch it to the default branch first).
+        checkout's .claude/worktrees/ (one elsewhere is not this script's to remove), this
+        script's own current directory is not inside it, and no other process has its current
+        directory inside it: on Linux every /proc/<pid>/cwd is read, on macOS `lsof -a -d cwd`,
+        and the stop names each PID with its directory -- move the shell out or let the job
+        finish, then run this again. Windows is not scanned: the OS refuses to delete a directory
+        a process holds, and the `left on disk` stop below reports it. The main checkout is not
+        itself on the branch (switch it to the default branch first).
     Then, in order, each printing one `deleted:` or `removed:` line, and a step that fails stops
     with nothing further deleted:
       - origin's branch, only where origin still lists it (`git ls-remote --exit-code`, by its
@@ -48,6 +52,27 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'Get-LandBinding.ps1')
 
+# One 'pid N in <cwd>' per process whose current directory is $Root or inside it. Windows is not
+# scanned. Invoke-BranchSweep.ps1 carries the same function: it is a single script.
+function Get-ProcessesInside([string]$Root) {
+    if ($IsLinux) {
+        foreach ($dir in [System.IO.Directory]::GetDirectories('/proc')) {
+            $id = [System.IO.Path]::GetFileName($dir)
+            if ($id -notmatch '^\d+$') { continue }
+            # A process of another user, or one that exited since the listing, has no readable link.
+            $cwd = try { (Get-Item -LiteralPath "$dir/cwd" -ErrorAction SilentlyContinue).LinkTarget } catch { $null }
+            if ($cwd -and (Test-Within $cwd $Root)) { "pid $id in $cwd" }
+        }
+    }
+    elseif ($IsMacOS) {
+        $id = $null
+        foreach ($l in (& lsof -a -d cwd -Fpn 2>$null)) {
+            if ($l -cmatch '^p(\d+)$') { $id = $Matches[1] }
+            elseif ($l.StartsWith('n') -and (Test-Within $l.Substring(1) $Root)) { "pid $id in $($l.Substring(1))" }
+        }
+    }
+}
+
 function Invoke-RemoveLandedBranch {
     param([int]$Pr, [string]$Branch)
     if ($Pr -le 0) { throw '-Pr <number> is required' }
@@ -76,6 +101,10 @@ function Invoke-RemoveLandedBranch {
         $here = Get-FullPath (@(Invoke-Read git @('rev-parse', '--show-toplevel'))[0])
         if (Test-Within $here $wt.Path) {
             throw "the current directory is inside $($wt.Path) - move every shell out of it (each holds its own current directory), then run this from the main checkout $($main.Path)"
+        }
+        $busy = @(Get-ProcessesInside $wt.Path)
+        if ($busy) {
+            throw "a process has its current directory inside $($wt.Path): $($busy -join '; ') - move the shell out of it or let the job finish, then run this again"
         }
     }
     if ($main.Branch -ceq $Branch) {

@@ -3,7 +3,7 @@
   "event": {
     "session_id": "fixture",
     "transcript_path": "${FIXTURES}/transcript.jsonl",
-    "cwd": "${FIXTURES}",
+    "cwd": "${TEMP}/ouro-hooks/.claude/worktrees/w1",
     "hook_event_name": "PreToolUse",
     "tool_name": "PowerShell",
     "tool_input": {

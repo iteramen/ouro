@@ -6,8 +6,8 @@ description: >
   issue, promote the ones that qualify. Invoked as `/ouro:triage --all` or
   `/ouro:triage <N> [<N>…]`. Use when the user asks to triage the backlog or an issue,
   promote issues to agent-ready, grade issue quality, re-triage after a ruling landed, or
-  when a weekly gate (anchor or shape) demoted an issue. Verdicts: PROMOTE / NEEDS-RULING /
-  CHECKPOINT / SPLIT / STALE. Report-and-approve — issue bodies are the owner's artifacts;
+  when the anchor or shape gate demoted an issue. Verdicts: PROMOTE / NEEDS-RULING /
+  CHECKPOINT / SPLIT / FUSE / STALE. Report-and-approve — issue bodies are the owner's artifacts;
   rewrites and labels apply only after approval. The unattended weekly pass is
   `/ouro:intake`, not this skill.
 ---
@@ -113,15 +113,18 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
    - Emits a verdict:
      - **PROMOTE** — contract met (or met after a mechanical body refresh). Include the
        refreshed body draft: verified anchors (`symbol — "fragment"` `@ <short SHA>`),
-       single deliverable, `Doc impact on close:` line — and a **`Size: S/M/L`**
-       estimate. **S** is the eligibility rule `/ouro:execute` re-checks on the diff: one
+       single deliverable (a task with several risk surfaces is still one issue: contract §3 gives
+       its checklist, `- [ ] 1. **<part title> (Flow: <class>).** <the part>`, one Flow per part,
+       the issue's `Flow:` line the loosest of them, its anchor lines starting `Part k:`),
+       `Doc impact on close:` line —
+       and a **`Size: S/M/L`** estimate. **S** is the eligibility rule `/ouro:execute` re-checks on the diff: one
        deliverable; every anchor resolves; no new API, workflow edit, migration or flag
        default; no behaviour change beyond what a gate or a same-PR test covers; and the S
        shape contract §4 defines, with its exclusion of a file changed only because a policy or
        a gate requires a claim mirrored into it. Name the exclusions you can foresee and say
        why; the executor applies the same test to any you could not. Twenty files of real edits
        is M however few lines each carries. **M** is everything else that fits one focused
-       session; L = multi-session.
+       session; L = multi-session. A checklist issue's `Size:` measures its largest part.
        **L is a SPLIT verdict, not a size an issue gets promoted at** — an issue is never
        executed as L. If the verifier cannot find the split lines, the verdict is
        NEEDS-RULING with the question "owner-driven session, or split how?". A ruling for an
@@ -129,7 +132,18 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
        never to `agent-ready`.
        Size picks `/ouro:execute`'s build path (S inline, M dispatched) and, with `[ship].review`,
        who reviews (the table in `docs/binding.md` "Choosing ship.review"); it also lets unattended
-       runs budget their queue. The review weight is contract §4's.
+       runs budget their queue.
+       Beside it, on its own line, a **`Flow: direct|express|standard|full`** stamp, which picks the
+       ceremony: the gate run, the review's weight, the fix commit's check and the watch after
+       the merge (contract §4). **direct**: every path the deliverable and its Doc impact line
+       change matches a `[ship].direct` glob of the binding (none declared, never direct);
+       otherwise the class is express or tighter. **express**: nothing executed changes (documentation, skill text,
+       rules, comments), at any size, a docs-only M included; or an executed change within the S
+       shape whose whole acceptance is a same-PR test or a gate, touching nothing on full's list.
+       **full**: a change to what runs the checks (CI workflows, the gates Action, hooks, gate
+       code, release machinery, the binding schema), or a migration, a flag default or
+       authorization. **standard**: every other executed change — no same-PR test, over the S
+       shape, or acceptance by a measurement.
      - **NEEDS-RULING** — sound issue, but open design decisions. List each as a crisply
        answerable question. These become the rulings queue.
        When a question's options are existing designs, it also offers none of them: an open design brief,
@@ -148,14 +162,23 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
      - **SPLIT** — multiple deliverables. Propose the split lines (each a would-be issue
        title + one-line scope). If one child would ride on another's code, say so
        explicitly: sequenced siblings force a stacked PR (squash-residue risk on the
-       base's merge) — weigh one issue with two staged deliverables instead. When they do
+       base's merge) — weigh one issue whose deliverable is a checklist (contract §3) instead.
+       When they do
        split, the later child is filed `blocked`, its first line the `**Unblocks when:**` line
        naming the first child.
+     - **FUSE** — several issues that change the same skill file, hook, script or mechanism.
+       Propose the fused issue in their place: its title, its one deliverable listing the
+       parts, the issues it absorbs, and its Size and Flow by contract §4's rules (the
+       tightest Flow class among the parts that share a cycle, or for a checklist the loosest,
+       per §3; the size re-derived by the S shape).
+       Parts carrying a risk surface are written as contract §3's checklist, one Flow per part.
+       A part under a contract §3 exception stays its own issue. Each absorbed issue is closed with a
+       comment naming the fused issue.
      - **STALE** — the premise no longer holds (fixed, deleted, superseded). Cite the
        disproving artifact; propose close-with-comment.
 3. **Consolidate.** Batch ALL ruling questions into few AskUserQuestion rounds (rulings
-   partition — never one interrupt per issue). Present PROMOTE drafts, SPLIT lines, and
-   STALE closures for approval in the same summary. Attach the planning-type suggestion
+   partition — never one interrupt per issue). Present PROMOTE drafts, SPLIT lines, FUSE
+   proposals, and STALE closures for approval in the same summary. Attach the planning-type suggestion
    (below) where one applies, marked as a suggestion.
 4. **Apply only what was approved — from this session.** Have each verifier draft its bodies
    and comments as files plus an ordered `manifest.json`, then run
@@ -166,9 +189,10 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
    children first, links native sub-issues, and re-renders forward references, after a failed
    step too.
    **Order the steps `create` → `comment` → `edit` → `close` → `subissue`**, and create children
-   with no state label: the shape gate fires on the `labeled` event and demotes a promotion
-   whose `**Triage**` comment is not there yet, so an edits-first manifest un-promotes
-   everything it just promoted. The applier refuses that order rather than reordering silently.
+   with no state label: in a repo that runs the plugin's agent-ready shape-gate template, the
+   shape gate fires on the `labeled` event and demotes a promotion whose `**Triage**` comment is
+   not there yet, so an edits-first manifest un-promotes everything it just promoted. The
+   applier refuses that order rather than reordering silently.
    After its last write it waits past the last `create` and re-reads every issue it created or
    moved to a state, removing a second state label: an intake automation reads the labels on
    `opened` and stamps after it reads, so its stamp can land after the edit's own read.
@@ -197,8 +221,9 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
      approval only; note that under `[ship].policy = "stop-at-pr"` it is advisory. The applier
      sends an edit's body and removals before its additions, in two calls whose exits it checks:
      gh writes one call's additions and removals independently, and a label the repository lacks
-     fails only its own half. The shape gate fires on the second call's `labeled` event, so it
-     reads the new body. The applier removes only labels the issue carries, printing each
+     fails only its own half. Where the plugin's agent-ready shape-gate template runs, the shape
+     gate fires on the second call's `labeled` event, so it reads the new body. The applier
+     removes only labels the issue carries, printing each
      declared removal it drops, and after a failed step it still re-renders forward references and
      runs the state-label re-read above, then stops the run.
    - NEEDS-RULING: `--remove-label <previous state>`, then `--add-label needs-ruling`, and post
@@ -208,6 +233,9 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
      a ruling that picked the open design brief moves it to `architecture`).
    - SPLIT: file the child issues (the repo's work-item form), convert the parent to a
      curated `umbrella` or close it — per approval.
+   - FUSE: file the fused issue (the repo's work-item form) with PROMOTE's mapping when every
+     part meets the contract (its `**Triage**` comment, then `agent-ready`), else
+     NEEDS-RULING's, and close each absorbed issue with a comment naming it, per approval.
    - STALE: close with the disproving citation, per approval.
    - Every verdict comment this skill posts starts with the literal line `**Triage**`; the
      applier's `comment` step normalizes that marker line (a verdict on it moves to line 3,
@@ -218,9 +246,11 @@ binding, or one that fails `ouro-binding.py check` → refuse and say so. This s
 
 ### The shape gate is literal — six patterns that fail while looking right
 
-`Test-AgentReadyShape.ps1` is a regex gate, and it runs on the `labeled` event within a
-minute of a promotion. Its regexes are the authority; these are the six ways ordinary
-markdown breaks them, each of which costs a demotion and a bot comment:
+`Test-AgentReadyShape.ps1` is a regex gate. In a repo that runs the plugin's agent-ready
+shape-gate template it runs on the `labeled` event within a minute of a promotion; the weekly
+sweep comments on the same findings. Its regexes are the authority; these are the six ways
+ordinary markdown breaks them, each of which costs a demotion and a bot comment where the
+template runs, and a sweep comment where it does not:
 
 | Write | Not | Why |
 |---|---|---|

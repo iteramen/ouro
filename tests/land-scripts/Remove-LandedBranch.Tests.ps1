@@ -14,7 +14,10 @@
     directory inside the worktree, and a worktree outside .claude/worktrees/. A branch origin no
     longer lists is reported and the run goes on; a branch with no local copy and no worktree is
     only deleted on origin; -Branch names another branch than the PR's head. A worktree git
-    refuses to remove (an untracked file) stops with git's message, the directory still there.
+    refuses to remove (an untracked file) stops with git's message, the directory still there. A
+    process whose current directory is inside the worktree stops the run before any deletion,
+    naming its PID, where /proc exists (Linux; elsewhere the row prints a skip line); on Windows,
+    which is not scanned, the same process ends the run at the `left on disk` stop.
     The child rows pin the entry point.
 #>
 $ErrorActionPreference = 'Stop'
@@ -156,6 +159,39 @@ try {
     Assert-Equal 'backup/feat/x-20260101000000,feat/x,master' (Get-Heads $w.Main) 'the local branch and the backup stay'
 }
 finally { Pop-Location }
+
+Write-Host 'a process inside the worktree: Linux stops naming its PID before any deletion; Windows is not scanned'
+$w = New-LandedWorld 'w6'
+$before = (Get-Heads $w.Origin) + '|' + (Get-Heads $w.Main)
+$hidden = if ($IsWindows) { @{ WindowStyle = 'Hidden' } } else { @{} }
+$held = Start-Process -FilePath $Pwsh -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 300' -WorkingDirectory $w.Worktree -PassThru @hidden
+Push-Location -LiteralPath $w.Main
+try {
+    Start-Sleep -Seconds 2
+    if ($held.HasExited) { throw "the sleeper exited at once (exit $($held.ExitCode)); the row has no process to find" }
+    Set-Gh (Table)
+    if ($IsWindows) {
+        $r = Invoke-Step { Invoke-RemoveLandedBranch -Pr 7 }
+        Assert-Match '^left on disk: ' $r.Stop 'no scan: the removal hits the held directory and stops left on disk'
+    }
+    elseif (Test-Path -LiteralPath '/proc/self/cwd') {
+        $r = Invoke-Step { Invoke-RemoveLandedBranch -Pr 7 }
+        Assert-Match "^a process has its current directory inside .*: pid $($held.Id) in .* - move the shell out of it or let the job finish" $r.Stop 'the stop names the PID and its directory'
+        Assert-Equal $before ((Get-Heads $w.Origin) + '|' + (Get-Heads $w.Main)) 'nothing is deleted, origin''s branch included'
+        Assert-Equal $true (Test-Path -LiteralPath $w.Worktree) 'the worktree is still there'
+        Stop-Process -Id $held.Id -Force
+        $held.WaitForExit()
+        $r = Invoke-Step { Invoke-RemoveLandedBranch -Pr 7 }
+        Assert-Equal '' $r.Stop 'with the process gone, the run goes through'
+        Assert-Equal $false (Test-Path -LiteralPath $w.Worktree) 'and removes the worktree'
+    }
+    else { Write-Host '  skip: no /proc here, so no process is read' -ForegroundColor DarkGray }
+}
+finally {
+    Pop-Location
+    Stop-Process -Id $held.Id -Force -ErrorAction Ignore
+    $held.WaitForExit()
+}
 
 Write-Host 'the entry point: a child process, the exit codes and the STOP line'
 $w = New-LandedWorld 'w5'

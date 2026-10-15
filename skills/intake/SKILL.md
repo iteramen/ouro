@@ -147,7 +147,8 @@ stop.
    `/ouro:triage`'s: **PROMOTE** (with refreshed body draft and `Size: S/M/L`; L means the
    proposal is SPLIT), **NEEDS-RULING**,
    **CHECKPOINT** (the blocker is missing evidence — *would going and looking answer this?*
-   — with the analysis brief), **SPLIT** (proposed lines), **STALE** (disproving artifact).
+   — with the analysis brief), **SPLIT** (proposed lines), **FUSE** (the proposed fused issue
+   and the issues it absorbs), **STALE** (disproving artifact).
 3. **Write one comment step per graded issue**, its body file starting with the literal line
    `**Intake triage** (automated)`, carrying the verdict, the evidence with anchors
    (`symbol — "fragment"` `@ <short SHA>`), and the questions.
@@ -163,7 +164,7 @@ stop.
      at all**. The label it needs is the one it has.
    - **PROMOTE / CHECKPOINT** → attach the draft body in the comment; end with "approve to
      apply — `/ouro:triage <N>` interactively". A proposal is not a state change.
-   - **SPLIT / STALE** → proposal only.
+   - **SPLIT / FUSE / STALE** → proposal only.
    - `trivial` and `agent-ready` are never proposed here — only interactive, approved triage
      may apply them, and the applier refuses them outright.
    - **Not finished** — a target its verifier named as unfinished at its turn budget has no

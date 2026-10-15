@@ -488,7 +488,7 @@ def main() -> int:
     ap.add_argument("--resume", metavar="UUID", help="round 2+: resume this session")
     ap.add_argument("--digest", metavar="FILE", help="round 2+: triage digest of the prior critiques (markdown/text)")
     ap.add_argument("--round", type=int, default=0, help="round number for the artifact folder (default: 1, or 2 with --resume)")
-    ap.add_argument("--timeout", type=int, default=900, help="seconds; a repo-reading round on a doc-heavy diff can take 5-6 min")
+    ap.add_argument("--timeout", type=int, default=600, help="seconds (default %(default)s); a repo-reading round on a doc-heavy diff can take 5-6 min")
     ap.add_argument("--dry-run", action="store_true", help="write the prompt and print the argv the adapter would run; call nothing")
     args = ap.parse_args()
 

@@ -174,7 +174,7 @@ jobs:
 
       # Structural sibling of the anchor gate: parseable anchor, Size S/M, doc-impact line,
       # triage provenance, area/type labels per the binding. Report-only in the sweep; the
-      # demoting single-issue mode belongs in a labeled-event workflow, not here.
+      # demoting single-issue mode runs in templates/agent-ready-shape.yml, not here.
       - name: Shape gate — agent-ready issues (deterministic)
         shell: pwsh
         run: pwsh -NoProfile -File ouro/bin/Test-AgentReadyShape.ps1 -Comment

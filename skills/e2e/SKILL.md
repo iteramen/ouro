@@ -19,9 +19,11 @@ does with the work its own landing surfaces.
 original and leaves a reader guessing which copy governs. Where a step is theirs, this cites and
 defers.
 
-**One issue**, from its entry ritual to a landed, cleaned-up merge — then stop and report.
+**One issue, or the next open part of one**, from its entry ritual to a landed, cleaned-up merge —
+then stop and report. A deliverable with a checklist (contract §3) gives the run its first unticked
+part, whose pull request opens `Part k/n of #N` (`/ouro:execute` §4), and the report names that part.
 Choosing which issue, running several at once and ordering a queue belong one level up; several
-issues that share files are built together by `/ouro:fuse`.
+issues that share files, or an area batch, are built together by `/ouro:fuse`.
 
 `<ouro>` below is the plugin root: `${CLAUDE_PLUGIN_ROOT}` if set, else the
 marketplace checkout.
@@ -63,7 +65,8 @@ options and a recommendation.
 file, never through a quoted string.
 
 **Never:** promote the issue you are running, certify your own follow-up, push to the default
-branch, merge a head nothing built, or take a release step — tagging and version numbering are the
+branch except through `Push-Direct.ps1` under `Flow: direct` (`/ouro:execute`'s Direct section),
+merge a head nothing built, or take a release step — tagging and version numbering are the
 repo's own procedure, not this skill's.
 
 ## 2. Execute
@@ -84,8 +87,10 @@ among them, takes its root from its own location, so `<ouro>` outside `bin/` is 
 
 ## 3. Review until it converges
 
-`/ouro:review`'s Steps are the procedure: its step 7 says how a fix round is verified, and the cap
-and what a surviving finding becomes are the contract's. What this run adds:
+Where the table in `docs/binding.md` "Choosing ship.review" names a session review, at the weight
+the issue's Flow class selects (contract §4), `/ouro:review`'s Steps are the procedure: its step 7
+says how a fix round is verified, and the cap and what a surviving finding becomes are the
+contract's. What this run adds:
 
 - **Attack the claims, not only the code.** A builder's own mutation table proves the mutations it
   chose and is silent on the ones it did not. Spot-check it: a case counts only when it goes red
@@ -115,8 +120,11 @@ needs the merge answer. Then:
 - **Diagnose a missing check before waiting on one.** `/ouro:land` §10 counts the runs for the
   exact head and says what zero of them means; `mergeable` and `mergeStateStatus` only explain a
   missing run, and a healthy-looking pair is not a run.
-- **Watch the default branch's CI after the merge** and report its verdict. The merge is not the
-  end of the run; the release channel going red is this run's finding.
+- **Under full, watch the default branch's CI after the merge** and report its verdict, unless the
+  pull request's green run still applies by contract §4's tree-match conditions: then the report
+  cites that run, its head and the tree match beside the default branch's run URLs, and the run
+  does not wait. The merge is not the end of the run; the release channel going red is this run's
+  finding. Under express and standard the report records that run's URL.
 - **Verify the cleanup on the filesystem**, as `/ouro:land` §11 describes, rather than trusting an
   exit code. For every worktree and checkout the run created, confirm that no dispatch of the run is
   still working there ("it has reported, and nothing it started is still running: none of the runs
@@ -162,9 +170,10 @@ often answers differently.
 
 At any moment the run can answer: which issue, which branch and worktree, which commit, what the
 gates said and on which commit, which review rounds ran and what each found, what is fixed and
-what is parked, where the PR is, what the default branch's CI said after the merge, and what
-remains. It ends with exactly that, plus every follow-up filed or appended (§5) and every
-decision routed to the owner.
+what is parked, where the PR is, what the default branch's CI said after the merge (its run's URL
+under express and standard, and under full where the tree match stood), and what remains. It ends
+with exactly that, plus every follow-up filed or appended (§5) and every decision routed to the
+owner.
 
 If the run stopped at the entry ritual, that report is the finding — a refused start is the gate
 working, not the run failing.

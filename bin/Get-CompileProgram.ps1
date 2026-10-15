@@ -13,7 +13,8 @@
     over (for tests): the open pull requests, always (an issue named by a `Fixes #N` line at the
     start of a pull request's body is in flight); the `blocked` issues, when an intent needs the
     trigger lines; the issues of every state with their labels, when a scope or a `finish` target
-    is given; and one issue, for a numeric `finish` target. A failed read exits 1 with the reason,
+    is given or, under `batch`, when -Areas declares an area (that read adds each issue's body);
+    and one issue, for a numeric `finish` target. A failed read exits 1 with the reason,
     and prints nothing on stdout, so a failed read never reads as an empty queue. A read that
     returns as many rows as its --limit prints a warning line, since a row past it is not seen.
 
@@ -46,7 +47,20 @@
                     they land one after another and /ouro:fuse re-checks each build against the
                     diff. In-flight and out-of-scope members are dropped; a batch left with fewer
                     than two members is dropped; a member's collision with a dropped member of its
-                    own batch is printed, marked. -Width does not apply.
+                    own batch is printed, marked. After them, under `Area batches`, the sets the
+                    area rule below forms. -Width does not apply.
+    The area rule. An issue is in an area batch when the graph reads it as agent-ready and it is in
+    no analyzer batch (printed or not), is not in flight, is in scope, carries one of -Areas and
+    does not carry `checkpoint` (label names compare without case), has no checklist line in its
+    body, and every `Flow:` line in its body reads express or standard. Body lines are read outside
+    fenced blocks. A checklist line is `- [ ]` or `- [x]` (the x in either case) followed by a part
+    number and `. **`, as contract section 3 writes a checklist deliverable. A `Flow:` line starts
+    with `Flow:`, its value the word after it, compared with its case, and a line with no word after
+    it reads as neither; a body with no such line reads as standard. An issue carrying several areas
+    goes under the first of -Areas it carries. Each area's issues, in ascending order, form groups
+    of at most five, and a group of one is not printed. Each group prints as a /ouro:fuse line with
+    an `area: <label>` line under it, the label as -Areas spells it. With no area declared there is
+    no area batch, and nothing is read for one.
     An in-flight issue is dropped from throughput's waves and from batch's fuse commands. Elsewhere
     it is marked `(in flight, PR #n)`: in unblock's rows and columns, cleanup's lines and pairs, a
     collision list or note, a batch collision line, and the batch an -Explain or a finish on an
@@ -101,8 +115,9 @@
 .PARAMETER BlockedJson
     JSON array [{number,title,body}] of open blocked issues, in place of the gh read (for tests).
 .PARAMETER IssuesJson
-    JSON array [{number,title,state,labels:[{name}]}] of issues of every state, in place of the gh
-    read (for tests).
+    JSON array [{number,title,state,body,labels:[{name}]}] of issues of every state, in place of
+    the gh read (for tests). Only the batch intent reads `body`; a null or missing one reads as
+    empty.
 .PARAMETER TargetJson
     JSON object {number,title,state,body,labels:[{name}]} of the finish target, in place of the gh
     read (for tests).
@@ -165,6 +180,25 @@ function Add-LimitWarning($Rows, [int]$Limit, [string]$What) {
 }
 function Get-Labels($Obj) { @(@($Obj.labels) | ForEach-Object { "$($_.name)" }) }
 function Test-HasLabel($Obj, [string]$Name) { [bool](Get-Labels $Obj | Where-Object { $_ -ieq $Name }) }
+# The lines of a body outside its fenced blocks, fence lines left out. A fence opens at the start of
+# a line or right after a list marker, and closes on a line of the same character, at least as long
+# as the opening one, with no text after it.
+function Get-UnfencedLines([string]$Text) {
+    $kept = [System.Collections.Generic.List[string]]::new()
+    $fenceChar = ''
+    $fenceLen = 0
+    foreach ($line in ("$Text" -split "`r?`n")) {
+        $fm = [regex]::Match($line, '^\s*(`{3,}|~{3,})(.*)$')
+        $fo = [regex]::Match($line, '^\s*(?:(?:[-*+]|\d+[.)])\s+)?(`{3,}|~{3,})(.*)$')
+        if ($fenceChar) {
+            if ($fm.Success -and $fm.Groups[1].Value[0] -ceq $fenceChar -and $fm.Groups[1].Value.Length -ge $fenceLen -and -not $fm.Groups[2].Value.Trim()) { $fenceChar = '' }
+            continue
+        }
+        if ($fo.Success -and -not ($fo.Groups[1].Value[0] -ceq '`' -and $fo.Groups[2].Value.Contains('`'))) { $fenceChar = $fo.Groups[1].Value[0]; $fenceLen = $fo.Groups[1].Value.Length; continue }
+        $kept.Add($line)
+    }
+    $kept
+}
 
 try {
     $script:Warnings = [System.Collections.Generic.List[string]]::new()
@@ -251,10 +285,12 @@ try {
         } else { $scopeLabel = $wantScope }
     }
     $listRows = $null
-    $needList = [bool]$scopeLabel -or ($Intent -ceq 'finish' -and $Explain -eq '' -and $finishNum -gt 0)
+    $wantAreas = $Intent -ceq 'batch' -and $Explain -eq '' -and $areaList.Count -gt 0
+    $needList = [bool]$scopeLabel -or ($Intent -ceq 'finish' -and $Explain -eq '' -and $finishNum -gt 0) -or $wantAreas
     if ($needList) {
+        $listFields = if ($wantAreas) { 'number,title,state,labels,body' } else { 'number,title,state,labels' }
         $listRows = if ($IssuesJson) { ConvertTo-Rows $IssuesJson '-IssuesJson' }
-                    else { ConvertTo-Rows (Read-Gh 'the issues' @('issue', 'list', '--state', 'all', '--limit', '1000', '--json', 'number,title,state,labels')) 'the issue read' }
+                    else { ConvertTo-Rows (Read-Gh 'the issues' @('issue', 'list', '--state', 'all', '--limit', '1000', '--json', $listFields)) 'the issue read' }
         Add-LimitWarning $listRows 1000 'the issue read'
     }
     $listBy = @{}
@@ -345,6 +381,39 @@ try {
             foreach ($n in $flightList) { Say "  $(Format-Issue $n) (PR #$($inFlight[$n]))" }
         }
     }
+    # The area batches, as the area rule in the help states it: one object per printed group.
+    function Get-AreaGroups {
+        $byArea = @{}
+        foreach ($n in $ready) {
+            if ($inFlight.ContainsKey($n) -or $batchOf.ContainsKey($n) -or -not (Test-InScope $n) -or -not $listBy.ContainsKey($n)) { continue }
+            $row = $listBy[$n]
+            if (Test-HasLabel $row 'checkpoint') { continue }
+            $area = ''
+            foreach ($a in $areaList) { if (Test-HasLabel $row $a) { $area = $a; break } }
+            if (-not $area) { continue }
+            $fit = $true
+            foreach ($line in (Get-UnfencedLines "$($row.body)")) {
+                if ($line -cmatch '^- \[[ xX]\] \d+\. \*\*') { $fit = $false; break }
+                $f = [regex]::Match($line, '^Flow:[^\S\r\n]*(\S*)')
+                if ($f.Success -and $f.Groups[1].Value -cnotin 'express', 'standard') { $fit = $false; break }
+            }
+            if (-not $fit) { continue }
+            if (-not $byArea.ContainsKey($area)) { $byArea[$area] = [System.Collections.Generic.List[int]]::new() }
+            $byArea[$area].Add($n)
+        }
+        $groups = [System.Collections.Generic.List[object]]::new()
+        $seen = @{}
+        foreach ($a in $areaList) {
+            if ($seen.ContainsKey($a) -or -not $byArea.ContainsKey($a)) { continue }
+            $seen[$a] = $true
+            $nums = @($byArea[$a])
+            for ($k = 0; $k -lt $nums.Count; $k += 5) {
+                $members = @($nums[$k..([Math]::Min($k + 5, $nums.Count) - 1)])
+                if ($members.Count -ge 2) { $groups.Add([pscustomobject]@{ Area = $a; Members = $members }) }
+            }
+        }
+        $groups
+    }
     function Add-Batch {
         $printed = 0
         $got = [System.Collections.Generic.List[string]]::new()
@@ -375,7 +444,15 @@ try {
             }
             Say '  A proposed fuse set, not a region, and not conflict-free: batches land one after another, and /ouro:fuse re-checks each build against the diff.'
         }
-        if (-not $printed) { Say 'No batch to print. See throughput.' }
+        $areaGroups = @(Get-AreaGroups)
+        if (-not $printed -and -not $areaGroups.Count) { Say 'No batch to print. See throughput.' }
+        if ($areaGroups.Count) {
+            Say 'Area batches (issues in no batch above, grouped by area, at most five to a group):'
+            foreach ($grp in $areaGroups) {
+                Say "/ouro:fuse $($grp.Members -join ' ')"
+                Say "  area: $($grp.Area)"
+            }
+        }
         # Recount from collisions, one side at a time.
         foreach ($c in @($g.collisions)) {
             foreach ($pair in @(@([int]$c.a, [int]$c.b), @([int]$c.b, [int]$c.a))) {
@@ -466,16 +543,7 @@ try {
             return
         }
         $kids = [System.Collections.Generic.List[int]]::new()
-        $fenceChar = ''
-        $fenceLen = 0
-        foreach ($line in ("$($t.body)" -split "`r?`n")) {
-            $fm = [regex]::Match($line, '^\s*(`{3,}|~{3,})(.*)$')
-            $fo = [regex]::Match($line, '^\s*(?:(?:[-*+]|\d+[.)])\s+)?(`{3,}|~{3,})(.*)$')
-            if ($fenceChar) {
-                if ($fm.Success -and $fm.Groups[1].Value[0] -ceq $fenceChar -and $fm.Groups[1].Value.Length -ge $fenceLen -and -not $fm.Groups[2].Value.Trim()) { $fenceChar = '' }
-                continue
-            }
-            if ($fo.Success -and -not ($fo.Groups[1].Value[0] -ceq '`' -and $fo.Groups[2].Value.Contains('`'))) { $fenceChar = $fo.Groups[1].Value[0]; $fenceLen = $fo.Groups[1].Value.Length; continue }
+        foreach ($line in (Get-UnfencedLines "$($t.body)")) {
             $m = [regex]::Match($line, '^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?#(\d+)')
             if ($m.Success -and -not $kids.Contains([int]$m.Groups[1].Value)) { $kids.Add([int]$m.Groups[1].Value) }
         }

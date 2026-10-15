@@ -22,7 +22,7 @@ The reader's contract — read-only, a JSON verdict naming the files it read, tw
 a third only for a new blocker — is stated once, in `docs/binding.md`'s "Choosing `ship.review`";
 this skill follows it rather than restating it.
 
-One driver, one round: `python3 <ouro>/bin/external-audit.py --cli <cli> [--model <model>]`
+One driver, one round: `python3 <ouro>/bin/external-audit.py --cli <cli> --timeout 600 [--model <model>]`
 builds the brief, runs the named CLI read-only against the repo (or `--cwd`), parses the JSON
 verdict, and drops every artifact under `%TEMP%/external-audit-<user>/<session>/round-N/`. Exit 0 =
 APPROVE, 2 = REVISE, 1 = transport/parse failure, an unknown `--cli`, or one not found on PATH,
@@ -40,18 +40,18 @@ to diff.
 ```bash
 DEFAULT=<[repo].default_branch>
 # round 1 — mints the session id and prints it
-python3 <ouro>/bin/external-audit.py --cli grok \
+python3 <ouro>/bin/external-audit.py --cli grok --timeout 600 \
   --range "$(git merge-base origin/$DEFAULT HEAD)..HEAD" \
   --goal "The new lint must FAIL the run when a diff ADDS a source line that names a retired symbol; comment lines and string literals must not count; removed/context lines never count."
 
 # claims mode — one file of numbered claims, each carrying the file:line it cites
-python3 <ouro>/bin/external-audit.py --cli grok \
+python3 <ouro>/bin/external-audit.py --cli grok --timeout 600 \
   --claims claims.md \
   --goal "A rework plan rests on these readings of the code; the plan itself is not under review."
 
 # round 2 — after fixing the CLASS of every finding and running the probe matrix; --digest is
 # round 1's own triage-template.md, filled in, at the artifact path round 1 printed
-python3 <ouro>/bin/external-audit.py --cli grok \
+python3 <ouro>/bin/external-audit.py --cli grok --timeout 600 \
   --range "$(git merge-base origin/$DEFAULT HEAD)..HEAD" --goal "..." --resume <uuid> \
   --digest "${TMPDIR:-/tmp}/external-audit-<user>/<uuid>/round-1/triage-template.md"
 
@@ -59,7 +59,7 @@ python3 <ouro>/bin/external-audit.py --cli grok \
 # --resume takes the id round 1's "resume with" line printed, not the <uuid> the "session ...
 # round 1 ->" line announced at the start; --digest still names the triage-template.md filed
 # under that announced <uuid>'s folder, since the folder itself is never renamed
-python3 <ouro>/bin/external-audit.py --cli codex \
+python3 <ouro>/bin/external-audit.py --cli codex --timeout 600 \
   --range "$(git merge-base origin/$DEFAULT HEAD)..HEAD" --goal "..." --resume <id-from-the-resume-with-line> \
   --digest "${TMPDIR:-/tmp}/external-audit-<user>/<uuid>/round-1/triage-template.md"
 ```
@@ -167,13 +167,13 @@ Hard cap: **two rounds**; a third only for a *new blocker*.
   A round whose CLI exited non-zero is read from the file the driver's message names; a billing,
   quota or auth cause is the exception "When the reader is unavailable" gives.
 - A repo-reading round on a doc-heavy diff can take 5-6 minutes (it reads the touched files
-  and their helpers); the driver's default `--timeout` is 900 s and stdout streams to
+  and their helpers); the driver's default `--timeout` is 600 s and stdout streams to
   `stdout.txt` as it arrives, so a timed-out round still leaves its narration.
 - **Elapsed time is not evidence of substance.** A long round is not necessarily a read round:
   `files_read` and the critiques are the evidence; the clock is not.
-- **Do not run a heavy local gate while a round is in flight.** The critic's read/grep tool
-  calls execute *locally*, so a box saturated by a build can starve exactly the tool calls the
-  review depends on.
+- **Every round passes `--timeout 600`**, in every class (contract §4), as the commands above
+  do. The critic's read/grep tool calls execute *locally*, so a box saturated by a build starves
+  exactly the tool calls the review depends on, and the cap bounds that wait.
 
 ## Claims mode
 

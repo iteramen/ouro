@@ -14,15 +14,24 @@ select the same set.
 ## The selected set
 
 Every `[[gate]]` whose `areas` contains any of the issue's area labels, plus every `*` gate,
-narrowed by `paths` as below, runs on **committed** work before the PR, each `<ouro>` in a `run`
-replaced by the plugin root (`/ouro:execute` §0). A gate that cannot run locally is a finding, not
-a skipped step — say so. The run follows the Gate environment, What CI checks, Two reads and
-Coverer sections of `dispatch-rules.md`.
+narrowed by `paths` as below, each `<ouro>` in a `run` replaced by the plugin root
+(`/ouro:execute` §0). Which of that set the session runs itself on **committed** work, and which
+the checks the pull request runs, follows the issue's Flow class (`/ouro:execute` §3); under full
+a gate's own code, which the diff must change for the session to run it, is the file its `run`
+names and what that file reads: the suite, its fixtures, the script under test. A gate that
+cannot run locally is a finding, not a skipped step — say so. The run follows the Gate
+environment, What CI checks, Two reads and Coverer sections of `dispatch-rules.md`.
 
 The narrowing applies to every gate run on committed work whose evidence the PR body carries:
-this step, the S run on the commit, the M session's re-run on the commit (`/ouro:execute` Size)
-and `/ouro:land` step 3. The M builder's brief keeps its `[[gate]]` commands unchanged: the
-builder works before the commit, when there is no committed diff to read.
+this step, the S run on the commit, the M session's run on the commit (`/ouro:execute` Size)
+and `/ouro:land` step 3. The M builder's brief names the gates the issue's Flow class gives it
+(`/ouro:execute` Size): under express and standard the change's own acceptance run, even when
+that command is a gate the checks also run, and the selected gates the pull request's checks do
+not run at all or run only to print a skip; under full also each selected gate whose own code
+the change changes, which the builder reads from its own uncommitted changes, new files
+included, against the commit the build starts from, since it works before any commit exists; no
+other selected gate the checks run goes in the brief, and a list that comes out empty is the
+builder's run.
 
 ## Narrowing by paths
 
@@ -36,8 +45,8 @@ from `[repo].default_branch`:
 
 ```bash
 DEFAULT=<[repo].default_branch>
-# the fallbacks: a workflow, the gates Action
-git diff --quiet origin/"$DEFAULT"...HEAD -- '.github/workflows/' 'actions/gates/'; echo "$?"
+# the fallback: the gates Action
+git diff --quiet origin/"$DEFAULT"...HEAD -- 'actions/gates/'; echo "$?"
 # one selected gate that declares paths: each of its entries, as written
 git diff --quiet origin/"$DEFAULT"...HEAD -- '<entry>' '<entry>'; echo "$?"
 ```
@@ -45,6 +54,11 @@ git diff --quiet origin/"$DEFAULT"...HEAD -- '<entry>' '<entry>'; echo "$?"
 Exit 1 means touched, 0 means not touched, and any other exit means the diff cannot be read.
 Each selected gate that declares `paths` gets the second command with its entries: exit 1 runs
 it, 0 skips it.
+
+A gate whose CI leg is path-filtered declares as its `paths` pathspecs that select the same paths
+as that filter, and every file the gate reads. Without them, this narrowing never skips the gate,
+and the session runs it locally wherever the diff misses the filter, where the leg covers nothing
+(`dispatch-rules.md`, Coverer). No check compares the two.
 
 ## The two fallbacks
 
@@ -54,12 +68,11 @@ cases:
 
 - the diff cannot be read: git exits with anything but 0 or 1, for either command, for example
   because `origin/$DEFAULT` is missing;
-- the first command exits 1: the diff touches a workflow anywhere under GitHub's
-  `.github/workflows/`, or the gates Action's own directory `actions/gates/`, the two pathspecs
-  the Action checks. A consumer reaches the Action through a workflow's `uses:` line, so a
-  change to the pinned Action is a workflow change, and `actions/gates/` exists only in the
-  plugin's own repository. A gate that reads the binding names `.claude/ouro.toml` in its
-  `paths`, so a binding change runs those gates and no others.
+- the first command exits 1: the diff touches `actions/gates/` in the checked-out repository, the
+  one pathspec the Action checks (in the plugin, the Action's own directory). A workflow edit
+  keeps the narrowing: a consumer that reaches the Action through its workflow's `uses:` line
+  gets the narrowed set under a new pin, not the full set. A gate that reads the binding names
+  `.claude/ouro.toml` in its `paths`, so a binding change runs those gates and no others.
 
 ## Quoting the entries
 
@@ -88,7 +101,9 @@ push to the default branch still runs every gate in CI.
 In a repository that never batch-lands, a gate earns its place by being the narrowest command
 that can actually fail for the diff: one that repeats a PR's required check
 (`gh pr checks <PR> --required`, once the PR is open) costs a full run to catch what CI catches
-anyway. `/ouro:land-batch` runs every `[[gate]]` as its only check on the composed tree, so a
-repository that batches keeps its full suite in a gate and pays for that run on each PR.
-Elsewhere, run the gate as bound all the same, and name it in the report as a binding smell,
-with the required check it repeats — the binding narrows it, not the run.
+anyway. Under express and standard the session runs no such gate: the checks the pull request
+runs are its run (`/ouro:execute` §3). `/ouro:land-batch` runs every `[[gate]]` as its only check
+on the composed tree, so a repository that batches keeps its full suite in a gate and pays for
+that run on each PR. Elsewhere, under full, run the gate as bound all the same, and name it in
+the report as a binding smell, with the required check it repeats — the binding narrows it, not
+the run.

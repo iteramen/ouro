@@ -3,19 +3,36 @@ name: No binding
 # This workflow runs the gates workflow's fixture suites from a vendored copy in a repo with no
 # binding -- the branch this repo's own gate list never takes, since this repo has one.
 # The binding runs the step locally through a runner in release/ that reads it from this file by
-# name; CI runs it here.
+# name; CI runs it here. A pull request runs the Linux leg; the push to master and the tag run
+# both, so a row that runs on Windows only shows on the default branch's run.
 
 on:
   # The list mirrors the copy plan in bin/Vendor-Ouro.ps1 (its .DESCRIPTION block), plus this
   # file and .gitattributes, which decides the bytes every checked-out file has: a change to what
-  # that script copies changes this list in the same PR. No pull_request trigger: the local
-  # [[gate]] release/no-binding-gate.py covers a developer's run, and the master push and the tag
-  # cover a landing. A pushed `v*` tag runs whatever paths its commit touches (GitHub does not
-  # evaluate `paths` for a tag), so a release that changes none of the listed paths still gets a
-  # run.
+  # that script copies changes this list, in both triggers, in the same PR. A pushed `v*` tag runs
+  # whatever paths its commit touches (GitHub does not evaluate `paths` for a tag), so a release
+  # that changes none of the listed paths still gets a run.
   push:
     branches: [master]
     tags: ['v*']
+    paths:
+      - '.github/workflows/no-binding.yml'
+      - '.gitattributes'
+      - 'bin/*.ps1'
+      - 'bin/ouro-binding.py'
+      - 'bin/apply-manifest.py'
+      - 'bin/external-audit.py'
+      - 'bin/drift-claims.py'
+      - 'bin/forbidden-tokens.py'
+      - 'tests/**'
+      - 'skills/**'
+      - '!skills/init/**'
+      - 'agents/*'
+      - 'docs/contract.md'
+      - 'docs/docs-governance.md'
+      - 'docs/binding.md'
+      - 'templates/documentation-rule.md'
+  pull_request:
     paths:
       - '.github/workflows/no-binding.yml'
       - '.gitattributes'
@@ -37,29 +54,29 @@ on:
 permissions:
   contents: read
 
-# A push to master or of a tag is grouped by its commit and its ref, so it never cancels another:
-# every landed commit keeps its run, and the tag run of a release commit and the master run of the
-# same commit, which the export pushes together, both finish.
+# A newer push to a pull request replaces its earlier run, so the earlier one is cancelled instead
+# of holding a runner the whole pool shares. A push to master or of a tag is grouped by its commit
+# and its ref, so it never cancels another: every landed commit keeps its run, and the tag run of
+# a release commit and the master run of the same commit, which the export pushes together, both
+# finish.
 concurrency:
-  group: no-binding-${{ format('{0}-{1}', github.sha, github.ref) }}
+  group: no-binding-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.sha, github.ref) }}
   cancel-in-progress: true
 
 jobs:
   no-binding:
-    # The fixture suites from a vendored tree in a repo that declares no binding. Both legs, on the
-    # runner selection, python pin and timeout of the repository's gates job: the suites carry rows
-    # that run on one platform only either way. No suite needs gh or the network.
+    # The fixture suites from a vendored tree in a repo that declares no binding. The Linux leg on a
+    # pull request, both legs on a push, on the runner selection, python pin and timeout of the
+    # repository's gates job: the suites carry rows that run on one platform only either way. No
+    # suite needs gh or the network. A job-level `if` cannot read `matrix`, so the matrix itself is
+    # built from the event: the include objects are the same two in both strings.
     name: no binding (${{ matrix.os }})
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            hosted: '"ubuntu-latest"'
-            selfhosted: '["self-hosted", "ouro", "Linux"]'
-          - os: windows
-            hosted: '"windows-latest"'
-            selfhosted: '["self-hosted", "ouro", "Windows"]'
+      matrix: >-
+        ${{ fromJSON(github.event_name == 'pull_request'
+        && '{"include":[{"os":"linux","hosted":"\"ubuntu-latest\"","selfhosted":"[\"self-hosted\", \"ouro\", \"Linux\"]"}]}'
+        || '{"include":[{"os":"linux","hosted":"\"ubuntu-latest\"","selfhosted":"[\"self-hosted\", \"ouro\", \"Linux\"]"},{"os":"windows","hosted":"\"windows-latest\"","selfhosted":"[\"self-hosted\", \"ouro\", \"Windows\"]"}]}') }}
     runs-on: ${{ fromJSON((vars.OURO_RUNNERS != '' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && matrix.hosted || matrix.selfhosted) }}
     timeout-minutes: 45
     steps:
