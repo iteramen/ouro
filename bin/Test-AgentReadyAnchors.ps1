@@ -37,15 +37,22 @@
     `origin` names (Get-RepoSlug.ps1). With neither, no issue is read or written and the -Doc
     checks still run.
 
+    -Ref <commit-ish> checks every path and fragment against that commit's files instead of the
+    working tree (Get-AnchorFindings.ps1), and reads a -Doc file from it too, so the run needs
+    no particular checkout or branch: `-Ref origin/main` after a fetch reads origin's tip from
+    any clone and moves nothing. A -Doc file absent at the ref is reported as not found.
+
 .EXAMPLE
     pwsh -File <ouro>/bin/Test-AgentReadyAnchors.ps1
+    pwsh -File <ouro>/bin/Test-AgentReadyAnchors.ps1 -Ref origin/main
     pwsh -File <ouro>/bin/Test-AgentReadyAnchors.ps1 -Comment
     pwsh -File <ouro>/bin/Test-AgentReadyAnchors.ps1 -Doc docs/anchored-doc.md
 #>
 param(
     [switch]$Comment,
     [switch]$Demote,
-    [string[]]$Doc
+    [string[]]$Doc,
+    [string]$Ref
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,6 +74,11 @@ $RepoRoot = $RepoRoot.Trim()
 
 Push-Location -LiteralPath $RepoRoot
 try {
+    # checked up front: an empty queue never reaches the reader, which would catch it
+    if ($Ref) {
+        git rev-parse --verify --quiet "$Ref^{commit}" 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "cannot read the tree at ref '$Ref'" }
+    }
     $repo = Get-RepoSlug
     $issues = @()
     if ($repo.Slug) {
@@ -85,7 +97,7 @@ try {
     $totalFindings = 0
 
     foreach ($issue in $issues) {
-        $result       = Get-AnchorFindings -Text $issue.body
+        $result       = Get-AnchorFindings -Text $issue.body -Ref $Ref
         $findings     = $result.Findings
         $pathCount    = $result.PathCount
         $checkedFrags = $result.FragCount
@@ -140,11 +152,18 @@ try {
     }
 
     foreach ($docPath in $Doc) {
-        if (-not (Test-Path $docPath)) {
+        if ($Ref) {
+            $docText = git show "${Ref}:$($docPath -replace '\\','/')" 2>$null
+            if ($LASTEXITCODE -ne 0) { $docText = $null }
+            else { $docText = $docText -join "`n" }
+        }
+        elseif (Test-Path $docPath) { $docText = Get-Content $docPath -Raw }
+        else { $docText = $null }
+        if ($null -eq $docText) {
             Write-Host "::warning::anchor gate: doc not found: $docPath"
             continue
         }
-        $result   = Get-AnchorFindings -Text (Get-Content $docPath -Raw)
+        $result   = Get-AnchorFindings -Text $docText -Ref $Ref
         $findings = $result.Findings
         if ($findings.Count -gt 0) {
             $totalFindings += $findings.Count

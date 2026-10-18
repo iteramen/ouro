@@ -3,7 +3,7 @@
     Watch the GitHub Actions runs that built a pull request's head, or a set of commits on the
     default branch, until they end, and judge each by its own conclusion.
 .DESCRIPTION
-    /ouro:land step 7 and /ouro:land-batch step 6. Run from the repo root; the repository and the
+    The driver's checks step. Run from the repo root; the repository and the
     default branch come from the binding (.claude/ouro.toml, read through ouro-binding.py beside
     this script), and every gh call names that repository with -R.
 
@@ -22,12 +22,12 @@
     only run is queued with no jobs, it exits 1 with `no checks reported`.
 
     Every refusal is one `STOP: <why, and what to do>` line and exit 1. With -Pr, no run after a
-    minute is the zero-run case /ouro:land step 10 names: nothing is known to have built the head,
+    minute is the zero-run case: nothing is known to have built the head,
     so the stop says to push (or re-push) it and come back. With -Sha, no run after a minute is
     reported and is no failure: a workflow with a `paths:` filter runs for a push only when that
     push's diff touches its list. `-Sha none` watches nothing and exits 0, for a batch in which
     nothing landed. A run that concluded outside success, skipped and neutral is named with its
-    conclusion for /ouro:land step 9's drill; a run still in progress in the last list is a stop
+    conclusion for the caller to judge; a run still in progress in the last list is a stop
     too, since it has no conclusion yet.
 .PARAMETER Pr
     The pull request whose head's pull_request runs are watched.
@@ -115,7 +115,7 @@ function Invoke-WatchPullRequestChecks {
         if ($run.conclusion -notin 'success', 'skipped', 'neutral') { $bad += "$($run.databaseId):$($run.conclusion)" }
     }
     if ($bad.Count) {
-        throw "run(s) concluded outside success/skipped/neutral: $($bad -join ' ') - /ouro:land step 9 judges a red run"
+        throw "run(s) concluded outside success/skipped/neutral: $($bad -join ' ') - read the red run's log: a flake is re-run once, anything else is a fix"
     }
 }
 

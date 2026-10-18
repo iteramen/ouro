@@ -1,20 +1,32 @@
 # The loop contract
 
-What every `ouro` skill enforces, stated once. Nothing here names a repository: where a value
+What `ouro` enforces, stated once. Nothing here names a repository: where a value
 differs per repo — the slug, the default branch, the verify commands, the ship policy, who may
 rule — it is declared in `.claude/ouro.toml` and documented in `docs/binding.md`. This contract
-states the protocol and the skills implement it; the binding carries the bindings.
+states the protocol, the driver (`bin/ouro`) runs it and the gates check it; the binding carries
+the bindings.
 
 ## 1. The loop
 
 ```
-file  →  triage  →  (rule if needed)  →  execute  →  PR review  →  land
+file  →  triage  →  (rule if needed)  →  build  →  review  →  checks  →  merge
               ↘
                 (checkpoint)  →  finding + a recommendation  →  back to triage
 ```
 
-Humans do exactly two things: **answer ruling questions** and **review PRs**. A weekly
-unattended pass keeps the backlog honest while nobody watches (§9).
+**The driver is the loop.** `bin/ouro` runs the fixed sequence in code: it binds, verifies the
+issue, makes the worktree and branch, runs the gates, pushes, opens the pull request, watches the
+checks, merges by the effective policy and cleans up, and calls a model at four judgment nodes
+only: the triage verdict, the build, the review and the follow-up filing. It keeps no state of
+its own: the labels, the comments this contract defines, the branch and the pull request are the
+record, and a run resumes from any host with the binding and the tools. A session, another
+user's bot or a cron calls the driver; a session that follows the protocol by hand is held to the
+same marks by the gates.
+
+Humans do exactly two things: **answer ruling questions** and **merge the pull request the
+binding's `[ship].policy` leaves to them** — every one under `stop-at-pr`, every one without the
+`trivial` label under `trivial-merge`, and under `merge-on-green` a class outside
+`[ship].unattended_classes` (§5, §9).
 
 The lower branch exists because the two human jobs are not equally cheap. Reviewing a PR is
 bounded; answering a ruling can mean an open-ended investigation before the question even makes
@@ -95,8 +107,7 @@ names it under `[authority].local` and the skills cite it rather than restate it
   individually actionable. New work gets its own single-item issue; an umbrella may link them.
   A child is written as a list item — bulleted, numbered, or a task-list item, at any indent —
   whose first token is its own issue number; anything else in the body is a mention, not a
-  child, and the weekly pass reports where that list and the issue's native sub-issue list
-  disagree.
+  child.
 - **A finding outside the change under review has a severity floor.** It becomes an issue of its
   own only if it can lose data, post to or delete from the wrong place, break a gate, or mislead
   an unattended run. Everything else — wording, cosmetics, a list incomplete but not false, an
@@ -136,7 +147,7 @@ an issue is executable, or it is waiting on exactly one identifiable thing.
 
 | State | Means | Who clears it |
 |---|---|---|
-| `agent-ready` | Spec verified against code, mechanically executable. | An agent, via `/ouro:execute` or `/ouro:fuse` |
+| `agent-ready` | Spec verified against code, mechanically executable. | The driver (`bin/ouro run`) |
 | `human-ready` | Ready now — nothing gates it — but only a person can do it: a bench repro, manual QC, a release-time verification. | A person, at the rig or the release |
 | `needs-ruling` | Blocked on a decision the owner can make; the question is recorded on the issue. | The owner (`[owner].ruling_approvers`), in a comment |
 | `blocked` | Waiting on an external event or an unlanded dependency. Body's **first line** is `**Unblocks when:** …` naming the trigger. | The trigger firing |
@@ -160,12 +171,10 @@ does not touch (`docs/binding.md`).
 
 **Promotion to `agent-ready` leaves a provenance mark:** a comment on the issue whose first line
 is `**Triage**` — alone on the line, with no blank line above it; interactive triage writes its
-verdict from line 3. The unattended intake's comment starts `**Intake triage** (automated)`, a
-different marker by design: the intake may propose a promotion but never makes one (§9), and a
-proposal is not provenance. The shape gate reads the
+verdict from line 3. The shape gate reads the
 first line of every comment, trims surrounding whitespace and compares it case-sensitively; an
-`agent-ready` issue with no such comment gets a provenance finding — a comment on the issue in the
-weekly sweep, a demotion to `needs-triage` in the gate's single-issue `-Demote` mode (§9). The
+`agent-ready` issue with no such comment gets a provenance finding — a comment on the issue from a
+sweep run with `-Comment`, a demotion to `needs-triage` in the gate's single-issue `-Demote` mode (§9). The
 gate reads nothing past that line, and counts the comment only when its author is the job
 token's bot or a login in `[owner].ruling_approvers`: a stranger's `**Triage**` comment is not
 provenance, and the issue gets the finding as if it had none. A repo with no `.claude/ouro.toml`,
@@ -177,7 +186,7 @@ comment.
 that issue, whose first line is `**Stop:** <reason>` — alone on the line, line 2 blank, the stop's
 content from line 3. `<reason>` is exactly one of `review cap`, `open decision`, `dead anchor` or
 `gate uncovered`, in lowercase, and the line is compared trimmed and case-sensitively like the
-provenance mark's. `/ouro:execute` §1 defines it and every stop site cites it. A triage reversal
+provenance mark's. The driver posts it at every stop. A triage reversal
 needs none: its `**Triage**` comment is the mark.
 
 **`Size: S/M/L`** is a body line, assigned at triage if the filer omitted it. `S` and `M`
@@ -185,18 +194,12 @@ execute. **`L` is a SPLIT verdict**: the issue becomes an umbrella or is rewritt
 single-deliverable issues before any of them can be `agent-ready`. No comment, ruling or label
 lets an `L` ride on `agent-ready`. An `L` that triage finds no split lines for goes to
 `needs-ruling` with the question "owner-driven session, or split how?"; a ruling for an
-owner-driven session re-triages it to `human-ready` while the owner drives it, and `/ouro:execute`
+owner-driven session re-triages it to `human-ready` while the owner drives it, and the driver
 never runs it.
 
-**`S` and `M` differ in how the run builds.** An issue built by `/ouro:fuse` takes that skill's
-build, gate and review steps in place of this paragraph's and the Flow paragraph's, except what a
-builder's brief names, which the Flow paragraph's Gates bullet gives; the Flow class is its
-region's, the tightest among the region's issues and never direct, and the gate run and the
-review's weight follow it (`/ouro:fuse` §4, §5). `S` builds
-inline — the session edits and commits itself; `M` dispatches one builder, whose gate run comes
-back with its diff. Who reviews each, by `[ship].review`, is the one table in
-`docs/binding.md` "Choosing ship.review"; every `M` takes `/ouro:review` there, before the PR is
-marked ready, whatever the binding names.
+**`S` and `M` differ in the review.** One BUILD node builds either. Who reviews each, by
+`[ship].review`, is the one table in `docs/binding.md` "Choosing ship.review"; every `M` takes a
+REVIEW node there, before the PR is marked ready, whatever the binding names.
 
 **`Flow: direct|express|standard|full`** is a body line beside `Size:`, stamped at triage. `Size` picks
 the build path, `Flow` the ceremony around it, and `trivial` (§5) stays the autonomy grant,
@@ -216,7 +219,9 @@ reads.
   glob (`docs/binding.md`), never a checklist part (§3). No worktree, no PR and no review: the
   session commits on the default branch with `Fixes #N`, runs locally the gates the diff selects,
   and pushes through `bin/Push-Direct.ps1`; CI on the default branch is the check, and
-  `/ouro:execute`'s Direct section gives the order, the red-run rule and the fallback to express.
+  the driver's direct transition runs it in that order: a red default-branch run gets one fix
+  commit through the lane and a second red reverts both, and a diff that reaches outside the
+  globs falls back to express.
 - **express**: nothing executed changes — documentation, skill text, rules, comments — at any
   size; or an executed change within the S shape whose whole acceptance is a same-PR test or a
   gate, touching nothing on full's list.
@@ -232,7 +237,7 @@ What each class runs:
   request runs are the gate run; a dispatched builder
   still runs the gates its brief names in its worktree, and that run is §7's second re-run. The
   draft PR opens at the first push under standard and full, and at convergence under express,
-  the point `/ouro:execute` §4 defines. The
+  the point where the driver has the diff converged. The
   brief names, under express and standard, the change's own acceptance run (its red-then-green
   test, or the command the issue names, even when that command is a gate the checks also run)
   and the selected gates the pull request's checks do not run at all or run only to print a
@@ -246,14 +251,14 @@ What each class runs:
   since the thing under change is the checker; the pull request's checks are the rest. In every
   class, a gate the pull request's checks do not run at all, or run only to print a skip, runs
   locally, selected by its paths.
-- **Review**, where the table names a session review: express takes light mode
-  (`/ouro:review --light`), for code too; standard the **sized review**; full the **probe
+- **Review**, where the table names a session review: express takes light mode,
+  for code too; standard the **sized review**; full the **probe
   format**. Wherever the table names the external reader, in every class, it runs with a
   timeout of at most 600 s. The sized review is one
   reviewer reading the diff and probing only the hunks it changed and the claims it makes, with
   no attack-vector menu and no REJECTED ledger, its evidence one line per changed hunk, and one
   verification message after a fix; it runs no build, gate or suite the pull request's checks
-  already ran. The probe format is the full campaign `/ouro:review` defines.
+  already ran. The probe format is the full campaign of `bin/ouro/prompts/REVIEWER-PROMPT.md`.
 - **A fix commit.** express: committed locally, one push at convergence, and the reviewer's
   verification is a reading one; a fix after that push (a red check, a late finding) is pushed
   as under standard. standard: pushed, the checks re-run, and the reviewer verifies it. full: the gates whose paths the fix touches re-run locally on it,
@@ -309,13 +314,20 @@ part's pull request that is not the last carries none, §3).
   presets name — and compresses and force-pushes a branch that has not been through merge-time
   cleanup before it lands. `trivial` pre-authorizes the merge, never the rewrite of a branch
   already pushed: a run that needs either rewrite stops at the PR, whatever the policy says.
-- **Only interactive, human-approved triage applies it** — the same bar as promotion. The
-  unattended pass never does.
+- **Only interactive, human-approved triage applies it** — the same bar as promotion. No
+  unattended run does.
 - **The executor demotes on any doubt** — on any declined review finding, when a review fix
   is itself non-trivial, or when the review names an untested vector nothing covers. Unsure
   means not trivial; the run falls back to stop-at-PR.
 - **Effective ship policy = min(repo, issue).** The binding's `[ship].policy` caps what any
   label can grant: `stop-at-pr` there makes `trivial` advisory and every run stops at the PR.
+- **`merge-on-green` is the owner's per-class grant, beside `trivial`.** Under
+  `[ship].policy = "merge-on-green"` the driver merges a pull request whose Flow class is in
+  `[ship].unattended_classes` when every required check on the head is green, no review requests
+  changes, the last REVIEW verdict is clean and the head is the one those checks and that verdict
+  read; it then posts `**Landed unattended**`. A class outside the list stops at `**Ready for
+  merge**` as under `stop-at-pr`. The owner adds a class to the list by hand and the driver never
+  does. `ship.review = "none"` forbids the policy as it forbids `trivial-merge`.
 - **`trivial` is re-granted at PR time by a diff-shape check.** The label describes an
   intention; the diff is the fact. A `trivial` PR that edits tests beyond additions, or touches
   migrations, flag defaults, authorization, or workflows, is demoted to stop-at-PR regardless of
@@ -333,18 +345,17 @@ verifiable domain through `[[gate]]`; anything no gate covers is not executable 
 
 ## 7. The law of the road
 
-Every dispatch — sub-agent, external builder, reviewer — runs under these rules. A rule whose
-violation has a command shape is also enforced by a guard the plugin ships as a Claude Code hook
-(its `hooks/`); the prose stays, because a guard fails open and Codex has no hook layer.
+Every dispatch — a node of the driver, a sub-agent, an external builder, a reviewer — runs under
+these rules. The guards the plugin ships are listed in `hooks/README.md`.
 
 - **Author ≠ reviewer, always adversarial.** Whoever wrote a change, someone else reviews it
-  (for an `S` built inline the session may be the author, never the reviewer), prompted to
+  (the node that built it never reviews it), prompted to
   break it, with file:line evidence. The one exception is `Flow: direct` (§4): it has no
   review, and CI on the default branch is its check. **The loop re-runs the checks**, twice:
   CI, and under
   express or standard (§4) the change's own acceptance run on the commit — its red-then-green
-  test, or the acceptance command the issue names, recorded in the PR body (`S`) — or the
-  builder's run (`M`), CI alone for an `S` that executes nothing, under full the session's gate
+  test, or the acceptance command the issue names, recorded in the PR body (the BUILD
+  node's run), CI alone for a change that executes nothing, under full the session's gate
   run on the commit. A reviewer reads or probes; a review that only reads satisfies that
   half of the loop.
 - **Deterministic done-condition + STOP rule in every dispatch.** A builder that cannot meet its
@@ -361,9 +372,9 @@ violation has a command shape is also enforced by a guard the plugin ships as a 
   one fix and the verification of that fix's commit, and the count is of what a fix introduced:
   a change takes one full review, and what a later pass finds in lines no fix touched is filed
   as a follow-up.
-  A finding from a reviewer on the pull request that arrives after `/ouro:review` has verified
+  A finding from a reviewer on the pull request that arrives after the REVIEW node has verified
   the change gets **one fix round of its own**, outside the three, its fix commit verified as
-  `/ouro:review` step 7 verifies any. A further valid finding from such a reviewer after that
+  the REVIEW node verifies any. A further valid finding from such a reviewer after that
   round is not fixed in this change: it is answered on its thread and goes where the severity
   floor (§3) sends it.
   A **prose round** — one whose every remaining finding is about comments, docstrings,
@@ -383,8 +394,7 @@ violation has a command shape is also enforced by a guard the plugin ships as a 
   never a commit's author**: a commit the session makes carries the human who ran the session
   as its author, and the session never sets an author or committer identity naming an agent —
   no `--author` naming one, no `user.name` or `user.email` override. A commit a landing rebuilds
-  keeps its range's own author, as `/ouro:land` step 10 and `/ouro:land-batch` step 2 already
-  make it.
+  keeps its range's own author.
 - **A dispatch creates files only where it was sent.** Sub-agent, external builder and reviewer
   alike create files only inside the worktree they were handed, and only the files the task
   names; a read-only dispatch creates none inside any working tree. Every probe, copy, fixture,
@@ -424,10 +434,6 @@ Working discipline that no gate enforces, kept because ignoring it has cost time
 - **Ending mid-task, write the position down where the work is** — on the issue or in the PR:
   what was being implemented, files touched, the concrete next step, the traps found. A
   session that dies silently costs its successor the whole reconstruction.
-- **A commit, comment or push runs only once the step it reports has succeeded.** Join it to
-  that step with `&&`, or check that step's exit code first. Never chain it after `;`, and
-  never after a pipeline, which reports its last stage's exit code (`suite | grep` reports
-  grep's). A step that failed is reported as failed, never described as done.
 - **A change to state other sessions share is done only when its real consumer passes.** The
   state is a host service, a CI runner's configuration, the container runtime, or the harness's
   settings, hooks or rules. A session that changes one proves the change with the thing that
@@ -461,89 +467,27 @@ verify commands and by review.
 
 ## 9. What unattended automation may do
 
-This section governs **every unattended run of an ouro skill**, not only the weekly pass. The
-unattended weekly pass (`templates/weekly-pass.yml`) is **report-only**: its deterministic gates
-comment, or write the rolling issue that holds their report; and neither of its two model
-sessions has a write tool other than an Edit spelled with its own output directory. Its drift audit
-reads text anyone with comment rights can write, and its intake reads untrusted issue text; each
-runs with the job token cleared, no tool that reaches the tracker or runs a program, an Edit that
-names only its output directory, and `--settings` with `blockReadsOutsideWorkingDirectories`, which
-denies its Read, Grep and subagents a file outside the workspace. The drift
-audit writes the ledger's body and comments into files that a later step posts, after a poster that
-refuses a directory out of layout, over a size cap, holding a secret shape, carrying a run marker
-before its last comment, ending without one or naming a doc that is not a target, and the pass,
-reading that ledger back, counts a comment on it only when its author is the job token's bot or a
-ruling approver, a gate that quotes issue or doc text into a comment there writing every `<` as
-`&lt;`; the intake writes a manifest that a later step applies.
-Neither later step has a model in it. The bullets below that describe that property are the pass's; the label moves are every
-unattended run's. Specifically:
+This section governs **every unattended run**: the driver's (§5) and any gate a workflow runs on
+a schedule or an event. Specifically:
 
-- The pass **never** edits code, merges, closes, or promotes, and it rewrites no issue body
-  but the **rolling issues named in `[rolling_issues]`** — its own report surfaces, not backlog
-  items. Even there the split is deliberate: the drift ledger's entries are
-  append-only comments (history) and its body is a current-state summary rewritten every run,
-  and the deterministic docs-rot report is the body (current state, rewritten every run).
-- It **reopens its own rolling issue when the exact-title match is closed, and files one when
-  there is none**, the filed one carrying `umbrella` —
-  a state label (§4), and one outside the default working view, so a container of findings does
-  not arrive asking to be triaged weekly. A missing rolling issue must not turn a sweep that
-  ran and found rot into a silent green no-op.
-- **The LLM never selects its own workload.** Targets for the drift audit and the intake window
-  come from a deterministic script; the model works the list it is handed. The intake's script
-  counts an `**Intake triage** (automated)` comment as a previous verdict only when its author is
-  the job token's bot or a ruling approver, so no other commenter can hide an issue from the pass.
 - The **only labels applied unattended** are `needs-triage` (on anything that arrived without a
-  state), `needs-ruling` (on the intake's verdict, and as an unattended `/ouro:execute` run's
-  demotion target), and `umbrella` (on a rolling issue it files itself).
+  state), `needs-ruling` (as an unattended driver run's demotion target), and `umbrella` (on a
+  rolling issue a report files itself).
   A cleanup issue (§3) also carries the area it is named for. Promotion to `agent-ready`,
-  `trivial`, `checkpoint` conversion, and every merge are human-approved, with the single
-  exception the owner turns on per repo: the `trivial` loop
-  §5 pre-authorizes, whose merge the owner approved when setting the policy rather than in the
-  run — the merge alone, never the branch rewrite §5 excludes from it.
-- The intake's `needs-ruling` verdict is one manifest `edit` step declaring both sides — adding
-  `needs-ruling`, removing `needs-triage` — and removes nothing else: unattended, the applier
-  sends exactly the removals a step declares and synthesizes none, however many `gh` calls
-  writing them takes.
-- An unattended run that writes through a manifest is bound by what applies it, not by what wrote
-  it: the applier's `--unattended` mode takes only `comment` and `edit` steps, only `needs-triage`
-  and `needs-ruling` among the labels an edit adds or removes, and no body file on an edit, and it
-  sends exactly the removals the step declared — none synthesized, since a step declaring only
-  permitted labels would otherwise still strip a promotion off any issue it names. It also refuses
-  an `issue` that is not a number and a `{{word}}` placeholder in a comment body, since no step it
-  takes creates an issue for either to name, a comment step with no body file or one that cannot
-  be read, and a comment body over its own length cap — a fixed cap set well under the platform
-  maximum, a few times the largest verdict measured on one tracker, rather than at the platform
-  maximum, which would refuse only what the platform already refuses — or carrying a
-  secret-shaped string. It bounds where a step goes and what its
-  comment claims to be: it requires `--targets <file>`, the JSON the intake's selector wrote, which
-  the grading session's Edit grant does not name and whose SHA-256 the weekly pass compares before
-  it applies, and refuses a step whose issue is not the number of one of
-  that file's `targets` rows, as it does a file it cannot read or one with no `targets` array; and
-  it refuses a comment whose first line, as posted, is not `**Intake triage** (automated)`, so a
-  planted issue body cannot steer a comment into another component's marker under the job token's
-  bot (`**Triage**` is the shape gate's provenance, `**Checkpoint finding**` stops a checkpoint as
-  delivered). `--targets` outside `--unattended` is refused, since only the intake has a targets
-  file. A body file resolving outside the manifest
-  directory it was handed is refused as well, though that bound is every run's rather than this
-  mode's: a manifest is model-written either way. Each of those refuses the whole manifest and
-  applies nothing. Its
-  post-apply correction of a second state label runs in that mode too, but may then remove only
-  `needs-triage` or `needs-ruling`: the manifest steers that correction by choosing the issue and
-  the state that survives it, so any other state it finds is reported and left to the weekly
-  label-invariants sweep.
-- The pass comments on a `blocked` issue whose `**Unblocks when:**` trigger line has fired or
-  that opens with no trigger line at all, and stays silent only when its newest trusted notice on
-  that issue already says the same; it never relabels the issue. Its dedupe reads only the
-  comments of the job token's bot and of a ruling approver, so no other commenter can pre-empt the notice.
-- The other unattended **removal** is a deterministic gate demoting `agent-ready` in its explicit
+  `trivial`, `checkpoint` conversion, and every merge are human-approved, with the
+  exceptions the owner turns on per repo: the `trivial` loop
+  §5 pre-authorizes, and the merge `merge-on-green` grants for the classes in
+  `[ship].unattended_classes`. The owner approved each merge when setting the policy rather than
+  in the run — the merge alone, never the branch rewrite §5 excludes from it.
+- The unattended **removal** is a deterministic gate demoting `agent-ready` in its explicit
   `-Demote` mode, and the target states why: the anchor gate demotes to `needs-ruling` (a graded
   spec the code moved out from under needs a re-grade), the shape gate to `needs-triage` (a
   structural failure means triage never happened). The anchor gate's `-Demote` is a sweep-wide
   switch; the shape gate's works only in its single-issue mode, which
-  `templates/agent-ready-shape.yml` runs on the `labeled` event. The weekly template turns on neither; a consumer opts into the
+  `templates/agent-ready-shape.yml` runs on the `labeled` event. A consumer opts into the
   shape gate's demotion by copying that template, and into the anchor gate's `-Demote` in a
   workflow of its own. An unattended
-  `/ouro:execute` run may make the same removal on a dead anchor, on
+  driver run may make the same removal on a dead anchor, on
   a judgment call found mid-work, on a gate-coverage gap and on the
   fix-round cap, swapping `agent-ready` for `needs-ruling` and removing
   whichever of `trivial` and `checkpoint` the issue carries, and posting the finding or the
@@ -597,7 +541,7 @@ bound, because context anchors charge landings that did not introduce the defect
 docstring is the exact reading; this section names what is measured.
 
 Beside the outcome table the same script prints **quality rows**, one per ISO week, report-only
-like the outcomes. A landed pull request is read for its `Review:` line (`/ouro:land` defines it),
+like the outcomes. A landed pull request is read for its `Review:` line (defined below),
 the first one outside any fenced block, and the week is the week of the landing:
 
 | Row | Reading |
@@ -605,5 +549,22 @@ the first one outside any fenced block, and the week is the week of the landing:
 | Pull requests | Landed, with a line, `Review: none`, and no line. A pull request with no line is shown and is never counted as clean: the series starts at the first pull request that carries one |
 | False record sentences | Total, mean per pull request and share of pull requests with one, over the lines holding a number there; `unread` is counted apart |
 | Review findings | The H, M and L totals over the lines holding numbers |
-| Fix rounds per region | The median and the maximum of `rounds`, a pull request being a region (`/ouro:fuse` §8) |
+| Fix rounds per region | The median and the maximum of `rounds`, a pull request being a region |
 | CI flake rate | Over the Actions run list and each re-run's earlier attempts, by the week a failed attempt started: flaky is a `failure` attempt followed by a `success` of its run, or of a later run of the same workflow on the same head SHA; failed is any other `failure`; a `cancelled` or `skipped` attempt is neither. Flaky over flaky plus failed |
+
+**The `Review:` line** is the one line the loop metrics read for the change's review. It stands alone, at the start of its own line, outside any
+fenced block (a reader skips fenced blocks before matching), directly under the body's `Fixes #<N>`
+line or lines, or the `Part` line of a part that is not the last. It reads either
+`Review: rounds:2 findings:H0/M3/L4 false-sentences:1` (every field a decimal count,
+`false-sentences` also `unread`) or `Review: none`, and this pattern, read multiline, matches it:
+`^Review: (?:none|rounds:([0-9]+) findings:H([0-9]+)/M([0-9]+)/L([0-9]+) false-sentences:([0-9]+|unread))[ \t\r]*$`.
+- **`rounds`** is the fix rounds the change took, counted as §7 counts them: a prose round is not
+  counted. It is 0 when the first review needed no fix.
+- **`findings`** is the `CONFIRMED` findings of the full review and of every verification, each
+  counted once, at the severity the reviewer names (the external reader's blocker is H, major M,
+  minor L); `OUTSIDE` findings and `STANDARDS` entries are not counted.
+- **`false-sentences`** is the record sentences the one record reading found false, counted at
+  that reading and never re-taken, so a sentence fixed afterwards still counts. It reads `unread`
+  when no record reading ran.
+- **`Review: none`** is for a change no reviewer read. Copilot's comments carry no severity, so
+  they are not counted.

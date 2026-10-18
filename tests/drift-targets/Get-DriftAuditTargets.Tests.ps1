@@ -486,7 +486,7 @@ if ($claimSkip) {
 }
 
 # --- the history each target carries ------------------------------------------------------
-# The drift session holds no git history command, so the selector writes what step 3 of /ouro:drift
+# The drift session holds no git history command, so the selector writes what the drift audit
 # reads: the doc's last commit time and the one-line commits since it under the doc's directory,
 # the doc's own last commit left out. Real git, a small repo, so a commit landing on the same second
 # as the doc's own is not told apart by its time.

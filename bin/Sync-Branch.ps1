@@ -3,7 +3,7 @@
     Bring the feature branch up to date with the default branch the way the binding says: a merge
     of origin's default branch, or a rebase onto it behind a backup branch and a lease.
 .DESCRIPTION
-    /ouro:land step 2. Run from the repo root on the feature branch; the repository, the default
+    The driver's sync step. Run from the repo root on the feature branch; the repository, the default
     branch and the sync answer come from the binding (.claude/ouro.toml, read through
     ouro-binding.py beside this script). CI runs on the branch head as it is and GitHub surfaces
     staleness only at merge time, so the default branch is brought in first and CI validates the

@@ -3,4 +3,3 @@ __pycache__/
 TestResults/
 .claude/ouro.local.toml
 .claude/worktrees/
-evals/results/

@@ -505,6 +505,46 @@ try {
     finally { Pop-Location; Remove-Item function:Get-CopyComment -ErrorAction Ignore; Remove-Item -LiteralPath $idRoot -Recurse -Force }
     Remove-Item function:Get-GateComment
     Remove-Item function:gh, function:Run-Demote; Remove-Variable -Name ghCalls, ghFailOn, ghLabels -Scope Global
+
+    # --- -Ref reads the commit, never the working tree ---------------------------------------
+    # The commit holds src/a.ps1 with refOnlyFrag, and src/glob/x.ps1; the working tree then
+    # rewrites a.ps1 to hold workOnlyFrag, drops the glob file and adds src/gone.md.
+    $refRepo = Join-Path ([IO.Path]::GetTempPath()) ('ouro-anchor-ref-' + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path (Join-Path $refRepo 'src/glob') | Out-Null
+    Push-Location -LiteralPath $refRepo
+    try {
+        git init -q . 2>$null
+        'refOnlyFrag = 1' | Set-Content -LiteralPath 'src/a.ps1'
+        'glob words' | Set-Content -LiteralPath 'src/glob/x.ps1'
+        git add . 2>$null
+        git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --no-verify -m fixture 2>$null
+        git tag at
+        'workOnlyFrag = 2' | Set-Content -LiteralPath 'src/a.ps1'
+        git rm -q -f src/glob/x.ps1 2>$null
+        'gone words' | Set-Content -LiteralPath 'src/gone.md'
+        git add . 2>$null
+        function Get-RefFindings($Body, [string]$Ref) { (Get-AnchorFindings -Text $Body -Ref $Ref).Findings.Count }
+        $refFrag  = '- `src/a.ps1` - "refOnlyFrag = 1"'
+        $workFrag = '- `src/a.ps1` - "workOnlyFrag = 2"'
+        $freeFrag = 'Quote: "refOnlyFrag = 1" here.'
+        $goneBody = 'See `src/gone.md` for it.'
+        $globBody = 'See `src/glob/*.ps1` for it.'
+        Assert-Match '^0$' (Get-RefFindings $refFrag 'at')  '-Ref: an anchor-line fragment present only at the ref is found'
+        Assert-Match '^1$' (Get-RefFindings $refFrag '')    'no -Ref: the same fragment, absent from the working tree, is a finding'
+        Assert-Match '^1$' (Get-RefFindings $workFrag 'at') '-Ref: an anchor-line fragment present only in the working tree is a finding'
+        Assert-Match '^0$' (Get-RefFindings $workFrag '')   'no -Ref: the working-tree fragment is found'
+        Assert-Match '^0$' (Get-RefFindings $freeFrag 'at') '-Ref: a repo-wide fragment present only at the ref is found'
+        Assert-Match '^1$' (Get-RefFindings $freeFrag '')   'no -Ref: the repo-wide fragment, absent from the working tree, is a finding'
+        Assert-Match '^1$' (Get-RefFindings $goneBody 'at') '-Ref: a path absent at the ref is a finding though the working tree holds it'
+        Assert-Match '^0$' (Get-RefFindings $goneBody '')   'no -Ref: the working-tree path resolves'
+        Assert-Match '^0$' (Get-RefFindings $globBody 'at') '-Ref: a root-relative glob span resolves when a path at the ref matches it'
+        Assert-Match '^1$' (Get-RefFindings $globBody '')   'no -Ref: the glob span, with its file gone from the working tree, is a finding'
+        Assert-Match '^1$' (Get-RefFindings 'See `src/gl*b/nope.ps1` for it.' 'at') '-Ref: a glob span that matches no path at the ref is a finding'
+        Assert-Match '^0$' (Get-RefFindings 'See `./src/glob/*.ps1` for it.' 'at') '-Ref: a ./-prefixed glob span is normalized before it is matched at the ref'
+        $badRef = try { Get-RefFindings $refFrag 'no-such-ref' } catch { "threw: $_" }
+        Assert-Match '^threw: .*no-such-ref' $badRef '-Ref: an unresolvable ref throws naming it, not an all-dead report'
+    }
+    finally { Pop-Location; Remove-Item function:Get-RefFindings -ErrorAction Ignore; Remove-Item -LiteralPath $refRepo -Recurse -Force }
 }
 finally {
     Pop-Location

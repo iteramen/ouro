@@ -1,0 +1,19 @@
+# The docs gate's ignore list (bin/Test-DocsFreshness.ps1): one entry per line, a reason after #.
+# `file: <path>` exempts one in-scope document from S1, S2 and S3; a bare token suppresses that
+# suffix repo-wide. An entry without a reason is a concealment, not a suppression.
+hooks/guard-worktree.py  # CHANGELOG.md history: deleted in 1.0.0
+hooks/check-agent-brief.py  # CHANGELOG.md history: deleted in 1.0.0
+bin/Test-LandState.ps1  # CHANGELOG.md history: deleted in 1.0.0
+bin/Invoke-LandBatch.ps1  # CHANGELOG.md history: deleted in 1.0.0
+bin/Compress-Branch.ps1  # CHANGELOG.md history: deleted in 1.0.0
+templates/weekly-pass.yml  # CHANGELOG.md history: deleted in 1.0.0
+skills/review/REVIEWER-PROMPT.md  # CHANGELOG.md history: moved under bin/ouro/prompts/ in 1.0.0
+skills/seam/references/phase-templates.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/execute/references/gate-selection.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/execute/references/dispatch-rules.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/execute/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/land/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/land-batch/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/intake/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/fuse/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
+skills/drift/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0

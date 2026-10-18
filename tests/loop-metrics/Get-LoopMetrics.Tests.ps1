@@ -11,7 +11,7 @@
     page until a short page or one reaching past the window; a (#N) commit off the default branch's
     first-parent line is not landed, nor one before the window, nor a release commit with no (#N),
     while an older-dated commit mid-line does not hide the landings behind it; a PR body with a
-    Fixes line, bare or opened by one backtick, or in lowercase, is loop-landed, while a mid-line
+    Fixes line or a Part k/n line, bare or opened by one backtick, or in lowercase, is loop-landed, while a mid-line
     Fixes (inline code or not), a body without one, an N that is an issue, a Fixes with no number
     or no space, a double backtick and leading spaces are the rest; each landing carries its
     subject, off which rework counts the conventional fix type -- plain, scoped, breaking and
@@ -191,6 +191,10 @@ Assert-Equal 1 $ticked.Loop 'a Fixes #N written as inline code on its own line i
 $tickedMid = Measure-Landed -Landings @([pscustomobject]@{ Number = 12; Subject = 'docs: a plan (#12)' }) `
     -Bodies @{ 12 = "Split out of the plan; ${bt}Fixes #11${bt} follows in a later PR." }
 Assert-Equal 1 $tickedMid.Rest 'an inline-code Fixes #N in the middle of a line is not a Fixes line'
+$part = Measure-Landed -Landings @([pscustomobject]@{ Number = 12; Subject = 'docs: part one (#12)' }, [pscustomobject]@{ Number = 13; Subject = 'docs: x (#13)' }) `
+    -Bodies @{ 12 = "Part 1/2 of #11`nReview: none"; 13 = "See Part 1/2 of #11." }
+Assert-Equal 1 $part.Loop 'a Part k/n of #N line of a staged deliverable is loop-landed'
+Assert-Equal 1 $part.Rest 'a Part line mid-line is not'
 # Near misses: each must stay "other".
 foreach ($near in @(
         @{ Body = "${bt}Fixes #${bt}"; Why = 'no number' },

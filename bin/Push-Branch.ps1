@@ -3,14 +3,14 @@
     Push the feature branch to origin: plainly, or with the lease the sync printed, and never with
     the plain force flag.
 .DESCRIPTION
-    /ouro:land step 4. Run from the repo root on the feature branch; the repository, the default
+    The driver's push step. Run from the repo root on the feature branch; the repository, the default
     branch and the protected prefixes come from the binding (.claude/ouro.toml, read through
     ouro-binding.py beside this script).
 
     Without -Lease, or with `-Lease none`, the push is `git push -u origin <branch>`, which
     refuses to overwrite a commit origin holds: a non-fast-forward stops the run, nothing is
     overwritten, and the stop says to fetch and read what origin has. With a lease, the tip
-    /ouro:land step 2 printed after `lease:` once it rebased a branch origin already had, the push
+    Sync-Branch.ps1 printed after `lease:` once it rebased a branch origin already had, the push
     is `--force-with-lease=refs/heads/<branch>:<lease>`: a push someone made since is refused, not
     overwritten. The lease must be a commit this clone has, which the sync fetched. Afterwards
     origin's tip is read back and must be the local HEAD. The default branch and a protected

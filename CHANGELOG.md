@@ -15,6 +15,148 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.0.2] - 2026-10-18
+
+- The release carries `.docs-freshness-ignore`, whose entries exempt the paths this changelog's
+  history names and 1.0.0 deleted. Without it the docs gate failed on the released tree.
+- `bin/Test-ChangelogEntry.ps1` reads a python tool's docstring usage lines only, and its
+  `-ModulePattern` default is `^bin/[^/]+\.py$`: the argparse reading merged after v1.0.1 is
+  withdrawn before any release carried it.
+
+## [v1.0.1] - 2026-10-17
+
+- A driver fix round costs what contract §4 and §7 say. Under the full class it re-runs locally
+  only the gates whose paths changed since the last head where every gate passed, a gate the fix
+  adds to the binding and the gates the pull request's checks do not run; a gate already green on
+  an earlier head keeps its line in the record. A verification finding the REVIEW node marks
+  `OUTSIDE`, in lines the fix did not change, starts no fix round and goes to the follow-up step
+  with the low findings. The verification brief carries the fix's range and whole diff, and a
+  finding still standing from the round it answers is IN-FIX. A first review's scope is ignored,
+  and when the fix's diff cannot be shown whole the brief asks for none.
+
+## [v1.0.0] - 2026-10-17
+
+- The contract names the driver as the loop. `docs/contract.md` §1 says `bin/ouro` runs the fixed
+  sequence and that humans answer rulings and merge the pull request the binding's `[ship].policy`
+  leaves to them; §5 and §9 admit the merge `merge-on-green` grants per class beside
+  `trivial`; every citation of a removed skill in the contract, the rationale, the `bin/` scripts'
+  help and messages and their suites is cut or names the driver step, bar the sync, push and
+  merge scripts' numbered references to the removed landing steps. Removed from §7: the rule
+  that a commit, comment or push joins its step with `&&` (`guard-commit.py`'s worktree clause), and the
+  clause that the prose stays because a guard fails open.
+- `CLAUDE.md` loses the rules that `master` moves only at a tag, that a wave lands as a batch
+  under one bump, and the export steps after the tag; the same-day rule becomes the mass budget: a
+  release adds no net lines across `skills/`, `docs/`, `hooks/`, `bin/` and `tests/`, and a rule
+  survives only with a check that fails without it. The README describes the shipped thing: the
+  protocol, the binding, the driver, the four entry points and the gates.
+- `bin/Get-CompileProgram.ps1` prints a proposed batch as `batch: <numbers>` in place of
+  `/ouro:fuse <numbers>`.
+  **Consumer contract:** a reader of the renderer's text that matched the `/ouro:fuse` line
+  matches `batch:` instead; `/ouro:fuse` no longer exists.
+- The plugin is 1.0.0.
+
+- Four skills replace thirteen: `/ouro:run <N> [--part <k>] [--dry-run]`, `/ouro:triage <N>
+  [--dry-run]`, `/ouro:weekly [--post]` (also `compile`) and `/ouro:init` each bind, run the
+  matching `bin/ouro` command and relay its message. The skills `/ouro:execute`, `/ouro:land`,
+  `/ouro:land-batch`, `/ouro:e2e`, `/ouro:seam`, `/ouro:fuse`, `/ouro:compile`, `/ouro:intake`,
+  `/ouro:drift`, `/ouro:external-audit` and `/ouro:review` are gone, with the `evals/` cases that
+  exercised them; the reviewer prompt the driver quotes lives at `bin/ouro/prompts/REVIEWER-PROMPT.md`,
+  and the `Review:` line's pattern is defined in `docs/contract.md`, which `bin/loop-outcomes.py`
+  reads.
+  **Consumer contract:** a session, bot or workflow that invokes a removed skill by name calls
+  `python3 <plugin>/bin/ouro run <N>` (or `/ouro:run <N>`) in place of `/ouro:execute`,
+  `/ouro:e2e`, `/ouro:land` and `/ouro:fuse`, and `/ouro:weekly compile` in place of
+  `/ouro:compile`. The weekly pass that ran `/ouro:drift` and `/ouro:intake` goes too (the next
+  entry). `/ouro:triage` now takes one issue number and no `--all`.
+- `templates/weekly-pass.yml` and its suite are deleted, and with them the binding's
+  `[models].weekly` role: no drift audit or intake grading runs unattended any more. Contract §9
+  governs the driver's unattended runs and the gates a consumer's workflows run.
+  `bin/Vendor-Ouro.ps1`'s workflow note no longer exempts a loop-outcomes step,
+  `bin/Install-Ouro.ps1`'s pin reminders name the agent-ready shape-gate workflow, and
+  `python3 bin/ouro weekly --post` says it posts on the `[rolling_issues].loop_runs` issue.
+  **Consumer contract:** a binding that sets `[models].weekly` fails the binding check: delete the
+  key. A repository that copied the weekly pass deletes its `.github/workflows/` copy.
+- Two hooks go and one shrinks: `hooks/hooks.json` no longer registers the worktree-removal guard
+  or the Agent brief check, and `hooks/guard-commit.py` keeps only its author rule, so a commit
+  carrying an agent's identity is still refused and a chained, piped or non-draft publishing call
+  in a worktree no longer is.
+  **Consumer contract:** a consumer that copied those two hook entries into its own settings drops
+  them; there is nothing else to migrate.
+- `bin/Invoke-LandBatch.ps1`, `bin/Compress-Branch.ps1` and `bin/Test-LandState.ps1` are deleted
+  with their suites: nothing called them but the removed land skills.
+  **Consumer contract:** a wrapper that runs one of the three stops working; the driver's merge
+  step replaces them.
+- The binding's `[ship].policy` accepts `merge-on-green`, under which the driver merges a green,
+  cleanly reviewed pull request of a class listed in the new `[ship].unattended_classes` (`express`,
+  `standard`, `full`; default `express` and `standard`) and posts `**Landed unattended**`.
+  `ship.review = "none"` forbids it as it forbids `trivial-merge`, and `unattended_classes` without
+  `merge-on-green` is refused.
+  **Consumer contract:** `policy` gains a value and `[ship]` a key, both optional; a binding that
+  declares neither reads as before and there is nothing to migrate.
+- The driver selects its gates from the binding in the tree under test, as CI does, so a branch
+  that adds, drops or changes a `[[gate]]` is gated by its own entries.
+
+- A new python package, `bin/ouro`, runs the loop's fixed sequence as one program, beside the
+  skills, which keep working unchanged. `python3 <plugin>/bin/ouro run <N> [--part <k>] [--dry-run]`
+  takes an agent-ready issue through the worktree, the build, the binding's gates, the push, the
+  draft pull request, the review rounds, the checks and the merge decision to the landed change,
+  calling the `bin/` land and gate scripts as subprocesses and a model only at the BUILD, REVIEW,
+  FOLLOWUP and TRIAGE nodes; it keeps no state between invocations and continues from the tracker's
+  labels, comments, the branch and the pull request; a resumed run whose issue has left
+  `agent-ready`, or holds `needs-ruling` or `checkpoint`, stops with exit 3 and writes nothing, and
+  what the BUILD node answered that a later invocation needs is the last line of its commit
+  message, `Ouro-Build: <json>`. `triage <N> [--dry-run]` grades an issue with the TRIAGE node and
+  posts the `**Triage**` comment, the body lines and the labels; `weekly [--post]` prints (or
+  posts) the `loop-outcomes.py` table; `compile` prints the next wave. Exit 0 is landed, waiting on
+  the owner's merge or on running checks; 1 a driver error; 2 refused before any branch; 3
+  stopped, by the run's own `**Stop:**` comment with `agent-ready` swapped to `needs-ruling`, or by
+  the labels a resumed run reads. It refuses a `checkpoint` issue, and a spec whose body an
+  untrusted author edited after the newest trusted `**Triage**` comment; it runs the reviewer the
+  binding's table gives the issue's Size (the REVIEW node, Copilot requested through
+  `requestReviews` with one fix round, or `bin/external-audit.py`, falling back to the REVIEW node
+  when the reader is unavailable), re-derives Size from the first commit, and takes `Flow: direct`
+  issues through `Push-Direct.ps1` from the main checkout only when it is clean and at origin's
+  tip, or ahead of it by nothing but this issue's own unpushed `Fixes #N` commits, which it ships
+  without a build; an open pull request on `direct/<N>` is resumed at its checks. A red
+  default-branch run gets one fix commit through the lane while the main checkout still meets
+  those conditions, and stops otherwise; a second red reverts both and stops.
+  **Consumer contract:** `bin/ouro` is a new command surface with the four commands and exit codes
+  above, and it reads the binding through `bin/ouro-binding.py` with no new key; no existing
+  invocation changes and there is nothing to migrate. A review record on a pull request the driver
+  opens is a comment whose first line alone is `**Review** round <k>: CLEAN|FINDINGS @ <full head
+  sha>`, counted only from the authenticated user or a login in `[owner].ruling_approvers`.
+
+- No landing step moves or writes the owner's main checkout. `/ouro:land` step 13 fetches and runs
+  `Test-AgentReadyAnchors.ps1 -Ref "origin/$DEFAULT"` from any checkout, in place of fast-forwarding
+  the main checkout so the gate could read a working tree. `/ouro:land-batch` always runs from its
+  batch worktree, which `Invoke-LandBatch.ps1 worktree` adds detached at `origin/$DEFAULT`, whatever
+  branch the main checkout is on: 5b pushes `HEAD:refs/heads/$DEFAULT`, `reset` resets HEAD, and the
+  local `$DEFAULT` branch is never moved. The skills lose the main-checkout form and the guards that
+  existed only for the fast-forward.
+  **Consumer contract:** `Get-AnchorFindings.ps1` and `Test-AgentReadyAnchors.ps1` read the working
+  tree and index only; both now take `-Ref <commit-ish>` and read that commit instead, and a ref that
+  does not resolve throws. `Invoke-LandBatch.ps1 worktree` added the batch worktree on the local
+  `$DEFAULT` branch, and `push` sent that branch; the worktree is now detached and `push` sends HEAD,
+  so a consumer's own wrapper reading the local `$DEFAULT` after a batch reads origin's tip from the
+  worktree's HEAD instead; no other migration.
+
+- The forbidden-token hook scans a publishing call's command text less the value of each `-R` or
+  `--repo` written outside quotes, before any heredoc: that value addresses the call and is not
+  published, so a repository slug that matches a list entry no longer refuses the call. A `-R`
+  inside a quoted body is still scanned, and with unbalanced quotes the whole text is.
+- `/ouro:execute` refuses before reading the issue on a host where `gh api graphql` fails, as a
+  Claude Code cloud session's proxy makes it, since every tracker call the skills make needs it.
+  The brief hook's refusal names where each missing line is defined (the head and the turn budget
+  in contract §7, the state note in the dispatch reference), and `/ouro:triage` and
+  `/ouro:intake` tell their verifier's brief to carry all three.
+- `/ouro:compile`'s renderer reads an issue as in flight when an open pull request closes it
+  (GitHub's closing references) or names it on a `Fixes #N` or `Part k/n of #N` line; an in-flight
+  issue that is not `agent-ready` is printed as a finding instead of counted. A batch whose dropped
+  member was the only link prints its survivors as separate fuse sets, or none. `finish` marks a
+  blocked child whose trigger names only closed issues as `fired` and ends with the next move for
+  each child. The loop metrics and the outcomes reader's quality table count a part's pull request
+  by its `Part` line.
+
 ## [v0.12.1] - 2026-10-15
 
 - An area's express and standard issues can build as one batch. The batch intent of `/ouro:compile`

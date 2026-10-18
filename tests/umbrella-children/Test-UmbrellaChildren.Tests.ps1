@@ -222,7 +222,7 @@ Assert-Match 'gh issue comment 999 failed \(exit 1\)' $thrown 'a failed post to 
 Assert-Match 'HTTP 403' $thrown 'and the throw carries gh''s own output'
 
 # --- a fence closes on its own character and length, and opens after a list marker --------------------
-# The renderer of /ouro:compile reads an umbrella's children by the same rule, so a body this gate and
+# The renderer of `python3 bin/ouro compile` reads an umbrella's children by the same rule, so a body this gate and
 # the renderer read differently would post drift the renderer does not see.
 $otherFence = Run '[{"number":320,"title":"o","body":"Children:\n```\n~~~\n- #7 inside the backtick fence\n```\n- #8 the real child","labels":[]}]' '{"320":[{"number":8,"state":"open"}]}'
 Assert-NoMatch '#320' $otherFence 'a ~~~ line inside a ``` fence does not close it'

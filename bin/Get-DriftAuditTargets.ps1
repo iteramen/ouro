@@ -38,7 +38,7 @@
 
     The LLM never chooses its own workload; this script is the only selector.
 
-    Every target also carries what step 3 of /ouro:drift reads from git history, so the CI session
+    Every target also carries what the drift audit reads from git history, so the CI session
     holds no history command: `lastCommit`, the ISO 8601 commit time of the doc's last commit, and
     `commits`, the one-line commits made since that commit under the doc's directory (the whole
     repository for a doc at the root), newest first, the doc's own last commit left out. The list is
@@ -373,7 +373,7 @@ function Get-ClaimRanges {
     return $found
 }
 
-# What step 3 of /ouro:drift reads for one doc: its last commit and the commits since it under its
+# What the drift audit reads for one doc: its last commit and the commits since it under its
 # directory. A sha range, so the doc's own last commit is out of the list whatever second it landed
 # on; a literal pathspec, so a directory named with a glob character names itself. A doc with no
 # commit yet has no time and no list.

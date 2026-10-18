@@ -679,7 +679,7 @@ def main() -> int:
         return 1
     if verdict is None:
         print(f"external-audit: no JSON verdict from {adapter.binary} (see stdout.txt) - round 1 with no "
-              "verdict means the caller falls back to /ouro:review; a manual run may re-run", file=sys.stderr)
+              "verdict means the caller falls back to the REVIEW node; a manual run may re-run", file=sys.stderr)
         return 1
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
 

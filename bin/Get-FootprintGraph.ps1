@@ -22,11 +22,11 @@
 
       collisions -- each pair of issues whose footprints share a file that is not mirrored, with
                     the shared files.
-      batches    -- proposed /ouro:fuse sets of at most five issues, the groups of two or more
+      batches    -- proposed sets of at most five issues, the groups of two or more
                     members. The collisions are taken by shared-file count, largest first (a
                     tie goes to the lower a, then the lower b); a collision joins its two
                     issues' groups only when the joined group holds five or fewer. A batch is
-                    a proposed fuse set, not a region: two issues in different batches may
+                    a proposed set, not a region: two issues in different batches may
                     still collide, and the batches are not conflict-free.
       waves      -- a greedy partition: take the issues with a non-empty footprint in ascending
                     number; wave 1 takes each one that shares no non-mirrored file with an issue
@@ -52,7 +52,7 @@
     footprint. A replay of the batch rule over three queues of closed issues: pair precision
     0.61 against a 0.29 base rate, and 0.18 of the colliding pairs held, where a partition into
     fives could hold at most 0.34. So batches land one after another, each re-checked against the
-    diff as /ouro:fuse step 2 does.
+    diff.
 
     A measurement of the footprint less its Doc-impact files over 160 landed issues: mean recall
     0.83 against the files the landing touched (prose-only 0.96, code-touching 0.74; most

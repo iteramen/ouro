@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Merge a pull request the way the binding declares, with every guard /ouro:land step 10 names,
+    Merge a pull request the way the binding declares, with every guard the driver's merge step needs,
     and judge the result by GitHub's answer rather than gh's exit code.
 .DESCRIPTION
     Run from the repo root of the clone that holds the branch; the repository, the default branch
@@ -17,7 +17,7 @@
         `gh pr merge` itself refuses only BLOCKED, BEHIND and DIRTY, so UNKNOWN and UNSTABLE
         would merge;
       - `gh pr checks` exits 0: 8 is a pending check, 1 with `no checks reported` is the zero-run
-        case below, anything else is a failing check for /ouro:land step 9;
+        case below, anything else is a failing check;
       - at least one pull_request run exists for the head, filtered on the server by commit and
         event: a CONFLICTING head dispatches no run at all, and a PR that became MERGEABLE because
         the default branch moved still has none, so nothing is known to have built it;
@@ -35,7 +35,7 @@
     on it (a failed count keeps the branch); and never rebase-merges. Afterwards the pull request
     is read back: MERGED with a merge commit is the answer, printed as `#<Pr> merged as <sha>`.
     Anything else stops: `Base branch was modified` means the default branch moved between the
-    read and the merge and nothing merged -- sync the branch again (/ouro:land step 2) and run this
+    read and the merge and nothing merged -- sync the branch again (Sync-Branch.ps1) and run this
     again; a refused merge commit is the repository disallowing merge commits or a ruleset
     requiring linear history, and the stop names the fix: that setting or the binding, or a
     mailmap entry where the addresses are one person's. The run never falls back to a squash. A
@@ -97,14 +97,14 @@ function Invoke-MergePullRequest {
     $head = "$($view.headRefOid)"; $branch = "$($view.headRefName)"
     if (-not $head) { throw "cannot read #$Pr's head, base and state" }
     if ($view.isDraft -ne $false) {
-        throw "#$Pr is still a draft, or its draft state did not read - mark it ready (gh pr ready) once /ouro:execute section 4's condition holds, then run this again"
+        throw "#$Pr is still a draft, or its draft state did not read - mark it ready (gh pr ready) once the review has converged, then run this again"
     }
     if ("$($view.baseRefName)" -ne $b.Default) { throw "#$Pr's base reads '$($view.baseRefName)', not $($b.Default)" }
     if ($state -ne 'MERGEABLE CLEAN') { throw "#$Pr is '$state', not MERGEABLE CLEAN" }
 
     $checks = Invoke-Native gh @('pr', 'checks', "$Pr", '-R', $b.Slug)
     if ($checks.Code -ne 0) {
-        throw "gh pr checks exits $($checks.Code), not 0 - 8 is a pending check: let Watch-PullRequestChecks.ps1 finish and run this again; 1 with 'no checks reported' means nothing built the head; any other failing check is /ouro:land step 9's: $($checks.Text)"
+        throw "gh pr checks exits $($checks.Code), not 0 - 8 is a pending check: let Watch-PullRequestChecks.ps1 finish and run this again; 1 with 'no checks reported' means nothing built the head; any other failing check is a fix round: $($checks.Text)"
     }
     $r = Invoke-Native gh @('run', 'list', '-R', $b.Slug, '--commit', $head, '--event', 'pull_request', '--json', 'databaseId')
     $count = if ($r.Code -eq 0) { @(($r.Out -join "`n") | ConvertFrom-Json).Count } else { -1 }
@@ -113,7 +113,7 @@ function Invoke-MergePullRequest {
     }
     $open = @(Get-OpenReviewThreads $b.Slug $Pr)
     if ($open.Count) {
-        throw "#$Pr has a review thread nobody answered - reply in it (/ouro:land step 8) or resolve it:`n$($open -join "`n")"
+        throw "#$Pr has a review thread nobody answered - reply in it or resolve it:`n$($open -join "`n")"
     }
 
     $fetch = Invoke-Native git @('fetch', '-q', 'origin', $b.Default, "refs/pull/$Pr/head")
@@ -150,7 +150,7 @@ function Invoke-MergePullRequest {
              catch { throw "cannot read #$Pr after the merge - check it by hand: $($_.Exception.Message)" }
     $oid = if ($after.mergeCommit) { "$($after.mergeCommit.oid)" } else { '' }
     if ("$($after.state)" -ne 'MERGED' -or -not $oid) {
-        throw "#$Pr reads '$($after.state) $oid', not MERGED with a merge commit - after 'Base branch was modified' the default branch moved and nothing merged: sync the branch (/ouro:land step 2), then run this again; under --merge, a refusal (gh's message is above) is the repository disallowing merge commits or a ruleset requiring linear history: $fix; never land it as a squash instead"
+        throw "#$Pr reads '$($after.state) $oid', not MERGED with a merge commit - after 'Base branch was modified' the default branch moved and nothing merged: sync the branch (Sync-Branch.ps1), then run this again; under --merge, a refusal (gh's message is above) is the repository disallowing merge commits or a ruleset requiring linear history: $fix; never land it as a squash instead"
     }
     Write-Output "#$Pr merged as $oid"
 }

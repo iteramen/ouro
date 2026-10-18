@@ -55,7 +55,9 @@ for _stream in (sys.stdout, sys.stderr):
 import tomllib
 from pathlib import Path
 
-POLICIES = ("stop-at-pr", "trivial-merge")
+POLICIES = ("stop-at-pr", "trivial-merge", "merge-on-green")
+# ship.unattended_classes, under merge-on-green: the Flow classes the driver may merge unattended.
+UNATTENDED_CLASSES = ("express", "standard", "full")
 REVIEWS = ("copilot", "adversarial-review", "external-audit", "none")
 # ship.external_cli, required under REVIEWS' "external-audit" and allowed under any value: the
 # adapters bin/external-audit.py ships. One list, pinned equal to the installer's -ExternalCli
@@ -101,7 +103,7 @@ def gate_paths(data):
 
 # [models] roles and the aliases each may hold -- never a pinned version, so a role follows the
 # current model. Absent is the skill's own default, named beside each role in docs/binding.md.
-MODEL_ROLES = ("builder", "builder_trivial", "reviewer", "verifier", "weekly")
+MODEL_ROLES = ("builder", "builder_trivial", "reviewer", "verifier")
 MODEL_VALUES = ("opus", "sonnet", "haiku", "fable")
 # The contract's eight states and two modifiers: fixed by it, never declared under [labels].
 CONTRACT_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage",
@@ -120,7 +122,8 @@ SCHEMA = {
     "gate": {"areas": list, "run": str, "ci": str, "paths": list},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
-             "test_first_for_bugs": bool, "forbidden_check": str, "direct": list},
+             "test_first_for_bugs": bool, "forbidden_check": str, "direct": list,
+             "unattended_classes": list},
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
     "models": {role: str for role in MODEL_ROLES},
@@ -283,8 +286,14 @@ def validate(data):
         if isinstance(ship.get(key), str) and ship[key] != want:
             errors.append(f'ship.landing = "{landing}" and ship.{key} = "{ship[key]}" disagree: '
                           f'that landing means {key} = "{want}"')
-    if ship.get("review") == "none" and ship.get("policy") == "trivial-merge":
-        errors.append("ship.review = \"none\" forbids ship.policy = \"trivial-merge\" (no independent review, no unattended merge)")
+    if ship.get("review") == "none" and ship.get("policy") in ("trivial-merge", "merge-on-green"):
+        errors.append(f"ship.review = \"none\" forbids ship.policy = \"{ship['policy']}\" (no independent review, no unattended merge)")
+    if isinstance(ship.get("unattended_classes"), list):
+        if ship.get("policy") != "merge-on-green":
+            errors.append("ship.unattended_classes: only allowed with ship.policy = \"merge-on-green\"")
+        for cls in ship["unattended_classes"]:
+            if cls not in UNATTENDED_CLASSES:
+                errors.append(f"ship.unattended_classes: {cls!r} must be one of {', '.join(UNATTENDED_CLASSES)}")
     if ship.get("review") == "copilot" and not ship.get("copilot_bot_id"):
         errors.append("ship.copilot_bot_id: required when ship.review = \"copilot\"")
     if ship.get("review") == "external-audit" and not ship.get("external_cli"):
@@ -764,6 +773,18 @@ report_only = ["S9"]
     errs = validate(unattended)
     assert len(errs) == 1 and "forbids" in errs[0], errs
 
+    # merge-on-green is refused without a reviewer; unattended_classes needs it, takes only the
+    # three classes, and is absent by default (the driver reads that as express and standard).
+    green = base.replace('policy = "stop-at-pr"', 'policy = "merge-on-green"')
+    assert validate(tomllib.loads(green)) == [] and "unattended_classes" not in tomllib.loads(green)["ship"]
+    errs = validate(tomllib.loads(green.replace('review = "adversarial-review"', 'review = "none"')))
+    assert len(errs) == 1 and "forbids" in errs[0] and "merge-on-green" in errs[0], errs
+    assert validate(tomllib.loads(green.replace("[ship]\n", '[ship]\nunattended_classes = ["express", "full"]\n'))) == []
+    errs = validate(tomllib.loads(green.replace("[ship]\n", '[ship]\nunattended_classes = ["trivial"]\n')))
+    assert errs == ["ship.unattended_classes: 'trivial' must be one of express, standard, full"], errs
+    errs = validate(tomllib.loads(base.replace("[ship]\n", '[ship]\nunattended_classes = ["express"]\n')))
+    assert errs == ['ship.unattended_classes: only allowed with ship.policy = "merge-on-green"'], errs
+
     # sync and merge are independent: a repo may rebase to sync and still squash to land. Each is
     # optional, and absent means today's behaviour, so a binding written before them keeps working.
     for key, good, bad in (("sync", "rebase", "rebse"), ("merge", "merge", "rebase-merge")):
@@ -935,7 +956,7 @@ report_only = ["S9"]
 
     # [models] is optional, and so is every key in it; each key holds one of MODEL_VALUES.
     # Absent means the reading skill's own default (docs/binding.md), never a pinned version.
-    assert set(MODEL_ROLES) == {"builder", "builder_trivial", "reviewer", "verifier", "weekly"}, MODEL_ROLES
+    assert set(MODEL_ROLES) == {"builder", "builder_trivial", "reviewer", "verifier"}, MODEL_ROLES
     models = tomllib.loads(base + "\n[models]\n" + "\n".join(f'{role} = "sonnet"' for role in MODEL_ROLES) + "\n")
     assert validate(models) == [], validate(models)
     assert lookup(models, "models.reviewer") == "sonnet"

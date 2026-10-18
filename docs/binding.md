@@ -3,7 +3,7 @@
 Every `ouro` skill starts by reading `.claude/ouro.toml` at the repo root. It is the only
 place repo-specific facts live: the contract states the protocol and the skills implement it;
 the binding carries the bindings. **No binding, or a binding that fails validation, means the skill refuses to run** —
-the same honesty as `execute` refusing an issue without `agent-ready`. `/ouro:init` is the
+the same honesty as `/ouro:run` refusing an issue without `agent-ready`. `/ouro:init` is the
 exception: with no binding it runs the installer, which writes one; a binding that fails
 validation still makes it refuse.
 
@@ -62,7 +62,9 @@ run = "pwsh -File scripts/Test-Invariants.ps1 -BaseRef origin/main"
 # run = 'pwsh -File <ouro>/bin/Test-DocsFreshness.ps1'
 
 [ship]
-policy = "stop-at-pr"                    # stop-at-pr | trivial-merge   (effective policy = min(repo, issue))
+policy = "stop-at-pr"                    # stop-at-pr | trivial-merge | merge-on-green   (effective policy = min(repo, issue))
+unattended_classes = ["express", "standard"]   # optional, only under merge-on-green; the Flow classes the driver may merge
+                                         # unattended — express, standard, full (default: express, standard)
 review = "copilot"                       # copilot | adversarial-review | external-audit | none — see "Choosing ship.review"
 copilot_bot_id = "BOT_kgDOCnlnWA"        # required when review = "copilot"; that id is github.com-wide, not this repo's
 external_cli = "grok"                    # required when review = "external-audit"; the adapter bin/external-audit.py runs — grok, claude, codex or copilot today
@@ -83,10 +85,8 @@ direct = ["docs/notes/*.md"]             # optional — globs of the files the d
                                          # model. Absent means the reading skill's own default.
 builder = "sonnet"                       # opus | sonnet | haiku | fable (default: sonnet)
 builder_trivial = "sonnet"               # the `trivial`-labelled M build (default: sonnet)
-reviewer = "opus"                        # /ouro:review's dispatch (default: opus)
-verifier = "opus"                        # /ouro:drift's per-group verifier dispatch (default: opus)
-weekly = "sonnet"                        # the weekly-pass template's two `claude -p` sessions —
-                                         # see "Model tiers" (default: sonnet)
+reviewer = "opus"                        # the driver's REVIEW node (default: opus)
+verifier = "opus"                        # a dispatch of agents/verifier.md (default: opus)
 
 [rolling_issues]                         # exact titles; selected with an exact-title match, never `in:title`
 drift_audit = "Docs drift audit"
@@ -148,19 +148,19 @@ ruling_approvers = ["BoJl4apa"]          # logins whose comment closes a needs-r
                                          # which counts a **Stop:**, **Triage** or **Checkpoint
                                          # finding** comment only from them, and whose Assisted
                                          # count reads the set without the bot. List every login
-                                         # that edits an agent-ready body or runs /ouro:triage,
-                                         # /ouro:execute or /ouro:fuse: a checkpoint finding counts
+                                         # that edits an agent-ready body or runs /ouro:triage
+                                         # or /ouro:run: a checkpoint finding counts
                                          # as delivered only from these logins (and the bot's), and
                                          # a finding from another login repeats the checkpoint run
 ```
 
 ### Choosing `ship.review`
 
-Choose by what the reviewer can observe, not by its name. `adversarial-review` dispatches
-`/ouro:review`, which reads the repository and executes probes against what its brief names — the
-suite, a gate, a case the session sets. `external-audit` and `copilot` read without running the
-suite: a repository-reading audit, run by the CLI `ship.external_cli` names (`/ouro:external-audit`,
-`bin/external-audit.py`), and GitHub's review of the pull request, which gathers repository
+Choose by what the reviewer can observe, not by its name. `adversarial-review` runs the driver's
+REVIEW node (`bin/ouro/prompts/REVIEWER-PROMPT.md`), which reads the repository and executes probes
+against what its brief names — the suite, a gate, a case the node sets. `external-audit` and
+`copilot` read without running the suite: a repository-reading audit, run by the CLI
+`ship.external_cli` names (`bin/external-audit.py`), and GitHub's review of the pull request, which gathers repository
 context and may run configured static analysers. `ship.external_model` names the model the CLI
 runs (`"default"`, the CLI's own default, when absent); a model the CLI refuses counts as a
 round-1 failure, the same as an absent CLI. A reader and a prober are pointed at different
@@ -170,35 +170,30 @@ things and tend to find different defects, so the choice is a real one.
 a range, or a claim set; it answers with a JSON verdict that names the files it read; two rounds
 at most, a third only for a new blocker, with the triage of round 1 given to round 2.
 
-**Who reviews what**, by the value, the issue's `Size:` line (contract §4) and whether
-`/ouro:fuse` built it, is this table and nowhere else: contract §4, `/ouro:execute`,
-`/ouro:review`, `/ouro:fuse`, `/ouro:triage`, `/ouro:land` and `/ouro:e2e` cite it. The table
-picks which reviewer a cell gets; the review's weight within the cell follows the issue's
-`Flow:` class (contract §4): the reading brief for express, sized with its budget for standard,
-the probe format for full.
+**Who reviews what**, by the value and the issue's `Size:` line (contract §4), is this table and
+nowhere else: the driver's REVIEW step follows it. The table picks which reviewer a cell gets; the
+review's weight within the cell follows the issue's `Flow:` class (contract §4): the reading brief
+for express, sized with its budget for standard, the probe format for full.
 
 | | `adversarial-review` | `copilot` | `external-audit` | `none` |
 |---|---|---|---|---|
-| **S**, not fused | `/ouro:review` | Copilot on the PR | the reader | no reviewer |
-| **M**, not fused | `/ouro:review` | `/ouro:review`, then Copilot on the PR | `/ouro:review` | `/ouro:review` |
-| **S or M, fused** (`/ouro:fuse` step 5, per file cluster) | `/ouro:review` per cluster | `/ouro:review` per cluster, then Copilot on the PR | the reader per cluster | `/ouro:review` per cluster |
+| **S** | the REVIEW node | Copilot on the PR | the reader | no reviewer |
+| **M** | the REVIEW node | the REVIEW node, then Copilot on the PR | the REVIEW node | the REVIEW node |
 
 **The availability rule.** An unavailable reader — the CLI `ship.external_cli` names is not
 found, round 1 exits 1, round 1 exits 3 twice, or the run may not call it (a policy or network
-rule forbids it) — falls back to `/ouro:review` in every cell that names the reader, and the
+rule forbids it) — falls back to the REVIEW node in every cell that names the reader, and the
 record says so. An `S` re-derived as `M` after the commit (contract §4) takes the `M` row. Under
 `stop-at-pr` the owner sees every PR whatever the value. The binding names one value, and nothing
-requires it to name a second; the `/ouro:review` every `M` takes is the loop's own.
+requires it to name a second; the REVIEW node every `M` takes is the loop's own.
 
 ### The landing policy
 
 `ship.landing` names the pair below it in one word: how `land` brings a branch up to date before
 the PR, and how the PR lands. It is what `/ouro:init` asks at onboarding, and what the installer
-writes into a new binding. `/ouro:land`'s scripts read `sync` and `merge` through the two dotted
-reads below, and land the way they answer. A range with more than one author lands by
+writes into a new binding. The driver's landing scripts read `sync` and `merge` through the two
+dotted reads below, and land the way they answer. A range with more than one author lands by
 merge commit under either merge answer, since a squash would reassign their work.
-`/ouro:land-batch` reads `merge`, lands squash commits only, and refuses a batch on a binding
-that lands by merge.
 
 | `landing` | `sync` | `merge` | the default branch's history |
 |---|---|---|---|
@@ -222,18 +217,11 @@ absent, which is the reader's cue to take today's behaviour.
 never a pinned version, so a role follows whatever the alias currently means. Every key is
 optional; absent means the reading skill's own default, named in the schema above.
 
-`builder` and `builder_trivial` are `/ouro:execute`'s M build dispatch, read at its step 3 —
-`builder` for the dispatch as such, `builder_trivial` when the issue carries `trivial`.
-`/ouro:fuse` also reads `builder`, for its builders and its fix-round builder.
-`reviewer` is `/ouro:review`'s own dispatch, at its step 2 — the adversarial pass an M not built
-by `/ouro:fuse` always takes, whatever `ship.review` names. `verifier` is `/ouro:drift`'s
-per-group verifier dispatch, passed on every call at its step 4; `agents/verifier.md`'s own
-front matter (`model: opus`) is only the fallback for a call the skill passes none. `--deep`
-overrides it, on every call, with the session's own top tier.
-
-`weekly` is `templates/weekly-pass.yml`'s two `claude -p` sessions, the drift audit and the intake
-grading: each step reads it with `ouro-binding.py get models.weekly`, as the template's other steps
-read their keys. The smoke check keeps `--model haiku`: it tests reachability, not work.
+`builder` is the driver's BUILD, TRIAGE and FOLLOW-UP nodes, and its fix-round build;
+`builder_trivial` is the BUILD node when the issue carries `trivial`. `reviewer` is the REVIEW
+node, the adversarial pass an M always takes whatever `ship.review` names. `verifier` is the
+model of a dispatch of `agents/verifier.md`, whose own front matter (`model: opus`) is only the
+fallback for a call that passes none.
 
 ### The forbidden-token check
 
@@ -267,7 +255,9 @@ fail-closed whatever a binding declares, since it guards the plugin's own text; 
 follows this same rule, read from the binding at the session's working directory and the
 repository its `repo.slug` names: `"off"` passes a hit too, a call naming another repository
 with `-R` reads as if the key were absent, no key follows the visibility only with no list, and a
-binding that fails `check` blocks as `"required"` does.
+binding that fails `check` blocks as `"required"` does. The hook's scan of the command text leaves
+out the value of a `-R` or `--repo` written outside quotes: it addresses the call, it is not
+published.
 
 ## The machine-local overlay — `.claude/ouro.local.toml`
 
@@ -287,16 +277,16 @@ shared config, move it here or omit it. A checkout arriving only from the overla
 ## What a consumer must gitignore
 
 Two entries, beside whatever the repo already ignores: `.claude/ouro.local.toml` (the overlay
-above) and `.claude/worktrees/`. `/ouro:execute` runs every issue in a worktree at
+above) and `.claude/worktrees/`. The driver runs every issue in a worktree at
 `.claude/worktrees/<N>-<slug>`, inside the repo; unignored, creating it leaves the tree dirty,
-and `/ouro:land`'s clean-working-tree precondition then refuses the branch execute just built.
+and the landing steps' clean-working-tree precondition then refuses the branch it just built.
 ouro ships no `.gitignore` template; `<ouro>/bin/Install-Ouro.ps1` appends each entry that no
 `.gitignore` in the work tree already ignores, and without it they are the repo's to add. It
 asks git about `.claude/worktrees/` as an empty directory in a temp tree holding copies of the
 repo's `.gitignore` files, so the question writes nothing into the work tree. Before it adds
-that worktree, `/ouro:execute` creates its empty directory, runs
+that worktree, the driver creates its empty directory, runs
 `git check-ignore -q --no-index .claude/worktrees/<N>-<slug>` on it, and when the path is not
-ignored removes the directory and each parent that leaves empty, then stops with the line to
+ignored removes the directory, then stops with the line to
 add — in that clone, by any exclude source; the `.gitignore` entry is what makes every clone
 pass. The directory comes first because git applies a rule ending in a slash only to a path it
 sees as a directory. The overlay entry is unchecked.
@@ -306,8 +296,11 @@ sees as a directory. The overlay entry is unchecked.
 - `schema`, `repo.slug`, `repo.default_branch`, `ship.policy`, `ship.review` and
   `owner.ruling_approvers` are required.
 - Unknown tables or keys fail. A typo is a silent misconfiguration otherwise.
-- `ship.review = "none"` forbids `ship.policy = "trivial-merge"` — no reviewer beyond an M's
-  `/ouro:review`, no unattended merge.
+- `ship.review = "none"` forbids `ship.policy = "trivial-merge"` and `"merge-on-green"` — no
+  independent reviewer, no unattended merge.
+- `ship.unattended_classes` is allowed only under `ship.policy = "merge-on-green"` and holds only
+  `express`, `standard` and `full`. Absent, the driver reads `["express", "standard"]`; the owner
+  adds `full` by hand, and the driver never changes the list.
 - `ship.review = "copilot"` requires `ship.copilot_bot_id`.
 - `ship.review = "external-audit"` requires `ship.external_cli`, one of the adapters
   `bin/external-audit.py` ships (`grok`, `claude`, `codex`, `copilot`); `external_cli` is allowed
@@ -414,21 +407,19 @@ sees as a directory. The overlay entry is unchecked.
 - **Ship policy is the minimum of repo and issue.** A `trivial` label cannot exceed
   `ship.policy`; `stop-at-pr` in the binding means `trivial` is advisory and the run stops at the
   PR.
-- **A gate is the narrowest command that can fail for the diff, in a repository that never
-  batch-lands.** `/ouro:land-batch` runs every `[[gate]]` as its only check on the composed tree,
-  so a repository that batches keeps its full suite in a gate and pays for that run on each PR.
-  Elsewhere, `execute` runs every matching `[[gate]]` as bound, and names one that repeats a PR's
-  required check (`gh pr checks <PR> --required`) as a binding smell: its `run` should name the
-  narrow, already-scoped check and leave the full suite to CI.
-- **Protected prefixes are absolute.** `land` and `land-batch` refuse them; `execute` never cuts
-  a branch from one.
+- **A gate is the narrowest command that can fail for the diff.** The driver runs the matching
+  `[[gate]]` entries as bound, and a gate that repeats a PR's required check
+  (`gh pr checks <PR> --required`) is a binding smell: its `run` should name the narrow,
+  already-scoped check and leave the full suite to CI.
+- **Protected prefixes are absolute.** The driver refuses to land them and never cuts a branch
+  from one.
 - **Overlays are read, not obeyed as protocol.** They add repo checklists to a named step; a
   binding cannot remove, reorder, or replace a step.
 - **Nothing in a skill names a repo, a path, a bot id, a workflow, or a script.** If it does,
   that is a defect in the skill — file it against `ouro`.
 - **`ship.test_first_for_bugs` is accepted and read by nothing.** The schema keeps the key valid
-  so an existing binding does not fail `check`; `execute`'s test-first bullet runs unconditionally
-  for a bug whose code has a test host.
+  so an existing binding does not fail `check`; the BUILD node's test-first rule runs
+  unconditionally for a bug whose code has a test host.
 - **The plugin targets github.com.** The binding has no host key, and no gate or template names
   a host to `gh`; a skill names one only where `/ouro:init` has the operator add `--hostname` to
   its bot-id lookup off github.com. A consumer on another GitHub host sets `GH_HOST` in the
@@ -439,3 +430,7 @@ sees as a directory. The overlay entry is unchecked.
   variables `gh help environment` names for that kind of host, or with the host's stored
   credentials where none is set. A host key in the binding is absent by decision, not oversight;
   what would add one is a consumer that actually runs on such a host.
+- **A session's host must reach GitHub's GraphQL API.** The skills' tracker calls (`gh issue`,
+  `gh pr`, `gh api graphql`) and the scripts they run all use it. A Claude Code cloud session's
+  proxy serves GitHub's REST API and refuses GraphQL, so the driver's first tracker read
+  (`gh issue view`) fails there and the run ends as a driver error (exit 1).

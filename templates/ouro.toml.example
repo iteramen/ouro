@@ -19,7 +19,10 @@ run = "uv run pytest -q"
                                           # `run` is a dev-box wrapper CI cannot run as written
 
 [ship]
-policy = "stop-at-pr"
+policy = "stop-at-pr"                    # stop-at-pr | trivial-merge | merge-on-green
+# Under merge-on-green only: the Flow classes the driver merges unattended once the checks are
+# green and the review is clean. Default: express and standard. Table: ouro/docs/binding.md.
+# unattended_classes = ["express", "standard"]
 review = "adversarial-review"
 # How a branch is brought up to date and how its PR lands, as one named pair:
 # merge-squash | rebase-squash | rebase-merge | merge-merge. Default: merge-squash -- merge to
@@ -37,13 +40,12 @@ landing = "merge-squash"
 
 [models]
 # Optional, like every table below but [owner]. Absent means each role runs the reading
-# skill's own default -- builder sonnet, builder_trivial sonnet, reviewer opus, verifier opus, weekly
-# sonnet. Values: opus | sonnet | haiku | fable. Table: ouro/docs/binding.md.
+# skill's own default -- builder sonnet, builder_trivial sonnet, reviewer opus, verifier opus.
+# Values: opus | sonnet | haiku | fable. Table: ouro/docs/binding.md.
 # builder = "sonnet"
 # builder_trivial = "sonnet"
 # reviewer = "opus"
 # verifier = "opus"
-# weekly = "sonnet"
 
 [rolling_issues]
 drift_audit = "Docs drift audit"

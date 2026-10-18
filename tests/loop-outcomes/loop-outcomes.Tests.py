@@ -3,7 +3,7 @@
 The script is loaded as a module. GitHub's answer is inline issue and pull-request nodes, or a gh
 stand-in (a python script that proves itself first, answers every call the code under test makes
 and logs each one); git runs against scratch repositories built under a temp directory with fixed
-commit dates. Nothing touches the network. One row reads skills/land/SKILL.md, whose `Review:`
+commit dates. Nothing touches the network. One row reads docs/contract.md, whose `Review:`
 pattern the script must quote exactly. Each row names the rule it holds, and each row that
 asserts an absence runs beside a control that must present.
 
@@ -730,9 +730,9 @@ FENCED = "```\nReview: rounds:9 findings:H9/M9/L9 false-sentences:9\n```"
 
 
 def review_rows():
-    skill = (BASE / "skills" / "land" / "SKILL.md").read_text(encoding="utf-8")
+    skill = (BASE / "docs" / "contract.md").read_text(encoding="utf-8")
     spans = re.findall(r"`(\^Review: [^`\n]*)`", skill)
-    check("the land skill states the Review pattern once, as one backticked span", len(spans) == 1)
+    check("the contract states the Review pattern once, as one backticked span", len(spans) == 1)
     check("the script's pattern is that span, character for character", spans == [lo.REVIEW_PATTERN])
     cases = [
         ("a body with no line has none", "Fixes #1\n\nSome text", None),
@@ -820,6 +820,10 @@ def quality_pr_rows():
     check("W37: rounds over the 4 numeric lines (2, 0, 1, 1): median 1, max 2", (w37["median"], w37["max"]) == (1, 2))
     check("W38: a PR naming two issues counts once, and the line counts", w38["landed"] == 2 and w38["line"] == 2)
     check("W38: rounds 3 and 2 give median 2.5 and max 3", (w38["median"], w38["max"]) == (2.5, 3))
+    part = lo.pr_quality([pr(114, "Part 1/2 of #120\n" + LINE, merged=d(15), oid=fake(114)),
+                          pr(115, "see Part 1/2 of #120\n" + LINE, merged=d(15), oid=fake(115))], BASE_COMMITS, at("2026-09-01"))
+    check("a landed part's pull request counts with its Review line; a Part mention mid-line does not",
+          {k: lo.pr_figures(v)["landed"] for k, v in part.items()} == {"2026-W38": 1})
     none_only = lo.pr_figures([None, "none"])
     check("a week with no numeric line has no median or maximum and no mean",
           none_only["median"] is None and none_only["max"] is None and none_only["counted"] == 0)

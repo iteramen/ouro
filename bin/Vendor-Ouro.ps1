@@ -8,12 +8,12 @@
       agents/*          -> <repo>/.claude/agents/
       bin/*.ps1         -> <repo>/<ScriptsDir>/           (default scripts)
       bin/ouro-binding.py -> <repo>/<ScriptsDir>/         (the gates read the binding through it)
-      bin/apply-manifest.py -> <repo>/<ScriptsDir>/       (triage and the weekly pass run it)
+      bin/apply-manifest.py -> <repo>/<ScriptsDir>/       (applies a triage manifest)
       bin/external-audit.py -> <repo>/<ScriptsDir>/       (the external-audit skill runs it)
       bin/drift-claims.py -> <repo>/<ScriptsDir>/         (hashes the drift audit's claim evidence)
       bin/forbidden-tokens.py -> <repo>/<ScriptsDir>/     (checks text against the private token list)
-      (not copied: bin/loop-outcomes.py ships with the plugin, and the weekly pass runs it from its
-       own plugin checkout; bin/ouro-version.py reads the user-scope plugin install, never a copy)
+      (not copied: bin/loop-outcomes.py, which the driver's weekly runs from the plugin;
+       bin/ouro-version.py reads the user-scope plugin install, never a copy)
       tests/*           -> <repo>/<ScriptsDir>/tests/     (the fixture suites find the scripts there)
       docs/contract.md  -> <repo>/docs/ouro-contract.md
       docs/docs-governance.md         -> <repo>/docs/ouro-docs-governance.md
@@ -205,8 +205,8 @@ if (Test-Path -LiteralPath $binding) {
     $plan += , @($binding, (Join-Path $ScriptsDir 'ouro-binding.py'))
 }
 else { Write-Warning "bin/ouro-binding.py not found in the plugin at $Plugin - skipped" }
-# The triage skill and the weekly pass both run the applier by name, and its suite is vendored
-# with it -- a tree told to run a file the copy leaves out carries a gate that cannot pass.
+# The applier's suite is vendored with it -- a tree told to run a file the copy leaves out
+# carries a gate that cannot pass.
 $applier = Join-Path $Plugin 'bin/apply-manifest.py'
 if (Test-Path -LiteralPath $applier) {
     $plan += , @($applier, (Join-Path $ScriptsDir 'apply-manifest.py'))
@@ -297,7 +297,7 @@ foreach ($s in $skipped) { Write-Host "  - $s" }
 # Shown with forward slashes on every platform: Windows keeps native separators in $ScriptsDir,
 # and these lines read as a relative path a consumer pastes, not a native one.
 $ScriptsDirShown = $ScriptsDir -replace '\\', '/'
-Write-Host "  - .github/workflows/*: point every ouro/bin/ path at $ScriptsDirShown/, except the weekly pass's ouro/bin/loop-outcomes.py step, which keeps its plugin checkout"
+Write-Host "  - .github/workflows/*: point every ouro/bin/ path at $ScriptsDirShown/"
 Write-Host "  - .claude/skills/*: point every <ouro>/bin/ path at $ScriptsDirShown/"
 Write-Host "  - .github/workflows/*: actions/ is not vendored, so a step that uses: the ouro docs-freshness Action becomes an actions/setup-python step (python-version '3.12': reading [docs] needs python3 3.11+, and an older python3 fails the gate with the floor message) and a pwsh step running $ScriptsDirShown/Test-DocsFreshness.ps1 -Mode Gate"
 Write-Host '  - .claude/settings.json (or settings.local.json): remove the ouro marketplace and plugin entries'

@@ -191,7 +191,7 @@ function Get-PrVerdict {
 }
 
 # Deleting an origin branch that another open pull request is based on closes or strands that
-# pull request -- the rule /ouro:land's merge and cleanup steps follow. $null, or @{ Skip = why }.
+# pull request -- the rule the driver's merge and cleanup steps follow. $null, or @{ Skip = why }.
 function Get-BaseVerdict {
     param([string]$Branch)
     $r = Invoke-Native gh @('pr', 'list', '-R', $slug, '--base', $Branch, '--state', 'open',

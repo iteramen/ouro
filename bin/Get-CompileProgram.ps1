@@ -1,17 +1,20 @@
 <#
 .SYNOPSIS
-    Renders the footprint analyzer's JSON as a proposed program, in text: waves, fuse batches,
+    Renders the footprint analyzer's JSON as a proposed program, in text: waves, batches,
     the rulings that hold the most work, what an umbrella needs, and cleanup candidates.
 .DESCRIPTION
-    The renderer of /ouro:compile. Read-only: it writes nothing to the tracker and nothing to the
+    The renderer of `python3 bin/ouro compile`. Read-only: it writes nothing to the tracker and nothing to the
     tree, and it runs no work. It reads the output of Get-FootprintGraph.ps1 (schema 2) from
     standard input, or from -Graph <file> for a replay, and prints one intent, or the account of
     one issue under -Explain. It is deterministic: the same graph and the same reads print
     byte-identical text.
 
     Reads beside the graph, each by `gh ... -R <repo>` unless the matching parameter hands the JSON
-    over (for tests): the open pull requests, always (an issue named by a `Fixes #N` line at the
-    start of a pull request's body is in flight); the `blocked` issues, when an intent needs the
+    over (for tests): the open pull requests, always (an issue a pull request names in its
+    closingIssuesReferences, or by a `Fixes #N` or `Part k/n of #N` line at the start of a body
+    line, is in flight; one the graph reads as not agent-ready is printed under the header as a
+    finding, `finding: #N ... is <state> with an open pull request, PR #n`, and is neither in
+    flight nor in the count); the `blocked` issues, when an intent needs the
     trigger lines; the issues of every state with their labels, when a scope or a `finish` target
     is given or, under `batch`, when -Areas declares an area (that read adds each issue's body);
     and one issue, for a numeric `finish` target. A failed read exits 1 with the reason,
@@ -33,21 +36,27 @@
                     or right after a list marker, and closes on a line of the same character, at
                     least as long as the opening one, with no text after it) with
                     their state, the ready ones in wave order and then those in no wave by number,
-                    the blocked ones with their trigger line, the needs-ruling ones with the two
-                    unblock columns, a closed one listed as closed. An issue: its wave and
+                    the blocked ones with their trigger line, marked `fired` when the line holds a
+                    reference and every one it holds is closed (unblock's reference rule; a state
+                    the issue list does not give counts as open), the needs-ruling ones with the
+                    two unblock columns, a closed one listed as closed. Then `Next moves`, one per
+                    child, in that order: an agent-ready child its /ouro:run or, in flight, its PR;
+                    a needs-ruling one the owner's ruling; a fired blocked one and a needs-triage
+                    one /ouro:triage; each saying whether it needs the owner. An issue: its wave and
                     the issues in earlier waves it collides with. An area: throughput over the
                     issues carrying that label.
       cleanup    -- each issue's unresolved paths, and the duplicate candidates: pairs whose
                     non-mirrored footprints overlap by at least two thirds of their union, both
                     holding at least three such files, named for the caller to judge from the bodies.
                     One line points at Invoke-BranchSweep.ps1 for branches with no pull request.
-      batch      -- the analyzer's batches, in its order, each as /ouro:fuse arguments, with its
+      batch      -- the analyzer's batches, in its order, each as a `batch:` line of issue numbers, with its
                     members' shared files and each collision a member has outside the batch. A
-                    batch is a proposed fuse set, not a region: batches are not conflict-free, so
-                    they land one after another and /ouro:fuse re-checks each build against the
-                    diff. In-flight and out-of-scope members are dropped; a batch left with fewer
-                    than two members is dropped; a member's collision with a dropped member of its
-                    own batch is printed, marked. After them, under `Area batches`, the sets the
+                    batch is a proposed set, not a region: batches are not conflict-free, so
+                    they land one after another and each build is re-checked against the
+                    diff. In-flight and out-of-scope members are dropped, and the survivors split
+                    into the groups their collisions link; each group of two or more prints as its
+                    own set, a group of one in none; a member's collision with a dropped member of
+                    its own batch is printed, marked. After them, under `Area batches`, the sets the
                     area rule below forms. -Width does not apply.
     The area rule. An issue is in an area batch when the graph reads it as agent-ready and it is in
     no analyzer batch (printed or not), is not in flight, is in scope, carries one of -Areas and
@@ -58,17 +67,17 @@
     with `Flow:`, its value the word after it, compared with its case, and a line with no word after
     it reads as neither; a body with no such line reads as standard. An issue carrying several areas
     goes under the first of -Areas it carries. Each area's issues, in ascending order, form groups
-    of at most five, and a group of one is not printed. Each group prints as a /ouro:fuse line with
+    of at most five, and a group of one is not printed. Each group prints as a `batch:` line with
     an `area: <label>` line under it, the label as -Areas spells it. With no area declared there is
     no area batch, and nothing is read for one.
-    An in-flight issue is dropped from throughput's waves and from batch's fuse commands. Elsewhere
+    An in-flight issue is dropped from throughput's waves and from batch's lines. Elsewhere
     it is marked `(in flight, PR #n)`: in unblock's rows and columns, cleanup's lines and pairs, a
     collision list or note, a batch collision line, and the batch an -Explain or a finish on an
     issue prints. Finish's own children spell it `in flight, PR #n` after a comma, as they spell
     `outside the scope`, and throughput's in-flight list gives `(PR #n)`. The `(dropped from the
     batch of ...)` note and unblock's `For a sentence of judgment` line print bare numbers. A
-    `Fixes` line marks an issue the graph never read, a blocked one, the same way; the `in flight`
-    count in the header is of graph issues only.
+    pull request marks an issue the graph never read, a blocked one, the same way; the `in flight`
+    count in the header is of agent-ready graph issues only.
     -Explain <N> replaces the intent: N's footprint and unresolved paths, every collision (most
     shared files first), its batch, its re-packed wave and the earlier-wave issues it collides
     with, whether it is in flight, and for a needs-ruling N its two unblock columns.
@@ -87,8 +96,9 @@
     Before it prints, the script checks its own lists: every in-scope agent-ready issue appears
     once among the waves, the empty-footprint list and the in-flight list; no wave exceeds the
     width; every batch holds five or fewer; and, under `batch`, the pairs it collects for the batch
-    lines, each surviving member against an issue outside the surviving members, equal a recount
-    from `collisions`; the printed lines are not read back. The first three run before any intent
+    lines, each printed member against an issue outside its printed set, equal a recount from
+    `collisions` over the same sets; under `finish` an umbrella prints one next move per child that
+    has one; the printed lines are not read back. The first three run before any intent
     prints. A failed check prints nothing on stdout, names the check on stderr and exits 3.
 
     Exit 0 on output; 1 on a failed read, a graph that is not schema 2 or not JSON; 2 on a usage
@@ -111,7 +121,8 @@
 .PARAMETER Repo
     owner/name every gh call names. Default: Get-RepoSlug.ps1 (the binding, else origin).
 .PARAMETER PrsJson
-    JSON array [{number,body}] of open pull requests, in place of the gh read (for tests).
+    JSON array [{number,body,closingIssuesReferences:[{number}]}] of open pull requests, in place
+    of the gh read (for tests); a missing closingIssuesReferences reads as empty.
 .PARAMETER BlockedJson
     JSON array [{number,title,body}] of open blocked issues, in place of the gh read (for tests).
 .PARAMETER IssuesJson
@@ -252,20 +263,25 @@ try {
 
     # --- in flight ---------------------------------------------------------------------------
     $prs = if ($PrsJson) { ConvertTo-Rows $PrsJson '-PrsJson' }
-           else { ConvertTo-Rows (Read-Gh 'the open pull requests' @('pr', 'list', '--state', 'open', '--limit', '200', '--json', 'number,body')) 'the open pull request read' }
+           else { ConvertTo-Rows (Read-Gh 'the open pull requests' @('pr', 'list', '--state', 'open', '--limit', '200', '--json', 'number,body,closingIssuesReferences')) 'the open pull request read' }
     Add-LimitWarning $prs 200 'the open pull request read'
     $inFlight = @{}
     $fixes = @{}
+    $slug = if ($script:Slug) { $script:Slug } else { $Repo }
     foreach ($p in ($prs | Sort-Object { [int]$_.number })) {
+        $named = @(@($p.closingIssuesReferences) | Where-Object { $null -ne $_ -and (-not $_.repository -or -not $slug -or "$($_.repository.owner.login)/$($_.repository.name)" -ieq $slug) } | ForEach-Object { [int]$_.number })
         foreach ($line in ("$($p.body)" -split "`r?`n")) {
-            $m = [regex]::Match($line, '^Fixes #(\d+)')
-            if ($m.Success) {
-                $n = [int]$m.Groups[1].Value
-                if (-not $fixes.ContainsKey($n)) { $fixes[$n] = [int]$p.number }
-                if ($issueBy.ContainsKey($n) -and -not $inFlight.ContainsKey($n)) { $inFlight[$n] = [int]$p.number }
-            }
+            $m = [regex]::Match($line, '^Fixes #(\d+)|^(?i:`?Part \d+/\d+ of #(\d+))')
+            if ($m.Success) { $named += [int]"$($m.Groups[1].Value)$($m.Groups[2].Value)" }
+        }
+        foreach ($n in $named) {
+            if (-not $fixes.ContainsKey($n)) { $fixes[$n] = [int]$p.number }
+            if ($issueBy.ContainsKey($n) -and -not $inFlight.ContainsKey($n)) { $inFlight[$n] = [int]$p.number }
         }
     }
+    # An in-flight issue the graph reads as not agent-ready was never wave-eligible: a finding, not in flight.
+    $flightOff = @($inFlight.Keys | Where-Object { $issueBy[$_].state -cne 'agent-ready' } | Sort-Object)
+    foreach ($n in $flightOff) { $inFlight.Remove($n) }
 
     # --- scope and the issue list ------------------------------------------------------------
     $scopeLabel = ''
@@ -414,42 +430,60 @@ try {
         }
         $groups
     }
+    # A batch's survivors split into the groups linked by collisions among them; a group of one is no batch.
+    function Get-BatchSets([int]$K) {
+        $mem = @($batches[$K] | Where-Object { -not $inFlight.ContainsKey($_) -and (Test-InScope $_) })
+        $left = [System.Collections.Generic.List[int]]::new([int[]]$mem)
+        while ($left.Count) {
+            $set = [System.Collections.Generic.List[int]]::new()
+            $set.Add($left[0]); $left.RemoveAt(0)
+            for ($i = 0; $i -lt $set.Count; $i++) {
+                foreach ($c in @($g.collisions)) {
+                    $o = if ([int]$c.a -eq $set[$i]) { [int]$c.b } elseif ([int]$c.b -eq $set[$i]) { [int]$c.a } else { 0 }
+                    if ($left.Contains($o)) { $set.Add($o); [void]$left.Remove($o) }
+                }
+            }
+            if ($set.Count -ge 2) { , @($set | Sort-Object) }
+        }
+    }
     function Add-Batch {
         $printed = 0
         $got = [System.Collections.Generic.List[string]]::new()
         $want = [System.Collections.Generic.List[string]]::new()
+        $setsOf = @{}
+        for ($k = 0; $k -lt $batches.Count; $k++) { $setsOf[$k] = @(Get-BatchSets $k) }
         for ($k = 0; $k -lt $batches.Count; $k++) {
             $all = $batches[$k]
-            $mem = @($all | Where-Object { -not $inFlight.ContainsKey($_) -and (Test-InScope $_) })
-            $dropped = @($all | Where-Object { $mem -notcontains $_ })
+            $dropped = @($all | Where-Object { $inFlight.ContainsKey($_) -or -not (Test-InScope $_) })
             if ($dropped.Count) { Say "(dropped from the batch of $(Join-Nums $all): $(Join-Nums $dropped), in flight or outside the scope)" }
-            if ($mem.Count -lt 2) { continue }
-            $printed++
-            Say "/ouro:fuse $($mem -join ' ')"
-            foreach ($c in @($g.collisions)) {
-                if ($mem -contains [int]$c.a -and $mem -contains [int]$c.b) { Say "  shared: #$($c.a) #$($c.b) on $(@($c.files) -join ', ')" }
+            foreach ($mem in $setsOf[$k]) {
+                $printed++
+                Say "batch: $($mem -join ' ')"
+                foreach ($c in @($g.collisions)) {
+                    if ($mem -contains [int]$c.a -and $mem -contains [int]$c.b) { Say "  shared: #$($c.a) #$($c.b) on $(@($c.files) -join ', ')" }
+                }
+                foreach ($n in $mem) {
+                    if (-not $col.ContainsKey($n)) { continue }
+                    $across = @($col[$n] | Where-Object { $mem -notcontains $_.Other } | ForEach-Object { $_.Other } | Sort-Object)
+                    $parts = @()
+                    $kin = @($across | Where-Object { $all -contains $_ })
+                    $inBatch = @($across | Where-Object { $all -notcontains $_ -and $batchOf.ContainsKey($_) })
+                    $loose = @($across | Where-Object { -not $batchOf.ContainsKey($_) })
+                    if ($kin.Count) { $parts += "collides with dropped batch members $((@($kin | ForEach-Object { Format-Other $_ })) -join ', ') ($($kin.Count))" }
+                    if ($inBatch.Count) { $parts += "collides across batches with $((@($inBatch | ForEach-Object { Format-Other $_ })) -join ', ') ($($inBatch.Count))" }
+                    if ($loose.Count) { $parts += "collides with unbatched $((@($loose | ForEach-Object { Format-Other $_ })) -join ', ') ($($loose.Count))" }
+                    if ($parts.Count) { Say "  #$n $($parts -join '; ')" }
+                    foreach ($o in $across) { $got.Add("$n>$o") }
+                }
+                Say '  A proposed set, not a region, and not conflict-free: batches land one after another, and each build is re-checked against the diff.'
             }
-            foreach ($n in $mem) {
-                if (-not $col.ContainsKey($n)) { continue }
-                $across = @($col[$n] | Where-Object { $mem -notcontains $_.Other } | ForEach-Object { $_.Other } | Sort-Object)
-                $parts = @()
-                $kin = @($across | Where-Object { $all -contains $_ })
-                $inBatch = @($across | Where-Object { $all -notcontains $_ -and $batchOf.ContainsKey($_) })
-                $loose = @($across | Where-Object { -not $batchOf.ContainsKey($_) })
-                if ($kin.Count) { $parts += "collides with dropped batch members $((@($kin | ForEach-Object { Format-Other $_ })) -join ', ') ($($kin.Count))" }
-                if ($inBatch.Count) { $parts += "collides across batches with $((@($inBatch | ForEach-Object { Format-Other $_ })) -join ', ') ($($inBatch.Count))" }
-                if ($loose.Count) { $parts += "collides with unbatched $((@($loose | ForEach-Object { Format-Other $_ })) -join ', ') ($($loose.Count))" }
-                if ($parts.Count) { Say "  #$n $($parts -join '; ')" }
-                foreach ($o in $across) { $got.Add("$n>$o") }
-            }
-            Say '  A proposed fuse set, not a region, and not conflict-free: batches land one after another, and /ouro:fuse re-checks each build against the diff.'
         }
         $areaGroups = @(Get-AreaGroups)
         if (-not $printed -and -not $areaGroups.Count) { Say 'No batch to print. See throughput.' }
         if ($areaGroups.Count) {
             Say 'Area batches (issues in no batch above, grouped by area, at most five to a group):'
             foreach ($grp in $areaGroups) {
-                Say "/ouro:fuse $($grp.Members -join ' ')"
+                Say "batch: $($grp.Members -join ' ')"
                 Say "  area: $($grp.Area)"
             }
         }
@@ -458,9 +492,8 @@ try {
             foreach ($pair in @(@([int]$c.a, [int]$c.b), @([int]$c.b, [int]$c.a))) {
                 $x = $pair[0]; $y = $pair[1]
                 if (-not $batchOf.ContainsKey($x)) { continue }
-                $bx = $batches[$batchOf[$x]]
-                $mem = @($bx | Where-Object { -not $inFlight.ContainsKey($_) -and (Test-InScope $_) })
-                if ($mem.Count -lt 2 -or $mem -notcontains $x -or $mem -contains $y) { continue }
+                $mem = @($setsOf[$batchOf[$x]] | Where-Object { $_ -contains $x })
+                if (-not $mem.Count -or $mem[0] -contains $y) { continue }
                 $want.Add("$x>$y")
             }
         }
@@ -554,6 +587,7 @@ try {
             $pos = if ($waveOf.ContainsKey($n)) { $waveOf[$n] } else { [int]::MaxValue }
             [pscustomobject]@{ N = $n; Kind = $kind; Pos = $pos; St = $st }
         }
+        $moves = [System.Collections.Generic.List[string]]::new()
         foreach ($r in ($rank | Sort-Object Kind, Pos, N)) {
             $n = $r.N
             if ($r.St -ceq 'CLOSED') { Say "  $(Format-Issue $n) -- closed"; continue }
@@ -563,13 +597,32 @@ try {
             if ($issueBy.ContainsKey($n) -and $issueBy[$n].state -ceq 'agent-ready') {
                 $where = if ($inFlight.ContainsKey($n)) { "in flight, PR #$($inFlight[$n])$(if (-not (Test-InScope $n)) { ', outside the scope' })" } elseif ($waveOf.ContainsKey($n)) { "wave $($waveOf[$n])" } elseif ($unplaced -contains $n) { 'no footprint' } else { 'outside the scope' }
                 Say "  $(Format-Issue $n) -- agent-ready, $where"
+                $moves.Add($(if ($inFlight.ContainsKey($n)) { "#${n}: PR #$($inFlight[$n]), landing through its own run" } else { "#${n}: /ouro:run $n, a session runs it" }))
             } elseif ($issueBy.ContainsKey($n)) {
                 Say "  $(Format-Issue $n) -- needs-ruling$tail"; Add-UnblockLines $n '    '
+                $moves.Add("#${n}: owner ruling, needs the owner")
             } elseif ($labs | Where-Object { $_ -ieq 'blocked' }) {
                 $row = @(Get-BlockedRows | Where-Object { [int]$_.number -eq $n })
                 $trig = if ($row.Count) { Get-TriggerLine $row[0] } else { '' }
-                Say "  $(Format-Issue $n) -- blocked${tail}: $(if ($trig) { $trig } else { 'no trigger line' })"
+                $refs = @([regex]::Matches($trig, '(?<![\w/])#(\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+                $fired = $refs.Count -gt 0 -and -not @($refs | Where-Object { -not ($listBy.ContainsKey($_) -and "$($listBy[$_].state)" -ieq 'CLOSED') }).Count
+                Say "  $(Format-Issue $n) -- blocked$(if ($fired) { ', fired' })${tail}: $(if ($trig) { $trig } else { 'no trigger line' })"
+                if ($fired) { $moves.Add("#${n}: /ouro:triage $n, needs the owner to approve the label swap") }
+            } elseif ($labs | Where-Object { $_ -ieq 'needs-triage' }) {
+                Say "  $(Format-Issue $n) -- open [$($labs -join ',')]$tail"
+                $moves.Add("#${n}: /ouro:triage $n, needs the owner to approve the verdict")
             } else { Say "  $(Format-Issue $n) -- open [$($labs -join ',')]$tail" }
+        }
+        $moved = @($moves | ForEach-Object { [int][regex]::Match($_, '^#(\d+)').Groups[1].Value })
+        $owed = @($kids | Where-Object { $issueBy.ContainsKey($_) -and $listBy.ContainsKey($_) -and "$($listBy[$_].state)" -ine 'CLOSED' })
+        $stray = @($moved | Where-Object { -not $kids.Contains($_) })
+        $missing = @($owed | Where-Object { $moved -notcontains $_ })
+        if ($stray.Count -or $missing.Count -or @($moved | Sort-Object -Unique).Count -ne $moved.Count) {
+            throw [CheckError]::new("finish's next moves name [$($moved -join ',')] for the children [$($kids -join ',')], the graph's open ones [$($owed -join ',')]")
+        }
+        if ($moves.Count) {
+            Say 'Next moves, in the order above:'
+            foreach ($x in $moves) { Say "  $x" }
         }
     }
 
@@ -590,10 +643,11 @@ try {
     Say "compile: $source; head $("$($g.head)".Substring(0, [Math]::Min(12, "$($g.head)".Length))) (the paths were resolved there)"
     Say "mirrored files passed: $(if ($mirrored.Count) { $mirrored -join ', ' } else { 'none' })"
     Say "issues read $(@($g.issues).Count); agent-ready $($ready.Count); needs-ruling $($ruling.Count); in flight $($inFlight.Count)"
-    Say 'Precision: footprints are read from the files the issues'' text names (anchors and the `Doc impact on close` line), not from a build, and the figures were measured on the anchor paths, before root files joined the footprint, in historical replays over closed issues, not measurements of this queue, and are quoted from the analyzer''s help: the footprint less its Doc-impact files over 160 landed issues: mean recall 0.83 against the files the landing touched, and 3.7% of same-week pairs with disjoint footprints touched a common file; the batch rule, replayed over three queues of closed issues: pair precision 0.61 against a 0.29 base rate, and 0.18 of the colliding pairs held. A proposal, never a guarantee: re-check against the diff after each build, as /ouro:fuse step 2 does.'
+    Say 'Precision: footprints are read from the files the issues'' text names (anchors and the `Doc impact on close` line), not from a build, and the figures were measured on the anchor paths, before root files joined the footprint, in historical replays over closed issues, not measurements of this queue, and are quoted from the analyzer''s help: the footprint less its Doc-impact files over 160 landed issues: mean recall 0.83 against the files the landing touched, and 3.7% of same-week pairs with disjoint footprints touched a common file; the batch rule, replayed over three queues of closed issues: pair precision 0.61 against a 0.29 base rate, and 0.18 of the colliding pairs held. A proposal, never a guarantee: re-check against the diff after each build.'
     if ($scopeLabel) { Say "scope: issues carrying '$scopeLabel'" }
     if ($widthLine) { Say $widthLine }
     foreach ($x in $script:Warnings) { Say $x }
+    foreach ($n in $flightOff) { Say "finding: $(Format-Issue $n) is $($issueBy[$n].state) with an open pull request, PR #$($fixes[$n])" }
     Say 'A branch with no pull request is not seen.'
     if ($ready.Count -eq 0) { Say 'The `agent-ready` menu is empty: no `agent-ready` issue was read. As contract section 10 says, the next action is triage, not idling.' }
     Say ''

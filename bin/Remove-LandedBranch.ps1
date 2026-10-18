@@ -3,7 +3,7 @@
     Delete a merged pull request's branch on origin and locally, the worktree that holds it
     under .claude/worktrees/, and the backup branches the landing named.
 .DESCRIPTION
-    /ouro:land step 11. Run from the repo's main checkout, with every tool shell moved out of the
+    The driver's cleanup step. Run from the repo's main checkout, with every tool shell moved out of the
     worktree first; the repository, the default branch and the protected prefixes come from the
     binding (.claude/ouro.toml, read through ouro-binding.py beside this script), and every gh call
     names that repository with -R.
@@ -38,7 +38,7 @@
         submodule) stops with git's message;
       - the local branch, with `git branch -D`: a squash-merged branch is never "fully merged"
         to -d;
-      - every `backup/<branch>-<timestamp>` branch /ouro:land step 2 or step 10 named.
+      - every `backup/<branch>-<timestamp>` branch Sync-Branch.ps1 or a landing named.
 .PARAMETER Pr
     The merged pull request whose branch is cleaned up.
 .PARAMETER Branch

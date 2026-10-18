@@ -20,6 +20,13 @@
     the working directory to the repo root first -- the path and fragment checks
     run git against the current directory.
 
+    -Ref <commit-ish> reads the repository at that commit instead of the working tree: the
+    tracked paths come from git ls-tree, a root-relative wildcard span or a directory resolves
+    when any path in that list matches it, and a fragment is grepped with git grep at the ref.
+    The checkout's files, index and branch are never read or moved, so a landing checks its
+    anchors against origin's default branch from any checkout. Without it, the working tree and
+    index are read as before.
+
     A citation into ANOTHER repository is written <repo>:<path> with its fragment in
     backticks (ouro docs/contract.md section 3), because this gate verifies only the
     repo it runs in. The scheme-prefix rule below drops the path, but only for a repo
@@ -40,7 +47,7 @@
 #>
 
 function Get-AnchorFindings {
-    param([string]$Text)
+    param([string]$Text, [string]$Ref)
 
     $findings = @()
 
@@ -85,6 +92,7 @@ function Get-AnchorFindings {
     # index: plain output C-quotes a non-ASCII name, and the quoted string names no file. The
     # caller's encoding comes back after each read.
     function Test-ExactTracked([string]$Path) {
+        if ($Ref) { return $trackedFiles -ccontains $Path }
         $saved = [Console]::OutputEncoding
         try {
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -99,7 +107,12 @@ function Get-AnchorFindings {
     $savedEnc = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $trackedFiles = @((@(git ls-files -z 2>$null) -join "`n").Split([char]0, [StringSplitOptions]::RemoveEmptyEntries))
+        $trackedFiles = if ($Ref) {
+            @((@(git ls-tree -r -z --full-tree --name-only $Ref 2>$null) -join "`n").Split([char]0, [StringSplitOptions]::RemoveEmptyEntries))
+        } else {
+            @((@(git ls-files -z 2>$null) -join "`n").Split([char]0, [StringSplitOptions]::RemoveEmptyEntries))
+        }
+        if ($Ref -and $LASTEXITCODE -ne 0) { throw "cannot read the tree at ref '$Ref'" }
     }
     finally { [Console]::OutputEncoding = $savedEnc }
     function Get-LiteralSuffixHits([string]$Suffix) {
@@ -129,7 +142,8 @@ function Get-AnchorFindings {
         # Test-Path is a wildcard read, kept as the fallback so a root-relative glob span
         # (src/*.ps1) still resolves. Only when both the exact entry and Test-Path miss does the
         # literal suffix read below run.
-        if (-not (Test-Path $p)) {
+        $present = if ($Ref) { [bool]@($trackedFiles | Where-Object { $_ -like $normalized -or $_ -like "$normalized/*" }) } else { Test-Path $p }
+        if (-not $present) {
             # Bodies often write paths relative to a subtree (Sub/Dir/README.md
             # for Top/Sub/Dir/README.md). A unique literal tracked-file suffix match
             # counts as resolved; zero matches is the real dead-anchor signal.
@@ -185,7 +199,8 @@ function Get-AnchorFindings {
     $checkedFrags = 0
     foreach ($pair in $anchorFrags.Values) {
         $file, $frag = $pair
-        $hit = git grep -F -e "$frag" -- ":(literal)$file" 2>$null | Select-Object -First 1
+        $hit = if ($Ref) { git grep -F -e "$frag" $Ref -- ":(literal)$file" 2>$null | Select-Object -First 1 }
+               else { git grep -F -e "$frag" -- ":(literal)$file" 2>$null | Select-Object -First 1 }
         $checkedFrags++
         if (-not $hit) {
             $findings += "fragment no longer greps in '$file': `"$frag`""
@@ -193,7 +208,8 @@ function Get-AnchorFindings {
     }
     foreach ($frag in $fragMatches) {
         # no --max-count: git before 2.38 rejects it, and the first hit is all that is read
-        $hit = git grep -F -- "$frag" 2>$null | Select-Object -First 1
+        $hit = if ($Ref) { git grep -F -e "$frag" $Ref 2>$null | Select-Object -First 1 }
+               else { git grep -F -- "$frag" 2>$null | Select-Object -First 1 }
         # Interior backticks may be verbatim (docs contain literal backticks) -- trust a
         # grep that hits. One that misses is a prose-code composite, not an anchor: skip
         # it and do not count it, rather than flag it.

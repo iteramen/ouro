@@ -54,7 +54,9 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         (`<<-` allowed; an unquoted delimiter never passes), holds no `;`, `&`, `|`, `<`, `>`,
         parenthesis, brace, backtick, `#` or `$'`, and has balanced quotes before the operator,
         followed by the heredoc body and the closing delimiter and nothing else. Exit 0 lets the
-        call run: no hit, or any other tool call or command.
+        call run: no hit, or any other tool call or command. The command text is scanned less the
+        value of each `-R` or `--repo` whose flag stands outside quotes before any heredoc, which
+        is the address the call targets; with unbalanced quotes the whole text is scanned.
         Exit 2 blocks it, and Claude Code shows stderr to the session as the reason: a hit
         (`command text line <l>: entry <n>`, `command text: entry <n>, across a line break`,
         `the file <flag> names, line <l>: entry <n>`, or `the file <flag> names: entry <n>,
@@ -79,8 +81,8 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         a hit or a missing list would. `"off"` counts only when the command names no other
         repository with `-R` or `--repo`, as the applier honours the key only for the repository
         the run posts to: a call naming another is read as if the key were absent, and with no list
-        the visibility read is that repository's. Every `-R` or `--repo` in the command text
-        counts, one inside a quoted body included: the hook cannot tell a flag from quoted text.
+        the visibility read is that repository's. For this read every `-R` or `--repo` in the
+        command text counts, one inside a quoted body included: it fails closed.
 --selftest  Runs each mode against a temporary list and repository.
 
 A hit is reported by path, line number and entry number, never by the matched text or the entry,
@@ -293,9 +295,43 @@ TARGET = re.compile(r"(?:^|\s)(?:-R|--repo)(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|(\
 
 def named_repos(command):
     """Every repository a -R or --repo anywhere on the command names, as owner/repo in lower case
-    (a host prefix dropped), a quoted body's mention included: the hook cannot tell a flag from
-    quoted text, so each one counts and the check fails closed."""
+    (a host prefix dropped), a quoted body's mention included, so the binding and visibility reads
+    fail closed."""
     return ["/".join((m[1] or m[2] or m[3]).strip("/").split("/")[-2:]).lower() for m in TARGET.finditer(command)]
+
+
+def quoted_spans(command):
+    """The [start, end) spans inside single or double quotes, or None when the quotes do not balance."""
+    spans, start, quote, i = [], 0, None, 0
+    while i < len(command):
+        c = command[i]
+        if quote is None and c in "'\"":
+            quote, start = c, i
+        elif quote == '"' and c in "\\`":
+            i += 1
+        elif c == quote:
+            spans.append((start, i + 1))
+            quote = None
+        i += 1
+    return None if quote else spans
+
+
+def without_targets(command):
+    """The command with the value of each -R or --repo whose flag stands outside quotes, before any
+    heredoc, blanked to spaces: it is the address the call targets, not content it publishes. The
+    whole text when the quotes do not balance, so the scan fails closed."""
+    head = command.split("<<", 1)[0]
+    spans = quoted_spans(head)
+    if spans is None:
+        return command
+    out = list(command)
+    for m in TARGET.finditer(head):
+        flag = m.start() + (m.group(0)[:1].isspace())
+        if any(a <= flag < b for a, b in spans):
+            continue
+        g = next(k for k in (1, 2, 3) if m.group(k) is not None)
+        out[m.start(g):m.end(g)] = " " * (m.end(g) - m.start(g))
+    return "".join(out)
 
 
 def other_repo(command, slug):
@@ -358,10 +394,11 @@ def hook_check(payload):
             return []
         raise Block(f"missing list: {e}")
     reasons = []
-    found = hits(command, entries)
+    scanned = without_targets(command)
+    found = hits(scanned, entries)
     for lineno, n in found:
         reasons.append(f"command text line {lineno}: entry {n}")
-    for n in wrapped(command, entries, found):
+    for n in wrapped(scanned, entries, found):
         reasons.append(f"command text: entry {n}, across a line break")
     for flag, value in body_flags(command):
         value = value[1:-1] if value[:1] in "\"'" and value[-1:] == value[:1] and len(value) > 1 else value
@@ -891,6 +928,14 @@ def selftest():
         code, o, e = run(["hook"], vis("fail", hl), stdin=ev(command, cwd=bound))
         assert code == 2 and "entry 1" in e, (code, o, e)
         blocked(command, "missing list", env=vis("PUBLIC"), cwd=bound)
+        # a -R or --repo value is the call's address, not scanned content; quoted text still is
+        for command in ("gh issue comment 5 -R o/secretword --body-file clean.md",
+                        "gh issue comment 5 --repo=o/secretword --body-file clean.md",
+                        'gh issue comment 5 -R "o/secretword" --body-file clean.md'):
+            allowed(command)
+        blocked("gh issue comment 5 -R o/secretword --body-file hit.md", "the file --body-file names, line 2: entry 1")
+        blocked("gh issue comment 5 --body 'see -R o/secretword'", "command text line 1: entry 1")
+        blocked("gh issue comment 5 -R o/secretword --body \"fine", "command text line 1: entry 1")
         # a read that stalls blocks inside the hook's own timeout
         started = time.monotonic()
         # from the temp root, which outlives the orphaned stand-in that holds its directory

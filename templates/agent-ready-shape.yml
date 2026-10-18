@@ -9,7 +9,7 @@ name: Agent-Ready Shape Gate
 # The job runs on GitHub's `ubuntu-latest` unless the repository variable `OURO_RUNS_ON` names
 # other runners. That variable holds JSON: a label string or an array of labels. A runner of
 # your own needs pwsh, gh and git. OURO_REF, a repository variable, names the same release as
-# the weekly pass.
+# every other ouro pin in the repository.
 
 on:
   issues:

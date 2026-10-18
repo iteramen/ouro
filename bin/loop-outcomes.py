@@ -61,7 +61,7 @@ Definitions, all UTC:
    approver (login compared without regard to case; any other author's comment is ignored, so
    a stop posted by one names no reason and delivers no finding), whose first line, trimmed, is `**Stop:** `
    followed by one of `review cap`, `open decision`, `dead anchor` or `gate uncovered` (the stop
-   comment of skills/execute/SKILL.md section 1); else a comment whose first line is `**Triage**`
+   comment of docs/contract.md section 4); else a comment whose first line is `**Triage**`
    makes it a `triage reversal`; else `unclassified`. Parked: the removal comes with any other
    state label, or none, and counts as neither a delivery nor a refusal. Finding delivered
    (checkpoint cohort): a comment from the bot or an approver, as above, whose first line is
@@ -79,8 +79,10 @@ Definitions, all UTC:
 Quality table, after the outcome tables, one row per ISO week and an `all` row (report-only):
  * Review line: the first line of a landed PR's body, outside fenced blocks (a line opening with
    three backticks or tildes, to its closing fence, or to the end of the body), that matches the
-   pattern skills/land/SKILL.md defines, REVIEW_PATTERN below, read multiline. A landed PR is one
-   `landings()` finds, counted once however many issues it fixes, keyed by the week of the landing.
+   pattern docs/contract.md defines, REVIEW_PATTERN below, read multiline. A landed PR is one
+   that lands as `landings()` reads a landing and whose body has a `Fixes` line or a `Part k/n of
+   #N` line (a staged deliverable's part), counted once however many issues it names, keyed by the
+   week of the landing.
    A PR with no matching line is "no line", shown and never counted as clean; `Review: none` is a
    line. False sentences are totalled, averaged and shared over the PRs whose line holds a number
    there (`unread` is counted apart); H, M, L and the rounds (median, maximum; a PR is a region) are
@@ -666,8 +668,9 @@ def review_of(body):
 def pr_quality(prs, commits, since):
     """ISO week of the landing -> the review_of each PR landed at or after since, one per PR."""
     out = collections.defaultdict(list)
-    for (when, _, _), p, _ in landed_prs(prs, commits):
-        if when >= since:
+    for (when, _, _), p in landed_any(prs, commits):
+        body = p.get("body") or ""
+        if when >= since and (FIXES.search(body) or PART.search(body)):
             out[week_of(when)].append(review_of(p.get("body")))
     return dict(out)
 

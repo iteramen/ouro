@@ -366,8 +366,8 @@ try {
     Assert-Equal 1 $workflows.Count 'the tail points the workflows at the scripts directory once'
     # Joined, not indexed: a line the tail does not print is a red row of its own, not an index
     # out of bounds that ends the suite before the cases below it.
-    Assert-Equal "  - .github/workflows/*: point every ouro/bin/ path at scripts/, except the weekly pass's ouro/bin/loop-outcomes.py step, which keeps its plugin checkout" ($workflows -join "`n") `
-        'and that line exempts the loop-outcomes step, naming no gate or suite of its own'
+    Assert-Equal "  - .github/workflows/*: point every ouro/bin/ path at scripts/" ($workflows -join "`n") `
+        'and that line names the scripts directory, and no gate or suite of its own'
     $skillPaths = @($tail | Where-Object { $_ -cmatch '<ouro>/bin/' })
     Assert-Equal 1 $skillPaths.Count 'and one line names the plugin-relative bin paths the vendored skills carry'
     Assert-Equal $true (($skillPaths -join "`n") -clike '*scripts/*') 'and points them at the scripts directory'

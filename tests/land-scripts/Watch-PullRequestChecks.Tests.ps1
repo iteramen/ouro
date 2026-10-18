@@ -77,7 +77,7 @@ try {
         "run list --commit $H" = Answer @((Run 11 1 pull_request $t1 completed failure), (Run 13 2 pull_request $t1 completed neutral))
         'run watch 11' = @{ Exit = 0; Out = '' }; 'run watch 13' = @{ Exit = 0; Out = '' } }
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
-    Assert-Match '^run\(s\) concluded outside success/skipped/neutral: 11:failure - /ouro:land step 9' $r.Stop 'the stop names the red run and its conclusion'
+    Assert-Match '^run\(s\) concluded outside success/skipped/neutral: 11:failure - read the red run' $r.Stop 'the stop names the red run and its conclusion'
     Assert-Line $r.Lines 'run 13 (wf2/pull_request): neutral' 'a neutral run passes and is still listed'
     Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H }
         "run list --commit $H" = Answer @(Run 11 1 pull_request $t1 in_progress $null)

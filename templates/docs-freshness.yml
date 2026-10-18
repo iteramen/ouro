@@ -41,7 +41,7 @@ jobs:
       # The gate ships as a composite Action in the ouro plugin and scans the repo checked out
       # above, from the job workspace, so that checkout takes no `path:`. Pin a released tag and bump it when taking a new ouro release — `uses:` cannot read
       # a variable, so every pin a repo holds must name the same release: this line, the
-      # actions/gates line in its copy of the ci template, and OURO_REF if it runs the weekly pass.
+      # actions/gates line in its copy of the ci template, and OURO_REF if it runs the agent-ready shape-gate workflow.
       #
       # Reading the binding's [docs] table needs python3 3.11+: an older `python3` on PATH fails the
       # gate with the floor message. The Action pins 3.12; a step copied out of it by hand must pin

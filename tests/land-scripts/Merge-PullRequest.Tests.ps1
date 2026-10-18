@@ -143,7 +143,7 @@ try {
     Write-Host 'review threads: an unanswered one stops; resolved, replied or the author''s own lets the merge through'
     Set-Gh (Table @{ 'api graphql 7' = Answer @(Page @((Thread rev))) })
     $r = Invoke-Step { Invoke-MergePullRequest -Pr 7 -Subject 'fix(x): y (#7)' -BodyFile $Body -Linear no }
-    Assert-Match "^#7 has a review thread nobody answered - reply in it \(/ouro:land step 8\) or resolve it:`nrev a.ps1 https://x/1$" $r.Stop 'an open thread stops, naming who, where and the link'
+    Assert-Match "^#7 has a review thread nobody answered - reply in it or resolve it:`nrev a.ps1 https://x/1$" $r.Stop 'an open thread stops, naming who, where and the link'
     Assert-NoMatch 'pr merge' ($r.Gh -join "`n") 'and nothing merges'
     Set-Gh (Table @{ 'api graphql 7' = Answer @((Page @() $true), (Page @((Thread rev2 -Url 'https://x/2')))) })
     $r = Invoke-Step { Invoke-MergePullRequest -Pr 7 -Subject 'fix(x): y (#7)' -BodyFile $Body -Linear no }

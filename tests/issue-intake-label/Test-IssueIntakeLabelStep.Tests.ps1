@@ -5,9 +5,8 @@
 .DESCRIPTION
     `templates/issue-intake-label.yml`'s stamping step ships nowhere else in tests/: install-ouro
     only copies its bytes, and actionlint does not execute a `run:` block. This suite runs the
-    step's own `run: |` text, extracted as text the same way the weekly-pass suite's harvest case
-    lifts its step (tests/weekly-pass/Test-WeeklyPassSteps.Tests.ps1, "the harvest step, executed"),
-    in a real bash behind a stub `gh` shell function -- the real gh is never called.
+    step's own `run: |` text, extracted as text, in a real bash behind a stub `gh` shell function
+    -- the real gh is never called.
 
     The step is found by what it RUNS (its `gh issue edit` line), never by its `- name:`, so a
     rename does not quietly stop testing it.
@@ -21,7 +20,7 @@
     backslashes) is no usable bash here: Get-WorkingBash proves each candidate with such a script,
     and the cases skip with a visible line when none passes, everywhere but Linux, where bash is
     always present and a skip is a detection failure. A vendored tree (bin/Vendor-Ouro.ps1 copies the
-    scripts flat and drops templates/) skips the whole suite, as the weekly-pass suite does.
+    scripts flat and drops templates/) skips the whole suite.
 #>
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -47,7 +46,7 @@ function Assert-True($Cond, $What) {
     else { Write-Host "FAIL: $What" -ForegroundColor Red; $script:failures++ }
 }
 
-# Same shape as the weekly-pass suite's Get-StepBlocks: a step starts at `      - ` under `steps:`.
+# A step starts at `      - ` under `steps:`.
 function Get-StepBlocks([string]$Text) {
     $lines = $Text -split "`r?`n"
     $starts = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match '^      - ' })

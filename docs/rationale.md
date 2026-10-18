@@ -38,55 +38,29 @@ the code; `needs-ruling` is the open-questions register; `human-ready` is the be
 `blocked` names its trigger; `needs-triage` makes "ungraded" visible; `trivial` is graded
 autonomy; `checkpoint` is the lane for a reviewable opinion; the rulings partition lets a
 mid-execution judgment call park cleanly. *Why:* agents executed against specs the code had
-moved out from under (→ the anchor ritual and the weekly anchor gate); agents silently picked
+moved out from under (→ the anchor ritual and the anchor gate); agents silently picked
 design decisions (→ `needs-ruling`); review time on mechanical changes cost more than it
 protected (→ `trivial`).
 
 **3. The map — what exists and where.** A top-level map that points at subsystem docs with an
 explicit instruction not to read them proactively; feature docs beside the feature; a memory
-index. The map is **audited, not trusted**: a deterministic freshness gate on every push, a
-weekly LLM drift audit verifying doc *claims* against artifacts, a weekly cross-check of
-settings-side configuration no diff can see, weekly anchor and contract-shape gates on the
-agent-ready queue. *Why:* every restatement is
+index. The map is **audited, not trusted**: a deterministic freshness gate on every push, and
+anchor and shape gates on the agent-ready queue. *Why:* every restatement is
 a copy that can rot — and did, in both directions: docs found stale, and docs found right while
 the supposed authority was stale. Hence "verify against the artifact, fix whichever is wrong,
-same pass" rather than a fixed precedence. The verifier files each disagreement against the doc;
-fixing whichever is wrong is the fix pass's verdict, not the audit's.
+same pass" rather than a fixed precedence.
 
-The audit is not trusted either. Its report is current state too, and it ages from the moment it
+An audit is not trusted either. Its report is current state too, and it ages from the moment it
 was read — the commit, and any live state its verifiers probed: re-verifying 195 findings from a
 ten-day-old report, before acting on any of them, found 13 already resolved, in exactly the docs
 someone had cleaned in between, and two wrong when written. So consuming a report is a
-verification pass, not a work list; the steps are in [the drift skill](../skills/drift/SKILL.md).
+verification pass, not a work list.
 
 **4. History — what happened, kept out of the way.** Docs are current state, git is history:
 no progress logs, no "previously X"; commits, PR bodies and issue threads hold how-we-got-here;
 superseded docs are deleted, not archived; frozen session artifacts are quarantined from
 reading. *Why:* stale artifacts leak dead paths into long-lived material, and progress-log
 sections rot into misinformation. History is safe exactly once it cannot outrank current state.
-
-## Why the automation is report-only
-
-The weekly pass is where the unattended LLM grading runs: deterministic gates first, then two
-LLM passes that propose in two different ways. The drift audit proposes a rewrite of the drift
-ledger's body and a comment per audited doc, in files; the pass, not the session, reopens or files
-the ledger, with `umbrella` alone, and a later step with no model in it posts the files after a
-poster refuses any directory out of layout, over a size cap, holding a secret shape, carrying a
-run marker before its last comment, ending without one or naming a doc that is not a target. The intake proposes a comment and `needs-triage` / `needs-ruling` in a
-manifest, which a later step with no model in it applies within the applier's unattended bounds.
-Neither session writes to the tracker: each reads text anyone can write, so its grant names no
-`gh` and no git command that runs a program or writes a file, and its step carries no token. A
-permission rule cannot constrain what a session writes after its literal ending, so the bound on
-what it writes is the program that reads what the session wrote, not a narrower grant, and the bound
-on what it reads is a setting that confines its file tools to the workspace, with a Bash grant of
-three git reads for the drift audit (`git ls-files`, `git cat-file`, `git rev-parse`) and
-`git rev-parse` alone for the intake; `git rev-parse --resolve-git-dir` prints the target line of
-an outside file in gitfile form, and the drift audit's `git ls-files -X` tests a whole-line guess
-against one. An unattended `/ouro:execute` run's only label move is the demotion §9 enumerates.
-The pass's LLM never picks its own workload — a deterministic script selects targets — and never
-promotes, closes, edits code, or merges. Promotion, `trivial`, and every merge are human-approved.
-A zero-turn session is a failure, not a pass: the silent skip is the failure mode this design
-refuses.
 
 ## The bottleneck the design creates
 

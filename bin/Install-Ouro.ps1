@@ -93,7 +93,7 @@
     plugin's shipped actions/gates Action.
 .PARAMETER IssueIntake
     Also copy the issue form, the template chooser config and the issue intake workflow, the files
-    a new issue enters the loop through. The weekly-pass workflow is not among them.
+    a new issue enters the loop through.
 .PARAMETER Review
     ship.review for a binding this run creates: copilot, adversarial-review, external-audit or
     none. Default: adversarial-review. An existing binding is never edited.
@@ -101,7 +101,7 @@
     ship.copilot_bot_id; required with -Review copilot, as `ouro-binding.py check` requires it. On
     github.com it is one value for every repository, the one the plugin's docs/binding.md shows in
     its [ship] example, so there is nothing to look up. Elsewhere, or to check it, the ouro init
-    skill (skills/init/SKILL.md, "If copilot") has the command: the reviewer's node_id in the
+    skill (skills/init/SKILL.md, its last line) has the command: the reviewer's node_id in the
     timeline of a PR, in a repository the owner names, that already carries a Copilot review.
 .PARAMETER ExternalCli
     ship.external_cli; required with -Review external-audit, as `ouro-binding.py check` requires
@@ -429,7 +429,7 @@ try {
     # a UTF-16 file's lines after the first), which ignores nothing. The tree is built with .NET calls,
     # which -WhatIf does not skip, so a -WhatIf run asks the question a real run asks, and asking
     # writes nothing into the work tree. A rule matching that name and not a real worktree's
-    # (.claude/worktrees/ouro-*) still reads as ignoring the entry; /ouro:execute asks about the
+    # (.claude/worktrees/ouro-*) still reads as ignoring the entry; the driver asks about the
     # worktree it creates, and stops.
     # Its records are source, line, pattern, path, and only the one naming the asked path counts: the
     # pipeline sends a line break after the NUL, and git checks that as a path of its own. A negated
@@ -595,7 +595,7 @@ try {
                         Write-Host "REFUSED: $workflowRel not written - the write failed ($($_.Exception.GetBaseException().Message))" -ForegroundColor Yellow
                     }
                 }
-                if (-not $workflowRefused) { Write-Host "  the Action is pinned at ${tag}: a repo that also runs the weekly pass pins OURO_REF to the same release" }
+                if (-not $workflowRefused) { Write-Host "  the Action is pinned at ${tag}: a repo that also runs the agent-ready shape-gate workflow pins OURO_REF to the same release" }
             }
         }
     }
@@ -658,7 +658,7 @@ try {
                         Write-Host "REFUSED: $workflowRel not written - the write failed ($($_.Exception.GetBaseException().Message))" -ForegroundColor Yellow
                     }
                 }
-                if (-not $workflowRefused) { Write-Host "  the Action is pinned at ${tag}: a repo that also runs the docs-freshness workflow or the weekly pass keeps every pin at the same release" }
+                if (-not $workflowRefused) { Write-Host "  the Action is pinned at ${tag}: a repo that also runs the docs-freshness workflow or the agent-ready shape-gate workflow keeps every pin at the same release" }
             }
         }
     }

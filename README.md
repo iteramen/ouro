@@ -1,14 +1,64 @@
 # ouro
 
 The issue-driven agent loop, as a Claude Code plugin. A backlog where every open issue is
-either mechanically executable or waiting on exactly one named thing; agents do the mechanical
-parts; humans answer rulings and review PRs.
+either mechanically executable or waiting on exactly one named thing; a program does the
+mechanical parts and asks a model at four judgment nodes; humans answer rulings and merge the
+pull requests the repo has not pre-authorized.
 
 ```
-file  →  triage  →  (rule if needed)  →  execute  →  PR review  →  land
+file  →  triage  →  (rule if needed)  →  build  →  review  →  checks  →  merge
               ↘
                 (checkpoint)  →  finding + a recommendation  →  back to triage
 ```
+
+ouro is five things:
+
+- **A protocol** on the tracker and the pull request: eight state labels, the `**Triage**` and
+  `**Stop:**` comments, anchors, the `Size:` and `Flow:` lines, the pull request record and its
+  `Review:` line. `docs/contract.md` defines it; `docs/rationale.md` gives the reasons.
+- **A binding**, `.claude/ouro.toml`, where a repo declares its slug, default branch, ship policy,
+  reviewers, models and gates. `docs/binding.md` is the schema.
+- **A driver**, `bin/ouro`, which runs the fixed sequence in code and calls a model at the
+  triage, build, review and follow-up nodes only.
+- **Four entry points**, `/ouro:init`, `/ouro:triage`, `/ouro:run` and `/ouro:weekly`, each of
+  which binds, runs one driver command and relays its message.
+- **The gates**: the scripts under `bin/` and their suites under `tests/`, which check the
+  protocol whoever followed it, and the Actions under `actions/` that run them in CI.
+
+## Calling it
+
+`python3 <ouro>/bin/ouro <command>` from the repo's root, or the entry skill in a session:
+
+| Command | Does |
+|---|---|
+| `run N [--part k] [--dry-run]` | One `agent-ready` issue to a landed change. Resumable: each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. |
+| `triage N [--dry-run]` | The verdict comment, the `Size:`, `Flow:` and `Doc impact on close:` lines and the labels for one issue. |
+| `weekly [--post]` | The outcomes and quality tables of `bin/loop-outcomes.py`. |
+| `compile` | The next wave of the queue. |
+
+Exit 0 is landed, waiting on the owner's merge or waiting on running checks; 1 a driver error; 2
+refused before any branch was made; 3 stopped on a ruling, the fix-round cap or a gate nothing
+can run. The driver keeps no file between calls, so a session, another user's bot or a cron on
+any host with the binding and the tools calls the same command and gets the same continuation. A
+session that follows the protocol by hand is held to the same marks by the gates.
+
+## What a run posts
+
+On the issue: the `**Triage**` verdict from `triage`, and a `**Stop:** <reason>` comment with
+`agent-ready` swapped for `needs-ruling` when a run stops (`review cap`, `open decision`, `dead
+anchor`, `gate uncovered`). On the pull request: a draft opened with the record (merge danger,
+what changed, the `Review:` line, the verification), a `**Review** round <k>` comment per review
+pass, and at the end either `**Landed unattended**` or `**Ready for merge**` with the checks, the
+review line and the class. The issue closes through the squash message's `Fixes #N`. No outcome
+line is written: `bin/loop-outcomes.py` reads the outcome from that record.
+
+## What a consumer declares
+
+The binding, from `templates/ouro.toml.example`: `[repo]`, `[owner]` (who may rule), `[ship]`
+(`policy`: `stop-at-pr`, `trivial-merge` or `merge-on-green`; `unattended_classes`, the Flow
+classes `merge-on-green` may merge, default `express` and `standard`; `review`; `landing`;
+`direct`), `[models]`, `[labels]`, `[docs]`, `[authority]` and the `[[gate]]` list that CI and
+the driver both run. The default is `stop-at-pr`: the driver opens the pull request and the owner merges.
 
 ## Install
 
@@ -67,43 +117,22 @@ new skills into the running session. Outside a session, run `claude plugin marke
 and then `claude plugin update ouro@ouro`, the id the install line uses; the update applies after
 a restart.
 
-## The product
-
-The durable part is the contract (`docs/contract.md`), the reasoning behind it
-(`docs/rationale.md`), and the deterministic gates under `bin/` with the fixture suites under
-`tests/`, together with what the gates read and ship through: the binding schema
-(`docs/binding.md`) and its validator, the docs rule (`docs/docs-governance.md`), and the Action
-under `actions/`. They travel by being read and run. The skills implement that contract for
-Claude Code, with the verifier agent under `agents/` and the Claude steps of the weekly-pass
-template: drills amended the day a run teaches something, and the part a model or harness change
-re-opens.
-
-## Skills
+## Entry skills
 
 | Skill | Does |
 |---|---|
 | `/ouro:init` | Onboard a repo: asks what `Install-Ouro.ps1` needs, runs it, and reports each file written, skipped or refused, then reports whether the repo has Issues and whether it deletes a merged PR's branch, offering to turn either on when it is off. Re-run to add the docs-freshness workflow, the CI workflow or the issue intake files. |
-| `/ouro:triage` | Grade issues against the contract: PROMOTE / NEEDS-RULING / CHECKPOINT / SPLIT / FUSE / STALE. Report-and-approve. |
-| `/ouro:e2e <N>` | One `agent-ready` issue, autonomously: entry ritual, execute, review to convergence, land, cleanup, and the follow-ups the landing surfaces. One issue only — queue order, waves and parallelism are not its business. |
-| `/ouro:execute <N>` | One `agent-ready` issue → one PR. Re-verifies anchors first; a dead anchor stops the run. `trivial` and `checkpoint` variants. |
-| `/ouro:land` | One branch to the default branch through the full PR flow. |
-| `/ouro:land-batch` | Several reviewed PRs, one validated composition — the composed tree is checked, not each PR; each PR then lands through GitHub's squash-merge, checked against its local squash, or in one push when GitHub cannot reproduce the set. |
-| `/ouro:fuse <N> <N>…` | Build several `agent-ready` issues together: regions by shared files, or an area batch the owner names, one brief per region and one commit per issue, review split by file cluster, an area batch as one, one PR per region landed through `/ouro:land`. |
-| `/ouro:compile` | Read-only queue planner: runs the footprint analyzer and prints, in chat, which `agent-ready` issues can run at once, which `/ouro:fuse` sets to build together, which rulings hold blocked issues and what ready work their build would collide with, and what an umbrella or area still needs. Writes nothing and runs no work; the owner names what runs. |
-| `/ouro:drift` | LLM audit of doc claims against artifacts. Report-only; the ledger's entries are append-only comments. |
-| `/ouro:seam` | Adversarial review of a contract seam — both sides locally right, the defect in the gap. |
-| `/ouro:review` | Adversarial second reviewer, at the weight the issue's Flow class selects (contract §4). Light mode for an express change; the sized review, probes at the changed hunks only and nothing the pull request's checks already ran, for a standard one; probe format, REJECTED ledger mandatory, for a full one. |
-| `/ouro:external-audit` | The `ship.review = "external-audit"` reader: a repo-reading, JSON-verdict adversarial review, over a CLI adapter `ship.external_cli` names (`grok`, `claude`, `codex`, `copilot` shipped), capped at two rounds. Diff mode judges a change against a goal; claims mode refutes a plan's factual assertions about the code. |
-| `/ouro:intake` | The unattended weekly entry: gates, then intake grading. Uncredentialed — it proposes a manifest (`needs-triage`/`needs-ruling` only) that a model-free step applies; never promotes. |
+| `/ouro:triage <N>` | `python3 bin/ouro triage`. |
+| `/ouro:run <N>` | `python3 bin/ouro run`. |
+| `/ouro:weekly` | `python3 bin/ouro weekly`; `/ouro:weekly compile` is `python3 bin/ouro compile`. |
 
 What a repo's docs must be true of, and what each docs signal means: `docs/docs-governance.md`.
 The labels: eight states, two modifiers, defined in the contract.
 
 ## Layout
 
-- `skills/` — the reference implementation of the protocol for Claude Code. Nothing in here
-  names a repo.
-- `agents/` — `verifier`, the read-only doc-vs-artifact checker `drift` dispatches.
+- `skills/` — the four entry skills. Nothing in here names a repo.
+- `agents/` — `verifier`, the read-only doc-vs-artifact checker.
 - `bin/` — the deterministic gates (`pwsh` and `python3` scripts; the `pwsh` gates are the
   `bin/Test-*.ps1` scripts, and the `bin/Get-*.ps1` scripts are the target selectors, reports and
   dot-sourced helpers beside them; `git ls-files bin` lists every script), the binding validator
@@ -111,13 +140,13 @@ The labels: eight states, two modifiers, defined in the contract.
   `Install-Ouro.ps1`, which writes a repo's onboarding files, `Invoke-BranchSweep.ps1`, which
   reports, and on request removes, the branches and worktrees whose PR is finished, and
   `Vendor-Ouro.ps1`, which copies the plugin's contents into a repo's tree for a standalone exit.
-  `Test-LandState.ps1`, `Sync-Branch.ps1`, `Push-Branch.ps1`, `Watch-PullRequestChecks.ps1`,
-  `Compress-Branch.ps1`, `Merge-PullRequest.ps1` and `Remove-LandedBranch.ps1` run `/ouro:land`'s
-  deterministic steps — the state and the commits to land, the sync by the binding's answer, the
-  push, the head's checks watched to a verdict, the compression of a fix-up range before an
-  explicit merge, the guarded merge, the branch and worktree cleanup — and read the binding
-  through `Get-LandBinding.ps1` beside them; `Invoke-LandBatch.ps1` is `/ouro:land-batch`'s
-  deterministic work as subcommands over the batch files in the git directory. `Push-Direct.ps1`
+  `ouro/` is the driver (`python3 bin/ouro <run|triage|weekly|compile>`): it runs the loop's fixed
+  sequence and calls the model at the triage, build, review and follow-up nodes. `Sync-Branch.ps1`,
+  `Push-Branch.ps1`, `Watch-PullRequestChecks.ps1`, `Merge-PullRequest.ps1` and
+  `Remove-LandedBranch.ps1` are the driver's deterministic landing steps — the sync by the
+  binding's answer, the push, the head's checks watched to a verdict, the guarded merge, the
+  branch and worktree cleanup — and read the binding through `Get-LandBinding.ps1` beside
+  them. `Push-Direct.ps1`
   is the direct lane's push (`Flow: direct`): it pushes the default branch, or a branch for a pull
   request, only for a range inside `[ship].direct`.
   `forbidden-tokens.py` is the private-token matcher the scan gate and the applier run (see The
@@ -128,13 +157,13 @@ The labels: eight states, two modifiers, defined in the contract.
   with a JSON verdict; `loop-outcomes.py` reports what became of every `agent-ready` promotion,
   per weekly cohort; `ouro-version.py` prints the installed plugin's version for a status line.
   `Get-FootprintGraph.ps1` reads the file footprint of every open `agent-ready` and `needs-ruling`
-  issue and prints which collide, which share a batch (a fuse set of at most five issues, merged
+  issue and prints which collide, which share a batch (a set of at most five issues, merged
   along the strongest collisions), which can run at once and which ruling's build would collide
   with the most ready work as JSON, a proposal (recall 0.83 on the anchor paths, and 3.7% of
   disjoint pairs still touched a common file) that is not conflict-free and is re-checked against
   the diff after each build.
-  `Get-CompileProgram.ps1` renders that JSON as text for `/ouro:compile`: the waves re-packed to a
-  width, the batches as `/ouro:fuse` arguments, the rulings that hold blocked issues, an umbrella's
+  `Get-CompileProgram.ps1` renders that JSON as text for `python3 bin/ouro compile`: the waves
+  re-packed to a width, the batches, the rulings that hold blocked issues, an umbrella's
   children and the cleanup candidates, with its own lists checked before it prints.
   `Test-ChangelogEntry.ps1` is the diff-scoped one: it reports a change that moves a skill's front
   matter, the binding schema (or a value it newly refuses), a script's parameters or usage text, a
@@ -153,14 +182,14 @@ The labels: eight states, two modifiers, defined in the contract.
   `land-scripts/` drives the landing scripts in-process over a gh stand-in, one suite per script;
   `hooks/` runs every registered hook over recorded events, one directory per hook.
 - `templates/` — the issue form and its template chooser config, the intake workflow, the
-  weekly-pass workflow, the agent-ready shape-gate workflow, the docs-freshness gate workflow, the CI gate-loop workflow, the
+  agent-ready shape-gate workflow, the docs-freshness gate workflow, the CI gate-loop workflow, the
   documentation rule, the example binding. `Install-Ouro.ps1` writes the binding from the example,
   the docs-freshness workflow with -DocsFreshness, the CI workflow with -CI, and with -IssueIntake
   the issue form to .github/ISSUE_TEMPLATE/, the chooser config to
   .github/ISSUE_TEMPLATE/config.yml (the only name GitHub reads it under) and the intake workflow
   to .github/workflows/; `Vendor-Ouro.ps1` copies the documentation rule into .claude/rules/. The
-  weekly-pass and agent-ready shape-gate workflows are copied by hand to .github/workflows/, the
-  destination their headers name.
+  agent-ready shape-gate workflow is copied by hand to .github/workflows/, the destination its
+  header names.
 - `release/` — this repository's own release tools, which the consumer release leaves out:
   `export.py`, which moves one tagged version to the consumer release channel;
   `Test-TrackerReferences.ps1`, the check that no shipped file cites this tracker's numbers;
@@ -193,8 +222,7 @@ holding a NUL character, an entry that does not compile, or no tracked file to s
 makes any `gh` call but one visibility read, and refuses on a hit or a missing list. With no list set
 and `ship.forbidden_check` absent, the read (`gh repo view`, even in a dry run) decides: a `PRIVATE`
 or `INTERNAL` repository skips the check with one line, any other answer refuses as a missing list.
-`--no-forbidden-check` skips that check,
-as the weekly pass's CI step does, and the run prints a line saying so. A binding may turn the
+`--no-forbidden-check` skips that check, and the run prints a line saying so. A binding may turn the
 applier's check off with `ship.forbidden_check = "off"`, for a private repository whose own issues
 carry such values (docs/binding.md, "The forbidden-token check"); the run then prints a line saying
 so. That key does not reach `scan`, which stays fail-closed; `hook` follows the applier's rule
@@ -221,7 +249,7 @@ the entry number, never the text. The plugin registers the hook through `hooks/h
 set in the environment Claude Code starts in: without a list it follows the applier's rule above,
 and refuses every such call that rule does not pass.
 
-The hook does not see `gh api` (`/ouro:land` posts review replies through it), nor a value expanded
+The hook does not see `gh api` (the driver posts review replies through it), nor a value expanded
 at run time from a variable or a command substitution. A body file is read from the session's
 working directory before the command runs, so a `cd` or a write to the same file earlier in that
 command is not seen. A body or later command that mentions `--file`, `--body-file` or a spaced `-F` in

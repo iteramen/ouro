@@ -4,7 +4,7 @@
 .DESCRIPTION
     A blocked issue opens with an Unblocks-when line naming what it waits on (ouro
     docs/contract.md sec4). Without this gate, only interactive triage's one-line check and
-    /ouro:compile would read that line, so an issue would stay blocked long after its trigger
+    `bin/ouro compile` would read that line, so an issue would stay blocked long after its trigger
     closed, and a blocked issue with no trigger line at all would go unnoticed.
     This gate reads every open `blocked` issue and reports both.
 

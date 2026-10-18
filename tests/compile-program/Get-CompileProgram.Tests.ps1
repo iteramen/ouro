@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Fixture suite for Get-CompileProgram.ps1: the renderer of /ouro:compile.
+    Fixture suite for Get-CompileProgram.ps1: the renderer of `python3 bin/ouro compile`.
 .DESCRIPTION
     Feeds the script small hand-written analyzer graphs, with the pull request, blocked-issue and
     issue reads handed over as JSON, and asserts on its stdout, stderr and exit code. Rows: the
@@ -88,12 +88,12 @@ function New-IssueList($Issues) {
 function Invoke-Area($GraphJson, $ListJson, [string]$Prs = '[]', [string[]]$Extra = @()) {
     Invoke-Prog $GraphJson (@('-Intent', 'batch', '-Areas', 'skills,gates', '-IssuesJson', $ListJson) + $Extra) $Prs
 }
-# The area batches of an output as '1 2 3 (skills)', joined by ' | ': a /ouro:fuse line with an area
+# The area batches of an output as '1 2 3 (skills)', joined by ' | ': a `batch:` line with an area
 # line under it. The analyzer's batches have none under them, so they are left out.
 function Get-AreaSets([string]$Text) {
     $lines = @($Text -split "`n")
     $sets = for ($k = 0; $k -lt $lines.Count - 1; $k++) {
-        if ($lines[$k].StartsWith('/ouro:fuse ') -and $lines[$k + 1] -cmatch '^  area: (.+)$') { "$($lines[$k].Substring(11)) ($($Matches[1]))" }
+        if ($lines[$k].StartsWith('batch: ') -and $lines[$k + 1] -cmatch '^  area: (.+)$') { "$($lines[$k].Substring(7)) ($($Matches[1]))" }
     }
     @($sets) -join ' | '
 }
@@ -160,7 +160,7 @@ try {
         -Batches '[[1,2],[5,6]]' -Waves '[[1,4,5,7],[2],[3,6]]'
     $r = Invoke-Prog $bat @('-Intent', 'batch')
     Assert-Equal 0 $r.Code 'row 4: exit 0'
-    Assert-Match '(?m)^/ouro:fuse 1 2\n  shared: #1 #2 on a, b$' $r.Out 'row 4: a batch is a fuse argument list with its shared files'
+    Assert-Match '(?m)^batch: 1 2\n  shared: #1 #2 on a, b$' $r.Out 'row 4: a batch is a list of issue numbers with its shared files'
     Assert-Match '(?m)^  #1 collides with unbatched #3 \(1\)$' $r.Out 'row 4: a collision with an issue in no batch says unbatched'
     Assert-Match '(?m)^  #2 collides with unbatched #3 \(1\)$' $r.Out 'row 4: for each member'
     Assert-Match '(?m)^  #6 collides with unbatched #7 \(1\)$' $r.Out 'row 4: in the second batch too'
@@ -169,7 +169,7 @@ try {
     $r = Invoke-Prog $bat2 @('-Intent', 'batch')
     Assert-Match '(?m)^  #1 collides across batches with #3 \(1\)$' $r.Out 'row 4: a collision with a member of another batch says across batches'
     $r = Invoke-Prog $bat @('-Intent', 'batch') '[{"number":9,"body":"Fixes #2"}]'
-    Assert-NoMatch '(?m)^/ouro:fuse 1 2' $r.Out 'row 4: a batch left with one member is dropped'
+    Assert-NoMatch '(?m)^batch: 1 2' $r.Out 'row 4: a batch left with one member is dropped'
     Assert-Match 'dropped from the batch of #1 #2: #2' $r.Out 'row 4: and a line names the in-flight member'
     $many = New-Graph @(@(1, 'agent-ready', @('a')), @(2, 'agent-ready', @('a')), @(3, 'agent-ready', @('b')), @(4, 'agent-ready', @('b')), @(5, 'agent-ready', @('c')), @(6, 'agent-ready', @('d'))) `
         -Collisions '[{"a":1,"b":2,"files":["a"]},{"a":1,"b":3,"files":["x"]},{"a":1,"b":4,"files":["y"]},{"a":1,"b":5,"files":["z"]},{"a":1,"b":6,"files":["w"]}]' -Batches '[[1,2],[3,4]]' -Waves '[[1],[2],[3],[4],[5],[6]]'
@@ -180,7 +180,7 @@ try {
         -Collisions '[{"a":1,"b":2,"files":["a"]},{"a":1,"b":3,"files":["a"]},{"a":2,"b":3,"files":["a"]}]' -Batches '[[1,2,3]]' -Waves '[[1],[2],[3]]'
     $r = Invoke-Prog $trio @('-Intent', 'batch') '[{"number":9,"body":"Fixes #3"}]'
     Assert-Equal 0 $r.Code 'row 4: a batch with one in-flight member of three exits 0'
-    Assert-Match '(?m)^/ouro:fuse 1 2$' $r.Out 'row 4: and prints the other two'
+    Assert-Match '(?m)^batch: 1 2$' $r.Out 'row 4: and prints the other two'
     $r = Invoke-Prog (New-Graph @(,@(1, 'agent-ready', @('a'))) -Waves '[[1]]') @('-Intent', 'batch')
     Assert-Match 'No batch to print' $r.Out 'row 4 control: no batch says so'
 
@@ -373,7 +373,7 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     # --- row 14 (B2): a surviving batch member's collision with a dropped sibling prints ---------------------
     $r = Invoke-Prog $trio @('-Intent', 'batch') '[{"number":9,"body":"Fixes #3"}]'
     Assert-Equal 0 $r.Code 'row 14: a batch with one in-flight member of three exits 0, the recount agreeing with the lines'
-    Assert-Match '(?m)^/ouro:fuse 1 2$' $r.Out 'row 14: the other two are printed'
+    Assert-Match '(?m)^batch: 1 2$' $r.Out 'row 14: the other two are printed'
     Assert-Match '(?m)^  #1 collides with dropped batch members #3 \(in flight, PR #9\) \(1\)$' $r.Out 'row 14: #1 names its collision with the in-flight sibling, marked'
     Assert-Match '(?m)^  #2 collides with dropped batch members #3 \(in flight, PR #9\) \(1\)$' $r.Out 'row 14: and #2 too'
     Assert-NoMatch 'collides across batches' $r.Out 'row 14: it is not an across-batches collision'
@@ -474,7 +474,7 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     # --- row 25 (R3-B4): an unmarked three-member batch prints whole -------------------------------------------------------
     $r = Invoke-Prog $trio @('-Intent', 'batch')
     Assert-Equal 0 $r.Code 'row 25: a three-member batch with no pull request exits 0'
-    Assert-Match '(?m)^/ouro:fuse 1 2 3$' $r.Out 'row 25: and prints all three as fuse arguments'
+    Assert-Match '(?m)^batch: 1 2 3$' $r.Out 'row 25: and prints all three as one batch'
 
     # --- row 21 (R2-B1): a blocked or open child named by a Fixes line is marked, though the graph never read it -------
     $umbF = '{"number":29,"title":"u","state":"OPEN","labels":[{"name":"umbrella"}],"body":"- #33 d\n- #35 e"}'
@@ -537,7 +537,7 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     $arList = New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'skills'), $exp))
     $r = Invoke-Area (New-ReadyGraph 1, 2) $arList
     Assert-Equal 0 $r.Code 'row 28: exit 0'
-    Assert-Match '(?m)^Area batches \([^\n]*\):\n/ouro:fuse 1 2\n  area: skills$' $r.Out 'row 28: two express issues of one area that share no file make one area batch, a fuse line with its area line under it'
+    Assert-Match '(?m)^Area batches \([^\n]*\):\nbatch: 1 2\n  area: skills$' $r.Out 'row 28: two express issues of one area that share no file make one area batch, a batch line with its area line under it'
 
     # --- row 29: an area batch is not a "No batch to print" -------------------------------------------------
     Assert-NoMatch 'No batch to print' $r.Out 'row 29: with an area batch printed and no analyzer batch, the output does not say there is no batch'
@@ -549,8 +549,8 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     $r = Invoke-Area (New-ReadyGraph 1, 2, 10, 11 -Batches '[[10,11]]' -Collisions '[{"a":10,"b":11,"files":["f"]}]') (New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'skills'), $exp), @(10, @('agent-ready', 'skills'), $exp), @(11, @('agent-ready', 'skills'), $exp)))
     Assert-Equal 0 $r.Code 'row 30: an analyzer batch beside an area batch exits 0'
     Assert-Equal '1 2 (skills)' (Get-AreaSets $r.Out) 'row 30: the analyzer''s members are in the analyzer batch only'
-    $anaAt = $r.Out.IndexOf("/ouro:fuse 10 11`n")
-    $areaAt = $r.Out.IndexOf("/ouro:fuse 1 2`n  area: skills")
+    $anaAt = $r.Out.IndexOf("batch: 10 11`n")
+    $areaAt = $r.Out.IndexOf("batch: 1 2`n  area: skills")
     Assert-Equal $true (($anaAt -ge 0) -and ($anaAt -lt $areaAt)) 'row 30: and the area batch prints after the analyzer''s batch'
 
     # --- row 31: an area's issues are in ascending order, as numbers ----------------------------------------
@@ -617,7 +617,7 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     $in7 = New-IssueList @(1..7 | ForEach-Object { , @($_, @('agent-ready', 'skills'), $exp) })
     $r = Invoke-Area (New-ReadyGraph (1..7) -Batches '[[1,2],[5,6]]' -Collisions '[{"a":1,"b":2,"files":["f"]}]') $in7 '[{"number":9,"body":"Fixes #6"}]'
     Assert-Equal 0 $r.Code 'row 38: exit 0'
-    Assert-Match '(?m)^/ouro:fuse 1 2\n  shared: ' $r.Out 'row 38: the analyzer batch of 1 and 2 prints'
+    Assert-Match '(?m)^batch: 1 2\n  shared: ' $r.Out 'row 38: the analyzer batch of 1 and 2 prints'
     Assert-Match 'dropped from the batch of #5 #6: #6' $r.Out 'row 38: the batch of 5 and 6, left with one member by the pull request, is dropped'
     Assert-Equal '3 4 7 (skills)' (Get-AreaSets $r.Out) 'row 38: 1 and 2, and 5 of the dropped batch, are in no area batch'
 
@@ -658,9 +658,9 @@ in flight' $r.Out 'row 8: N is in wave 2, and the earlier wave names the issues 
     # --- row 44: a group of one is not printed --------------------------------------------------------------
     $r = Invoke-Area (New-ReadyGraph (1..6)) (New-IssueList @(1..6 | ForEach-Object { , @($_, @('agent-ready', 'skills'), $exp) }))
     Assert-Equal '1 2 3 4 5 (skills)' (Get-AreaSets $r.Out) 'row 44: six issues make a group of five and leave #6, which is not printed'
-    Assert-NoMatch '(?m)^/ouro:fuse 6' $r.Out 'row 44: and no fuse line carries it'
+    Assert-NoMatch '(?m)^batch: 6' $r.Out 'row 44: and no batch line carries it'
     $r = Invoke-Area (New-ReadyGraph 1, 2) (New-IssueList @(@(1, @('agent-ready', 'skills'), $exp), @(2, @('agent-ready', 'gates'), $exp)))
-    Assert-NoMatch '(?m)^/ouro:fuse' $r.Out 'row 44: one issue in each of two areas prints no batch'
+    Assert-NoMatch '(?m)^batch:' $r.Out 'row 44: one issue in each of two areas prints no batch'
 
     # --- row 45: an issue carries a declared area by its whole label name -----------------------------------
     $r = Invoke-Area (New-ReadyGraph (1..6)) (New-IssueList @(
@@ -721,6 +721,55 @@ exit 9
             @(5, @('agent-ready', 'skills'), "Size: S`r`nFlow:`r`nDoc impact on close: none`r`n"),
             @(6, @('agent-ready', 'skills'), "Size: S`nFlow:express")))
     Assert-Equal '1 6 (skills)' (Get-AreaSets $r.Out) 'row 49: a Flow: line with no value, bare, with spaces, a tab or a CRLF end, leaves the issue out; Flow: express with no space stays'
+
+    # --- row 50: a pull request's closing references and its Part line put an issue in flight ------------
+    $cr = New-ReadyGraph @(60, 61, 62)
+    $r = Invoke-Prog $cr -Prs '[{"number":80,"body":"Closes the thing","closingIssuesReferences":[{"number":60}]},{"number":81,"body":"Part 1/2 of #61\nReview: none"}]'
+    Assert-Equal 0 $r.Code 'row 50: exit 0'
+    Assert-Match 'in flight 2' $r.Out 'row 50: an issue named only by closingIssuesReferences and one named only by a Part line are both in flight'
+    Assert-Match '(?m)^  #60 t60 \(PR #80\)\n  #61 t61 \(PR #81\)$' $r.Out 'row 50: each with its pull request'
+    Assert-Match '(?m)^Wave 1 \(1\):\n  #62 t62$' $r.Out 'row 50: and the waves hold only the free one'
+    $r = Invoke-Prog $cr -Prs '[{"number":80,"body":"see Part 1/2 of #60","closingIssuesReferences":[]}]'
+    Assert-Match 'in flight 0' $r.Out 'row 50 control: a Part line mid-line and an empty closing list put nothing in flight'
+    $r = Invoke-Prog $cr @('-Repo', 'o/n') '[{"number":82,"body":"","closingIssuesReferences":[{"number":60,"repository":{"name":"n","owner":{"login":"O"}}},{"number":61,"repository":{"name":"other","owner":{"login":"o"}}}]}]'
+    Assert-Match '(?m)^In flight \(dropped from the waves\):\n  #60 t60 \(PR #82\)\n?\z' $r.Out 'row 50: a closing reference to this repository counts, its owner in any case; one to another repository does not'
+
+    # --- row 51: a batch's survivors split along their collisions ---------------------------------------
+    $abc = New-Graph @(@(1, 'agent-ready', @('a')), @(2, 'agent-ready', @('a', 'b')), @(3, 'agent-ready', @('b'))) `
+        -Collisions '[{"a":1,"b":2,"files":["a"]},{"a":2,"b":3,"files":["b"]}]' -Batches '[[1,2,3]]' -Waves '[[1,3],[2]]'
+    $r = Invoke-Prog $abc @('-Intent', 'batch') '[{"number":9,"body":"Fixes #2"}]'
+    Assert-Equal 0 $r.Code 'row 51: the recount passes when the in-flight member was the only link'
+    Assert-NoMatch '(?m)^batch:' $r.Out 'row 51: two survivors that share nothing print no batch'
+    Assert-Match 'dropped from the batch of #1 #2 #3: #2' $r.Out 'row 51: and the drop is named'
+    $abcd = New-Graph @(@(1, 'agent-ready', @('a')), @(2, 'agent-ready', @('a', 'b')), @(3, 'agent-ready', @('b', 'c')), @(4, 'agent-ready', @('c')), @(5, 'agent-ready', @('a'))) `
+        -Collisions '[{"a":1,"b":2,"files":["a"]},{"a":1,"b":5,"files":["a"]},{"a":2,"b":3,"files":["b"]},{"a":2,"b":5,"files":["a"]},{"a":3,"b":4,"files":["c"]}]' -Batches '[[1,2,3,4,5]]' -Waves '[[1,3],[2,4],[5]]'
+    $r = Invoke-Prog $abcd @('-Intent', 'batch') '[{"number":9,"body":"Fixes #2"}]'
+    Assert-Equal 0 $r.Code 'row 51: a batch that splits in two exits 0'
+    Assert-Match '(?m)^batch: 1 5$' $r.Out 'row 51: one set per linked group'
+    Assert-Match '(?m)^batch: 3 4$' $r.Out 'row 51: and the other'
+    $r = Invoke-Prog $abc @('-Intent', 'batch')
+    Assert-Match '(?m)^batch: 1 2 3$' $r.Out 'row 51 control: survivors that all link print one set, as before'
+
+    # --- row 52: an in-flight issue that is not agent-ready is a finding, not in flight -----------------
+    $nr = New-Graph @(@(70, 'needs-ruling', @('q')), @(71, 'agent-ready', @('r'))) -Waves '[[71]]' -Leverage '[{"number":70,"count":0,"gates":[]}]'
+    $r = Invoke-Prog $nr -Prs '[{"number":90,"body":"Fixes #70"},{"number":91,"body":"Fixes #71"}]'
+    Assert-Equal 0 $r.Code 'row 52: exit 0'
+    Assert-Match 'in flight 1' $r.Out 'row 52: the count holds the agent-ready one only'
+    Assert-Match '(?m)^finding: #70 t70 is needs-ruling with an open pull request, PR #90$' $r.Out 'row 52: the needs-ruling one is named with its state and pull request'
+    Assert-Match '(?m)^In flight \(dropped from the waves\):\n  #71 t71 \(PR #91\)$' $r.Out 'row 52: and the in-flight list holds the agent-ready one alone'
+
+    # --- row 53: finish marks a fired trigger and prints the next moves ---------------------------------
+    $fm = New-Graph @(@(40, 'agent-ready', @('a')), @(41, 'agent-ready', @('b')), @(42, 'needs-ruling', @('q'))) -Waves '[[40,41]]' `
+        -Leverage '[{"number":42,"count":0,"gates":[]}]'
+    $fmList = '[{"number":40,"title":"t40","state":"OPEN","labels":[{"name":"agent-ready"}]},{"number":41,"title":"t41","state":"OPEN","labels":[{"name":"agent-ready"}]},{"number":42,"title":"t42","state":"OPEN","labels":[{"name":"needs-ruling"}]},{"number":43,"title":"t43","state":"OPEN","labels":[{"name":"blocked"}]},{"number":44,"title":"t44","state":"OPEN","labels":[{"name":"blocked"}]},{"number":45,"title":"t45","state":"OPEN","labels":[{"name":"needs-triage"}]},{"number":46,"title":"t46","state":"CLOSED","labels":[]},{"number":47,"title":"t47","state":"OPEN","labels":[{"name":"blocked"}]}]'
+    $fmUmb = '{"number":39,"title":"u","state":"OPEN","labels":[{"name":"umbrella"}],"body":"- #40\n- #41\n- #42\n- #43\n- #44\n- #45\n- #46\n- #47"}'
+    $fmBlk = '[{"number":43,"title":"t43","body":"**Unblocks when:** #46 lands"},{"number":44,"title":"t44","body":"**Unblocks when:** #46 and #42 land"},{"number":47,"title":"t47","body":"**Unblocks when:** the owner says so"}]'
+    $r = Invoke-Prog $fm @('-Intent', 'finish', '-Target', '39', '-TargetJson', $fmUmb, '-IssuesJson', $fmList, '-BlockedJson', $fmBlk) '[{"number":92,"body":"Fixes #41"}]'
+    Assert-Equal 0 $r.Code 'row 53: exit 0 with the move check passing'
+    Assert-Match '(?m)^  #43 t43 -- blocked, fired: \*\*Unblocks when:\*\* #46 lands$' $r.Out 'row 53: a trigger naming only closed issues reads fired'
+    Assert-Match '(?m)^  #44 t44 -- blocked: \*\*Unblocks when:\*\* #46 and #42 land$' $r.Out 'row 53: one naming an open issue does not'
+    Assert-Match '(?m)^  #47 t47 -- blocked: \*\*Unblocks when:\*\* the owner says so$' $r.Out 'row 53: nor one naming none'
+    Assert-Match '(?m)^Next moves, in the order above:\n  #40: /ouro:run 40, a session runs it\n  #41: PR #92, landing through its own run\n  #42: owner ruling, needs the owner\n  #43: /ouro:triage 43, needs the owner to approve the label swap\n  #45: /ouro:triage 45, needs the owner to approve the verdict$' $r.Out 'row 53: the moves follow the child list, the unfired blocked ones and the closed one with none'
 
     # --- row 27: the script puts back the console code pages it changed -------------------------------------------------------------
     # CreateNoWindow gives the driver a console of its own, so the run cannot change this suite's.

@@ -16,7 +16,8 @@
                   the window and whose subject ends in `(#N)`. A GitHub squash-merge and the
                   local squash-merge drill both leave that subject; the local drill closes its
                   PRs unmerged, so a merged-PR count misses those landings. PR #N's body with a
-                  `Fixes #` line, bare or opened by one inline-code backtick, is loop-landed;
+                  `Fixes #` or `Part k/n of #` line, bare or opened by one inline-code backtick,
+                  is loop-landed;
                   anything else, an N that is not a pull request included, is the rest.
                   A landing is dated by its committer date and read from the history as last
                   fetched: one committed before a run's fetch and pushed after it, or pushed
@@ -217,7 +218,7 @@ function Get-Landings {
 # so `fixup:` and a `feat` whose summary says fix are not it.
 function Measure-Landed {
     param([object[]]$Landings, [hashtable]$Bodies)
-    $loop = @(@($Landings) | Where-Object { $Bodies[$_.Number] -and $Bodies[$_.Number] -match '(?m)^`?Fixes #\d+' }).Count
+    $loop = @(@($Landings) | Where-Object { $Bodies[$_.Number] -and $Bodies[$_.Number] -match '(?m)^`?(Fixes #|Part \d+/\d+ of #)\d+' }).Count
     $fix = @(@($Landings) | Where-Object { $_.Subject -match '^fix(\([^)]*\))?!?:' }).Count
     return [pscustomobject]@{ Loop = $loop; Rest = @($Landings).Count - $loop; Fix = $fix }
 }
