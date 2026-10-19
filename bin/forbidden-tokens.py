@@ -70,7 +70,7 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         a file name and blocks. A hook whose `python3` cannot be found exits 127, and one that
         exceeds Claude Code's hook timeout does not block either: Claude Code treats both as
         non-blocking, so a missing interpreter or a stall disables the hook.
-        The hook follows the manifest applier's rule on the binding at the event's `cwd`, read
+        The hook follows `ship.forbidden_check` on the binding at the event's `cwd`, read
         through the ouro-binding.py beside this script: a binding that passes `check` and declares
         `ship.forbidden_check = "off"` passes the call, a hit on the list included; with no list,
         the call also passes when the binding passes `check` and declares no key (or there is no
@@ -79,7 +79,7 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         no `gh` on PATH, and a read that fails or runs past the reads' shared budget of READ_BUDGET
         (6) seconds, inside the hook's own 10-second timeout, block; the binding is read only when
         a hit or a missing list would. `"off"` counts only when the command names no other
-        repository with `-R` or `--repo`, as the applier honours the key only for the repository
+        repository with `-R` or `--repo`, since the key is honoured only for the repository
         the run posts to: a call naming another is read as if the key were absent, and with no list
         the visibility read is that repository's. For this read every `-R` or `--repo` in the
         command text counts, one inside a quoted body included: it fails closed.
@@ -260,8 +260,8 @@ def reader(cwd):
 
 
 def policy(read):
-    """The binding's say on the check, read through the ouro-binding.py beside this script as the
-    applier's forbidden_policy reads it: ("off", []) for a binding that passes `check` and declares
+    """The binding's say on the check, read through the ouro-binding.py beside this script:
+    ("off", []) for a binding that passes `check` and declares
     `ship.forbidden_check = "off"` and ("absent", [slug]) for one that passes and declares no key,
     the slug being the binding's repo.slug; ("absent", []) with no binding; ("required", []) for
     every other case: `"required"`, a binding that fails `check`, a read that fails or runs past
@@ -341,7 +341,7 @@ def other_repo(command, slug):
 
 def check_off(cwd, command):
     """True when the binding at cwd turns the check off for the repository the command posts to: a
-    hit passes, as it does for the applier."""
+    hit passes."""
     kind, slug = policy(reader(cwd))
     return kind == "off" and other_repo(command, slug[0]) is None
 
@@ -351,7 +351,7 @@ def publishes_unchecked(cwd, command):
     off for the repository the command posts to, or the key is absent (no binding, no key, or
     `"off"` for another repository than the command names) and `gh repo view` reports the
     repository (the one named on the command, else the binding's repo.slug, else the working
-    directory's) PRIVATE or INTERNAL, the applier's rule. `"required"`, a binding that fails
+    directory's) PRIVATE or INTERNAL. `"required"`, a binding that fails
     `check`, a read that fails or runs past the shared READ_BUDGET, no `gh` on PATH, and any other
     visibility are False."""
     read = reader(cwd)
@@ -855,7 +855,7 @@ def selftest():
                         "gh " + "-" * 100000):
             run(["hook"], hl, stdin=ev(hostile), timeout=2)
         # a missing list blocks a publishing command and no other, unless the working directory's
-        # repository may publish without one: the applier's rule, over a gh stand-in on PATH
+        # repository may publish without one, over a gh stand-in on PATH
         stubs = os.path.join(tmp, "stubs")
         os.makedirs(stubs)
         with open(os.path.join(stubs, "gh"), "w", encoding="utf-8", newline="\n") as f:
@@ -896,7 +896,7 @@ def selftest():
         bound = mkrepo("bound-broken", {".claude/ouro.toml": toml.replace('review = "none"', 'review = "bogus"').encode()})
         code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev("gh pr merge 1 --body fine", cwd=bound))
         assert code == 2 and "missing list" in e, (code, o, e)
-        # with a list, the binding's "off" passes a hit, as it does for the applier; no key and
+        # with a list, the binding's "off" passes a hit; no key and
         # "required" keep it, and no key reads no visibility (no gh on PATH changes nothing)
         for key, want in (("off", 0), ("required", 2)):
             bound = mkrepo("listed-" + key, {".claude/ouro.toml": toml.replace('review = "none"\n', f'review = "none"\nforbidden_check = "{key}"\n').encode()})

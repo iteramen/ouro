@@ -149,7 +149,7 @@ print("Docs drift audit")
             $said = ($got | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
             Assert-Equal '0' (@($got | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] }) -join "`n") `
                 'a repo with no binding returns 0 rather than throwing'
-            Assert-Equal $true ($said -match 'INFO - rolling_issues\.drift_audit not read \(no .*ouro\.toml\)') `
+            Assert-Equal $true ($said -match 'INFO - rolling_issues\.loop_runs not read \(no .*ouro\.toml\)') `
                 'the skipped binding read is announced'
         }
         finally { Pop-Location }
@@ -173,14 +173,14 @@ review = "adversarial-review"
 [owner]
 ruling_approvers = ["me"]
 [rolling_issues]
-drift_audit = "Some Other Title"
+loop_runs = "Some Other Title"
 '@ | Set-Content -LiteralPath (Join-Path $repo '.claude/ouro.toml') -Encoding utf8
 
             $got = @(Get-RollingIssueNumber -ToolDir (Split-Path $tool -Parent) -IssuesJson $issues 6>&1)
             Assert-Equal 0 (@($got | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] }) -join "`n") `
                 'the title is read from the binding, so a declared-but-absent issue returns 0'
             $saidByKey = ($got | Where-Object { $_ -is [System.Management.Automation.InformationRecord] }) -join "`n"
-            Assert-Equal $true ($saidByKey -eq "WARN - no issue titled 'Some Other Title' (rolling_issues.drift_audit), open or closed: a gate's comment has nowhere to go; a sweep that creates the issue continues.") `
+            Assert-Equal $true ($saidByKey -eq "WARN - no issue titled 'Some Other Title' (rolling_issues.loop_runs), open or closed: a gate's comment has nowhere to go; a sweep that creates the issue continues.") `
                 'with no -Title, the title read from the binding, the WARN names the key that resolved it'
 
             Assert-Throws { Get-RollingIssueNumber -Key 'rolling_issues.docs_freshness' -ToolDir (Split-Path $tool -Parent) -IssuesJson $issues } `
@@ -339,20 +339,6 @@ sys.exit(1)
     Assert-Throws { Get-TrustedComments -CommentsJson (New-CommentsJson @(@{ login = 'stranger'; body = 'a' })) -ToolDir $trustTool.FullName } 'owner.ruling_approvers failed' 'a failed binding read throws'
 }
 finally { Remove-Item -LiteralPath $trustTool.FullName -Recurse -Force }
-
-# --- neither gate may carry the title as a literal any more -----------------------------
-# Two candidates, the same probe the resolver itself is found with above: a vendored tree is
-# flat, so a bin/-only lookup silently finds nothing -- and these are the assertions that pin
-# the defect, so losing them without a word is worse than not having them.
-foreach ($g in @('Test-IssueLabelInvariants.ps1', 'Test-RepoVariablesDoc.ps1')) {
-    $p = @((Join-Path $Base $g), (Join-Path $Base "bin/$g")) |
-        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    if (-not $p) { Write-Host "  skip: $g not found in either layout" -ForegroundColor DarkGray; continue }
-    $text = Get-Content -LiteralPath $p -Raw
-    Assert-Equal $false ($text -match '"Docs drift audit"') "$g carries no hardcoded rolling-issue title"
-    Assert-Equal $true  ($text -match 'Get-RollingIssueNumber') "$g resolves the target through the binding"
-    Assert-Equal $true  ($text -match 'RollingIssueTitle') "$g exposes -RollingIssueTitle, the escape hatch the warning names"
-}
 
 if ($failures -gt 0) { Write-Host "`n$failures assertion(s) failed" -ForegroundColor Red; exit 1 }
 Write-Host "`nall rolling-issue cases pass" -ForegroundColor Green

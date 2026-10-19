@@ -8,9 +8,7 @@
       agents/*          -> <repo>/.claude/agents/
       bin/*.ps1         -> <repo>/<ScriptsDir>/           (default scripts)
       bin/ouro-binding.py -> <repo>/<ScriptsDir>/         (the gates read the binding through it)
-      bin/apply-manifest.py -> <repo>/<ScriptsDir>/       (applies a triage manifest)
       bin/external-audit.py -> <repo>/<ScriptsDir>/       (the external-audit skill runs it)
-      bin/drift-claims.py -> <repo>/<ScriptsDir>/         (hashes the drift audit's claim evidence)
       bin/forbidden-tokens.py -> <repo>/<ScriptsDir>/     (checks text against the private token list)
       (not copied: bin/loop-outcomes.py, which the driver's weekly runs from the plugin;
        bin/ouro-version.py reads the user-scope plugin install, never a copy)
@@ -205,28 +203,14 @@ if (Test-Path -LiteralPath $binding) {
     $plan += , @($binding, (Join-Path $ScriptsDir 'ouro-binding.py'))
 }
 else { Write-Warning "bin/ouro-binding.py not found in the plugin at $Plugin - skipped" }
-# The applier's suite is vendored with it -- a tree told to run a file the copy leaves out
-# carries a gate that cannot pass.
-$applier = Join-Path $Plugin 'bin/apply-manifest.py'
-if (Test-Path -LiteralPath $applier) {
-    $plan += , @($applier, (Join-Path $ScriptsDir 'apply-manifest.py'))
-}
-else { Write-Warning "bin/apply-manifest.py not found in the plugin at $Plugin - skipped" }
-# The external-audit skill runs the driver by name, and its suite is vendored with it, the same
-# way the applier is.
+# The external-audit skill runs the driver by name, and its suite is vendored with it -- a tree
+# told to run a file the copy leaves out carries a gate that cannot pass.
 $externalAuditor = Join-Path $Plugin 'bin/external-audit.py'
 if (Test-Path -LiteralPath $externalAuditor) {
     $plan += , @($externalAuditor, (Join-Path $ScriptsDir 'external-audit.py'))
 }
 else { Write-Warning "bin/external-audit.py not found in the plugin at $Plugin - skipped" }
-# The drift audit's claim evidence is hashed and read back by this script, and its suite is
-# vendored with it, the same way the applier is.
-$claimHasher = Join-Path $Plugin 'bin/drift-claims.py'
-if (Test-Path -LiteralPath $claimHasher) {
-    $plan += , @($claimHasher, (Join-Path $ScriptsDir 'drift-claims.py'))
-}
-else { Write-Warning "bin/drift-claims.py not found in the plugin at $Plugin - skipped" }
-# The private token list's engine is copied by name beside the applier.
+# The private token list's engine is copied by name beside the external-audit driver.
 $tokenMatcher = Join-Path $Plugin 'bin/forbidden-tokens.py'
 if (Test-Path -LiteralPath $tokenMatcher) {
     $plan += , @($tokenMatcher, (Join-Path $ScriptsDir 'forbidden-tokens.py'))
@@ -305,7 +289,7 @@ Write-Host '  - .claude/ouro.toml stays; skills read it from the repo root eithe
 # The values are printed, not cited: the example binding is not in the copy plan, and the line
 # above tells the human to remove the plugin entries it lives under.
 Write-Host '  - .claude/ouro.toml [docs]: exclude = ["node_modules/", "/vendor/", "/_site/", ".claude/", "/tests/docs-freshness/fixtures/"] as the whole list (a declared list replaces the default) -- the vendored fixture tree is deliberately broken'
-Write-Host '  - .claude/ouro.toml [docs]: suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "bin/external-audit.py", "bin/apply-manifest.py", "bin/forbidden-tokens.py", "bin/loop-outcomes.py", "docs/contract.md", "docs/binding.md", "templates/"] -- the vendored docs/ouro-contract.md, docs/ouro-docs-governance.md and docs/ouro-binding.md cite plugin paths'
+Write-Host '  - .claude/ouro.toml [docs]: suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "bin/external-audit.py", "bin/forbidden-tokens.py", "bin/loop-outcomes.py", "docs/contract.md", "docs/binding.md", "templates/"] -- the vendored docs/ouro-contract.md, docs/ouro-docs-governance.md and docs/ouro-binding.md cite plugin paths'
 # The installer appends these two on every onboarding, and vendoring does not run it, so a tree
 # it never onboarded lacks them. The docs gate honours a committed .gitignore only.
 Write-Host '  - .gitignore: .claude/worktrees/ and .claude/ouro.local.toml, committed, the two entries Install-Ouro.ps1 appends (docs/ouro-binding.md, what a consumer must gitignore) -- without the overlay''s, the docs gate reports the vendored binding doc''s citations of that path'

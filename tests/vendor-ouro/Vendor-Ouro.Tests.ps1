@@ -21,7 +21,7 @@
     same directory, and the suppress_prefixes line holds the bin paths the vendored docs cite
     beside its three present entries and no bare bin prefix, and one line names the two
     .gitignore entries the installer appends. A plugin root holding none
-    of the ten files a run reaches by name warns once per missing file and plans the rest at
+    of the seven files a run reaches by name warns once per missing file and plans the rest at
     exit 0.
 
     A -ScriptsDir that resolves outside the tree -- a `..` segment that walks out of it, a sibling
@@ -34,7 +34,7 @@
     where it is kept: one case for both, differing only in where the scripts land.
 
     Vendored to the root beside a bin/ of the consumer's own, whose Get-RepoSlug.ps1 and
-    apply-manifest.py throw on load, the vendored repo-slug suite and the vendored python suite
+    external-audit.py throw on load, the vendored repo-slug suite and the vendored python suite
     each exit 0, so each loaded the flat script rather than the consumer's; and the vendored
     script-help suite prints its skip line and exits 0 though that bin/ is there, still skips when
     that bin/ holds a gate of the same name that is not the plugin's copy, a directory of that
@@ -44,7 +44,7 @@
     cannot be held open or the filesystem does not deny a read of a file held open with no sharing.
 
     A plugin root whose own name holds a '*', beside a sibling the pattern matches, vendors its
-    own files and nothing of the sibling's -- the ten destinations a run reaches by name, which
+    own files and nothing of the sibling's -- the seven destinations a run reaches by name, which
     both roots hold under the same names, compared by content. A System-attribute file, and a
     skill directory that is one, are planned, and so is a link to a file. A link to a directory
     under a skill is not walked through, nor is one to the root above it.
@@ -133,9 +133,7 @@ function New-Link([string]$Dir, [string]$Rel, [string]$Target) {
 }
 # The (plugin source, repo-relative destination) pairs a run reaches by name instead of by
 # enumerating a directory.
-$ByNamePairs = @(@('bin/apply-manifest.py', 'scripts/apply-manifest.py'),
-    @('bin/drift-claims.py', 'scripts/drift-claims.py'),
-    @('bin/external-audit.py', 'scripts/external-audit.py'),
+$ByNamePairs = @(@('bin/external-audit.py', 'scripts/external-audit.py'),
     @('bin/forbidden-tokens.py', 'scripts/forbidden-tokens.py'),
     @('bin/ouro-binding.py', 'scripts/ouro-binding.py'),
     @('docs/binding.md', 'docs/ouro-binding.md'),
@@ -143,9 +141,9 @@ $ByNamePairs = @(@('bin/apply-manifest.py', 'scripts/apply-manifest.py'),
     @('docs/docs-governance.md', 'docs/ouro-docs-governance.md'),
     @('templates/documentation-rule.md', '.claude/rules/documentation.md'))
 $ByNameSources = @($ByNamePairs | ForEach-Object { $_[0] })
-# A plugin root under $scratch: the script itself, the ten files a run reaches by name, and the
+# A plugin root under $scratch: the script itself, the seven files a run reaches by name, and the
 # $Files a run reaches by enumerating. Every file holds $Tag, so a copy says which root it is from.
-# -NoByName leaves all ten out, which is the root a run must warn about rather than skip silently.
+# -NoByName leaves all seven out, which is the root a run must warn about rather than skip silently.
 # The writes go through System.IO, since a root's name may hold a character a provider path globs.
 function New-PluginRoot([string]$Name, [string]$Tag, [string[]]$Files, [switch]$NoByName) {
     $root = Join-Path $scratch $Name
@@ -305,8 +303,6 @@ try {
             @('docs/docs-governance.md', 'docs/ouro-docs-governance.md'),
             @('docs/binding.md', 'docs/ouro-binding.md'),
             @('templates/documentation-rule.md', '.claude/rules/documentation.md'),
-            @('bin/apply-manifest.py', 'scripts/apply-manifest.py'),
-            @('bin/drift-claims.py', 'scripts/drift-claims.py'),
             @('bin/forbidden-tokens.py', 'scripts/forbidden-tokens.py'),
             @('bin/Vendor-Ouro.ps1', 'scripts/Vendor-Ouro.ps1'))) {
         Assert-Equal $false ((Get-RootHex $Base $pair[0]) -ceq '<no source>') "and $($pair[0]) is there to compare"
@@ -378,11 +374,11 @@ try {
     $list = [regex]::Match(($suppress -join "`n"), 'suppress_prefixes = \[([^\]]*)\]').Groups[1].Value
     $values = @([regex]::Matches($list, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
     foreach ($prefix in 'bin/Get-RollingIssue.ps1', 'bin/Test-AgentReadyAnchors.ps1', 'bin/Test-AgentReadyShape.ps1',
-        'bin/external-audit.py', 'bin/apply-manifest.py', 'bin/forbidden-tokens.py', 'bin/loop-outcomes.py', 'docs/contract.md', 'docs/binding.md', 'templates/') {
+        'bin/external-audit.py', 'bin/forbidden-tokens.py', 'bin/loop-outcomes.py', 'docs/contract.md', 'docs/binding.md', 'templates/') {
         Assert-Equal $true ($values -ccontains $prefix) "holding $prefix"
     }
     Assert-Equal $false ($values -ccontains 'bin/') 'and no bare bin/ prefix, which would hide the scripts directory whole'
-    Assert-Equal 10 $values.Count 'and nothing else'
+    Assert-Equal 9 $values.Count 'and nothing else'
     Assert-Equal $true (($suppress -join "`n") -clike '*docs/ouro-binding.md*') 'and its reason names the third vendored doc'
     # The installer's two .gitignore entries, which a vendored tree that never runs it lacks: without
     # the overlay's, the docs gate reports the vendored binding doc's own citations of that path.
@@ -592,7 +588,7 @@ try {
     $decoy = 'ouro-389-decoy'
     New-Item -ItemType Directory -Force -Path (Join-Path $repo 'bin') | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $repo 'bin/Get-RepoSlug.ps1'), "throw '$decoy'`n", $Utf8)
-    [System.IO.File]::WriteAllText((Join-Path $repo 'bin/apply-manifest.py'), "raise RuntimeError('$decoy')`n", $Utf8)
+    [System.IO.File]::WriteAllText((Join-Path $repo 'bin/external-audit.py'), "raise RuntimeError('$decoy')`n", $Utf8)
 
     # The vendored resolver runs python3 by that name, so both children need it.
     $python = Find-Python
@@ -600,8 +596,8 @@ try {
     else {
         $slugRun = Invoke-Child $Pwsh @('-NoProfile', '-File', (Join-Path $repo 'tests/repo-slug/Get-RepoSlug.Tests.ps1'))
         Assert-Child $slugRun 'the vendored repo-slug suite loads the flat resolver, not the decoy in the consumer''s bin/'
-        $applyRun = Invoke-Child $python @((Join-Path $repo 'tests/apply-manifest/apply-manifest.Tests.py'))
-        Assert-Child $applyRun 'the vendored python suite loads the flat applier, not the decoy in the consumer''s bin/'
+        $applyRun = Invoke-Child $python @((Join-Path $repo 'tests/external-audit/external-audit.Tests.py'))
+        Assert-Child $applyRun 'the vendored python suite loads the flat driver, not the decoy in the consumer''s bin/'
     }
 
     $helpRun = Invoke-Child $Pwsh @('-NoProfile', '-File', (Join-Path $repo 'tests/script-help/Test-ScriptHelp.Tests.ps1'))
@@ -767,16 +763,16 @@ try {
     }
 
     # A plugin root of its own for the cases below: what a run enumerates, what it lists when it
-    # enumerates that root, and the ten destinations it reaches by name instead.
+    # enumerates that root, and the seven destinations it reaches by name instead.
     $ownFiles = @('bin/Real-Gate.ps1', 'skills/real/SKILL.md', 'agents/real.md', 'tests/real/Real.Tests.ps1')
     $enumPlan = @('.claude/agents/real.md', '.claude/skills/real/SKILL.md', 'scripts/Real-Gate.ps1',
         'scripts/Vendor-Ouro.ps1', 'scripts/tests/real/Real.Tests.ps1')
     $ownPlan = @($enumPlan + @($ByNamePairs | ForEach-Object { $_[1] })) | Sort-Object
     $byName = $ByNamePairs
 
-    # ── a plugin root holding none of the ten files a run reaches by name ────────────────
-    # Each of the ten is one warning naming it, and the enumerated plan still lands: a silent skip
-    # delivers the applier's fixture suite without the applier, at exit 0.
+    # ── a plugin root holding none of the seven files a run reaches by name ────────────────
+    # Each of the seven is one warning naming it, and the enumerated plan still lands: a silent skip
+    # delivers a fixture suite without the script it tests, at exit 0.
     $bare = New-PluginRoot 'bareroot' 'real' $ownFiles -NoByName
     $repo = New-Fixture
     $run = Invoke-Vendor $repo -Script (Join-Path $bare 'bin/Vendor-Ouro.ps1')
@@ -793,7 +789,7 @@ try {
     # ── 7. a plugin root whose own name holds a '*' ───────────────────────────────────────
     # On Linux, Get-ChildItem -LiteralPath globs a '*' or '?' in the directory's own path, so the
     # plan is read out of whatever sibling the pattern matches -- and that tree lands in the
-    # consumer's repository at exit 0. The sibling holds the ten by-name destinations under the
+    # consumer's repository at exit 0. The sibling holds the seven by-name destinations under the
     # same names, so those are compared by content: a provider path that globs the same way would
     # copy the sibling's bytes to the right destination. Where such a name cannot be created, the
     # case skips.

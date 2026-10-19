@@ -62,8 +62,7 @@ function Get-AnchorFindings {
     $Text = [regex]::Replace($Text, '(?m)^Doc impact on close\b.*$', '')
 
     # 1. Backticked repo paths must resolve. A span containing whitespace (a command line
-    # or prose) is not a path anchor -- whitespace spans follow Get-DocCitations' rule in
-    # Get-DriftAuditTargets.ps1. A dead path cited inside a command line is deliberately
+    # or prose) is not a path anchor. A dead path cited inside a command line is deliberately
     # out of scope: a token that does not resolve there is as often a to-be-created
     # deliverable as a stale path.
     function Get-PathCandidate([string]$Span) {
@@ -88,9 +87,8 @@ function Get-AnchorFindings {
     function Get-NormalizedPath([string]$Path) {
         $Path -replace '\\', '/' -replace '^(\./)+', ''
     }
-    # The exact index entry, read with -z and as UTF-8, as Get-DriftAuditTargets.ps1 reads the
-    # index: plain output C-quotes a non-ASCII name, and the quoted string names no file. The
-    # caller's encoding comes back after each read.
+    # The exact index entry, read with -z and as UTF-8: plain output C-quotes a non-ASCII name,
+    # and the quoted string names no file. The caller's encoding comes back after each read.
     function Test-ExactTracked([string]$Path) {
         if ($Ref) { return $trackedFiles -ccontains $Path }
         $saved = [Console]::OutputEncoding
@@ -163,7 +161,11 @@ function Get-AnchorFindings {
     # Quotes pair left to right; the bounds apply after the unescape. A bound in the pattern
     # leaves a phrase unpaired, lending its closing quote to the next one; the trailing \? and
     # the end-of-line branch are what keep the scan linear on a line whose quotes are all escaped.
+    # A backticked span holding an unescaped quote is a command, whose quoted argument is no
+    # fragment, and is dropped first. Quoted strings and spans are scanned together, left to
+    # right, so a backtick inside a quoted fragment never opens a span.
     function Get-QuotedFragments([string]$Chunk) {
+        $Chunk = [regex]::Replace($Chunk, '"(?:[^"\\\r\n]|\\.)*\\?"|`[^`\r\n]*`', { param($m) if ($m.Value[0] -eq '`' -and $m.Value -match '(?<!\\)"') { ' ' } else { $m.Value } })
         [regex]::Matches($Chunk, '"(?<frag>(?:[^"\\\r\n]|\\.)*)\\?(?<close>"|(?=[\r\n]|\z))') |
             Where-Object   { $_.Groups['close'].Value -eq '"' } |
             ForEach-Object { $_.Groups['frag'].Value -replace '\\"', '"' } |

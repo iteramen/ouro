@@ -15,22 +15,23 @@ from . import sh
 USAGE = []  # one row per node call: {node, session, input, output, cache_read, cache_creation, cost}
 _CALLS = {}
 
-TIMEOUTS = {"BUILD": 3600, "REVIEW": 3600, "TRIAGE": 600, "FOLLOWUP": 600}
-MODEL_ROLE = {"BUILD": "builder", "REVIEW": "reviewer", "TRIAGE": "builder", "FOLLOWUP": "builder"}
+TIMEOUTS = {"BUILD": 3600, "REVIEW": 3600, "TRIAGE": 600, "FOLLOWUP": 600, "CHECKPOINT": 3600}
+MODEL_ROLE = {"BUILD": "builder", "REVIEW": "reviewer", "TRIAGE": "builder", "FOLLOWUP": "builder", "CHECKPOINT": "builder"}
 READ_TOOLS = ["Read", "Grep", "Glob"]
 
 SCHEMAS = {
     "TRIAGE": {"type": "object", "required": ["verdict", "comment"], "properties": {
         "verdict": {"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "SPLIT", "FUSE", "STALE"]},
-        "size": {"type": "string"}, "flow": {"type": "string"}, "doc_impact": {"type": "string"},
+        "size": {"type": "string"}, "flow": {"type": "string"}, "doc_impact": {"type": "string"}, "manual": {"type": "array"},
         "comment": {"type": "string"}, "question": {"type": "string"}}},
     "BUILD": {"type": "object", "properties": {
         "subject": {"type": "string"}, "body": {"type": "string"}, "claims": {"type": "array"},
-        "gates_run": {"type": "array"}, "residue": {"type": "array"}, "stop": {"type": "object"},
+        "gates_run": {"type": "array"}, "residue": {"type": "array"}, "stop": {"type": "object"}, "manual": {"type": "array"},
         "replies": {"type": "array"}, "door": {"type": "string"}, "blast_radius": {"type": "string"}}},
     "REVIEW": {"type": "object", "required": ["verdict", "findings"], "properties": {
         "verdict": {"type": "string", "enum": ["CLEAN", "FINDINGS"]}, "findings": {"type": "array"},
         "false_record_sentences": {"type": ["integer", "string"]}, "files_read": {"type": "array"}}},
+    "CHECKPOINT": {"type": "object", "properties": {"finding": {"type": "string"}, "stop": {"type": "object"}}},
     "FOLLOWUP": {"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}}},
 }
 
@@ -98,7 +99,8 @@ def _real(name, prompt, model, tools, cwd, timeout, denied):
     if env.get("is_error"):
         return "", env.get("session_id", ""), f"claude exited {r.code} with is_error; result: {_tail(env.get('result', ''))!r}; stderr tail: {_tail(r.err)!r}"
     if isinstance(env.get("structured_output"), dict):
-        return json.dumps(env["structured_output"]), env.get("session_id", ""), ""
+        denied = env.get("permission_denials") if name == "BUILD" else None  # the calls the harness refused BUILD, each with its tool_input: a path under .claude/ is a manual step
+        return json.dumps({**env["structured_output"], **({"_denied": denied} if denied else {})}), env.get("session_id", ""), ""
     return str(env.get("result", "")), env.get("session_id", ""), ""
 
 

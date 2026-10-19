@@ -319,9 +319,6 @@ try {
         @{ Name = 'Test-AgentReadyAnchors.ps1'; Run = { & (Join-Path $Bin 'Test-AgentReadyAnchors.ps1') -Comment -Demote } },
         @{ Name = 'Test-AgentReadyShape.ps1'; Run = { & (Join-Path $Bin 'Test-AgentReadyShape.ps1') -Issue 1 -Demote -AreaLabels @() -TypeLabels @() } },
         @{ Name = 'Get-RollingIssue.ps1'; Run = { Get-RollingIssueNumber -Title 'Ledger' -ToolDir $Bin } },
-        @{ Name = 'Get-IntakeTargets.ps1'; Run = { & (Join-Path $Bin 'Get-IntakeTargets.ps1') -NewSince 2026-09-01 -RollingIssueTitles 'x' } },
-        @{ Name = 'Test-IssueLabelInvariants.ps1'; Run = { & (Join-Path $Bin 'Test-IssueLabelInvariants.ps1') -Comment -RollingIssueTitle 'Ledger' } },
-        @{ Name = 'Test-RepoVariablesDoc.ps1'; Run = { & (Join-Path $Bin 'Test-RepoVariablesDoc.ps1') -DocPath 'doc.md' -Comment -RollingIssueTitle 'Ledger' } },
         @{ Name = 'Get-FootprintGraph.ps1'; Run = { & (Join-Path $Bin 'Get-FootprintGraph.ps1') } },
         @{ Name = 'Get-CompileProgram.ps1'; Run = { & (Join-Path $Bin 'Get-CompileProgram.ps1') -Graph $emptyGraph -Intent unblock }; ViaR = $true }
     )
@@ -414,21 +411,6 @@ try {
         $threw = try { $null = Get-RollingIssueNumber -Title 'Ledger' -ToolDir $Bin -IssuesJson $closed 6>&1; '' } catch { "$_" }
         Assert-Match 'no repository to address' $threw 'the injected closed ledger throws rather than reopening unnamed'
         Assert-Equal 0 (Get-IssueCalls).Count 'the injected reopen makes no gh call'
-
-        Reset-Case
-        $threw = try { & (Join-Path $Bin 'Get-IntakeTargets.ps1') -NewSince 2026-09-01 -RollingIssueTitles 'x' | Out-Null; '' } catch { "$_" }
-        Assert-Match 'the repository to select from is not named' $threw 'the intake selector throws rather than selecting'
-        Assert-Equal 0 (Get-IssueCalls).Count 'the intake selector makes no gh call'
-
-        Reset-Case
-        $out = (& (Join-Path $Bin 'Test-IssueLabelInvariants.ps1') -Comment -RollingIssueTitle 'Ledger' 6>&1 | Out-String)
-        Assert-Match '::warning::state-label gate: no issue read' $out 'the label-invariant gate annotates the skip'
-        Assert-Equal 0 (Get-IssueCalls).Count 'the label-invariant gate makes no gh call'
-
-        Reset-Case
-        $out = (& (Join-Path $Bin 'Test-RepoVariablesDoc.ps1') -DocPath 'doc.md' -Comment -RollingIssueTitle 'Ledger' 6>&1 | Out-String)
-        Assert-Match '::warning::repo-variable gate: no repo variable read' $out 'the repo-variable gate annotates the skip'
-        Assert-Equal 0 (Get-IssueCalls).Count 'the repo-variable gate makes no gh call'
     }
     finally { Pop-Location }
 }

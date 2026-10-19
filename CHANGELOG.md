@@ -15,6 +15,55 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.1.0] - 2026-10-19
+
+- The driver runs no gate the pull request's checks run, under full as under the other classes:
+  the checks are the gate run, and the record names the selected gates they run in place of
+  "none run by the driver". The BUILD brief names, in every class, each selected gate with
+  paths, for the builder to run when its change touches them, and the reviewer runs no build,
+  gate or suite the checks already ran, in the probe format as in the sized review.
+- The pull request record is the newest BUILD answer's: door, blast radius, summary, follow-ups
+  and the gates it ran move with each fix round, and a fix round that changes no file commits
+  its record on an empty commit instead of ending the run. The BUILD brief carries the trusted
+  triage verdict and the trusted comments after it, which amend the spec. The `Review:` line
+  counts a finding once, a verification marking one that still stands `STANDS`. `ouro run N`
+  refuses, before any branch, when an open pull request from another branch carries `Fixes #N`
+  or this part's `Part` line, and the follow-up node no longer refiles a line that names an issue.
+- A path under `.claude/`, which the harness refuses the build node, is a manual step: on a
+  promotion the triage node names the paths the change edits among the body's backticked ones,
+  triage writes a `Manual: <path>` line for each, the build node returns the edit it would make
+  there, the pull request lists them under Manual steps, the union over the branch's commits,
+  and waits for a person to apply them and merge, whatever the policy. A denial under `.claude/`
+  the node meets joins that list, the run no longer stops on it as an open decision, and a
+  direct-lane build with a step takes the pull request path.
+- Copilot gets one review round per pull request: a thread its re-review of the fix opens, or
+  one left after a round that declined, is answered in a reply for the merger, not built again.
+- The anchor gate skips a backticked span that holds a double quote, so the quoted argument of a
+  backticked command is no longer read as a fragment that fails to grep. Quoted strings and
+  spans are scanned together left to right, so backticks inside a quoted fragment still belong
+  to it.
+- **Consumer contract:** `ouro run N` on an `agent-ready` issue carrying `checkpoint` runs the
+  spec trust check and the anchor verify, then a read-only node (Read, Grep, Glob), and posts its
+  `**Checkpoint finding**` comment: no branch, worktree or commit, exit 0. A trusted finding newer
+  than the newest trusted `**Triage**` makes a re-run refuse, naming it.
+- The scripts only the weekly pass ran are gone: `apply-manifest.py`, `drift-claims.py`,
+  `Get-IntakeTargets.ps1`, `Get-DriftAuditTargets.ps1`, `Get-LoopMetrics.ps1`,
+  `Test-BlockedTriggers.ps1`, `Test-UmbrellaChildren.ps1`, `Test-IssueLabelInvariants.ps1`
+  and `Test-RepoVariablesDoc.ps1`, with their suites, and the `verifier` agent. The
+  binding schema drops `[models].verifier`, `[rolling_issues].drift_audit` and `[overlays].drift`;
+  `Get-RollingIssueNumber -Key` defaults to `rolling_issues.loop_runs`; `Vendor-Ouro.ps1` no
+  longer copies `apply-manifest.py` or `drift-claims.py`.
+  **Consumer contract:** a binding that sets `[models].verifier`, `[rolling_issues].drift_audit`
+  or `[overlays].drift` now fails the binding check as an unknown key; delete the key. A
+  workflow step that calls a deleted script is removed, and a `suppress_prefixes` entry naming
+  `bin/apply-manifest.py` is dropped. A caller of `Get-RollingIssueNumber` that relied on the
+  `-Key` default passes `-Key` or `-Title`.
+- `ouro triage` runs the shape gate on an issue it promotes, as `ouro run` does at verify
+  (`Test-AgentReadyShape.ps1 -Issue N -Demote`). A body the gate refuses goes back to
+  `needs-triage` with the gate's finding, and the command exits 3.
+- The driver reads the push lease only from `Sync-Branch.ps1`'s own `lease:` line. A merged base
+  commit whose subject held `release: ` was read as a lease, and the push refused it.
+
 ## [v1.0.2] - 2026-10-18
 
 - The release carries `.docs-freshness-ignore`, whose entries exempt the paths this changelog's

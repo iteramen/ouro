@@ -23,7 +23,7 @@ stdlib only, like bin/*.py. Run: python3 tests/external-audit/external-audit.Tes
 import atexit, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tempfile, time
 
 # Two levels up is the plugin root (the driver under bin/) or, once vendored, the scripts dir
-# itself, where the vendor copies it flat -- the way the apply-manifest suite resolves its subject.
+# itself, where the vendor copies it flat.
 BASE = pathlib.Path(__file__).resolve().parents[2]
 DRIVER = next((p for p in (BASE / "external-audit.py", BASE / "bin" / "external-audit.py") if p.is_file()), None)
 if DRIVER is None:

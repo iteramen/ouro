@@ -71,8 +71,8 @@ MERGES = ("squash", "merge")
 # original shape -- merge to sync, squash to land, a linear default branch -- and it is what both
 # keys already default to, so a binding that declares none of the three lands that way.
 LANDINGS = {f"{sync}-{merge}": (sync, merge) for sync in SYNCS for merge in MERGES}
-# ship.forbidden_check: whether bin/apply-manifest.py matches what it posts against the private
-# token list. Absent follows the target repository's visibility (see docs/binding.md).
+# ship.forbidden_check: whether the forbidden-tokens hook matches what a session posts against the
+# private token list. Absent follows the target repository's visibility (see docs/binding.md).
 FORBIDDEN_CHECKS = ("required", "off")
 # ship.direct: globs of the files the direct lane may push without a pull request or a review. A
 # glob is matched with fnmatchcase against the repository-relative path in forward slashes, so `*`
@@ -103,7 +103,7 @@ def gate_paths(data):
 
 # [models] roles and the aliases each may hold -- never a pinned version, so a role follows the
 # current model. Absent is the skill's own default, named beside each role in docs/binding.md.
-MODEL_ROLES = ("builder", "builder_trivial", "reviewer", "verifier")
+MODEL_ROLES = ("builder", "builder_trivial", "reviewer")
 MODEL_VALUES = ("opus", "sonnet", "haiku", "fable")
 # The contract's eight states and two modifiers: fixed by it, never declared under [labels].
 CONTRACT_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage",
@@ -127,7 +127,7 @@ SCHEMA = {
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
     "models": {role: str for role in MODEL_ROLES},
-    "rolling_issues": {"drift_audit": str, "loop_runs": str, "docs_freshness": str, "comments_freshness": str},
+    "rolling_issues": {"loop_runs": str, "docs_freshness": str, "comments_freshness": str},
     # Every key is optional: an absent [docs] table means the docs gate runs on its own
     # defaults. One key per configurable parameter the gate exposes.
     "docs": {
@@ -144,7 +144,7 @@ SCHEMA = {
         "banned": dict,            # known-dead substring -> reason. Free keys: they are data.
     },
     "authority": {"local": list},
-    "overlays": {"implement": list, "review": list, "land": list, "drift": list},
+    "overlays": {"implement": list, "review": list, "land": list},
     "owner": {"role": str, "ruling_approvers": list},
 }
 REQUIRED = ("schema", "repo.slug", "repo.default_branch", "ship.policy", "ship.review", "owner.ruling_approvers")
@@ -563,8 +563,11 @@ ruling_approvers = ["someone"]
             out, err = got.stdout.decode("utf-8", errors="replace"), got.stderr.decode("utf-8", errors="replace")
             assert got.returncode == code and want in out and "Traceback" not in err, (args, got.returncode, out, err)
 
-    valid = tomllib.loads(base + "\n[overlays]\nimplement = []\nland = []\ndrift = [\"docs/forensics\"]\n")
+    valid = tomllib.loads(base + "\n[overlays]\nimplement = []\nland = []\n")
     assert validate(valid) == [], validate(valid)
+    for table, key in (("models", "verifier"), ("rolling_issues", "drift_audit"), ("overlays", "drift")):
+        errs = validate(tomllib.loads(base + f'\n[{table}]\n{key} = "x"\n'))
+        assert any(f"unknown key: {table}.{key}" in e for e in errs), (table, key, errs)
     assert gate_runs(valid, "core") == ["make test", "make core-test"]
     assert gate_runs(valid, "ui") == ["make test"]
     assert lookup(valid, "gate.1.run") == "make core-test"
@@ -956,7 +959,7 @@ report_only = ["S9"]
 
     # [models] is optional, and so is every key in it; each key holds one of MODEL_VALUES.
     # Absent means the reading skill's own default (docs/binding.md), never a pinned version.
-    assert set(MODEL_ROLES) == {"builder", "builder_trivial", "reviewer", "verifier"}, MODEL_ROLES
+    assert set(MODEL_ROLES) == {"builder", "builder_trivial", "reviewer"}, MODEL_ROLES
     models = tomllib.loads(base + "\n[models]\n" + "\n".join(f'{role} = "sonnet"' for role in MODEL_ROLES) + "\n")
     assert validate(models) == [], validate(models)
     assert lookup(models, "models.reviewer") == "sonnet"

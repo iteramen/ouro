@@ -28,7 +28,8 @@ available}), each with `path:line`, the concrete input or state that triggers it
 outcome. Speculation without a reproducing scenario is not a finding.
 
 Your budget is {turn budget} turns: reaching it, stop and report what you have, listing each vector
-you did not finish under UNTESTED.
+you did not finish under UNTESTED. Run no build, gate or suite the pull request's checks already
+ran: probe the change, not the whole checker.
 
 {the "A dispatch waits for its own runs" and "Work is tied to a named head" rules of contract §7,
 read in at dispatch time}
@@ -123,8 +124,7 @@ and with this paragraph after the turn-budget one:
 
 ```
 Your work is sized to the change: probes only at the hunks it changed and the claims it makes,
-not a campaign over the file, and no build, gate or suite the pull request's checks already ran.
-The turn budget above is the ceiling, not the target.
+not a campaign over the file. The turn budget above is the ceiling, not the target.
 ```
 
 The budget paragraph sizes the work and output item 2 the evidence to match, so a hunk with no
@@ -148,7 +148,8 @@ Verify one fix commit: `{fix sha}`, in the same worktree. This is not a second r
 - Answer `VERIFIED at {fix sha}`, or list what survives at `{fix sha}`: severity (high, medium
   or low, a nit being low), path:line, trigger, wrong outcome, or path:line, the rule and the
   hunk, for a STANDARDS entry.
-- Mark each finding IN-FIX (in lines this commit changed) or OUTSIDE (in lines it did not).
+- Mark each finding STANDS (listed above and still standing), IN-FIX (new, in lines this commit
+  changed) or OUTSIDE (new, in lines it did not).
 Read-only, as before.
 
 {the PR body}

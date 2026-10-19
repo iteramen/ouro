@@ -16,8 +16,9 @@ file  →  triage  →  (rule if needed)  →  build  →  review  →  checks  
 
 **The driver is the loop.** `bin/ouro` runs the fixed sequence in code: it binds, verifies the
 issue, makes the worktree and branch, runs the gates, pushes, opens the pull request, watches the
-checks, merges by the effective policy and cleans up, and calls a model at four judgment nodes
-only: the triage verdict, the build, the review and the follow-up filing. It keeps no state of
+checks, merges by the effective policy and cleans up, and calls a model at five judgment nodes
+only: the triage verdict, the build, the review, a checkpoint's finding and the follow-up
+filing. It keeps no state of
 its own: the labels, the comments this contract defines, the branch and the pull request are the
 record, and a run resumes from any host with the binding and the tools. A session, another
 user's bot or a cron calls the driver; a session that follows the protocol by hand is held to the
@@ -72,12 +73,21 @@ names it under `[authority].local` and the skills cite it rather than restate it
   its own, at its own Flow, on a branch cut from the default branch after the previous part
   merged, its pull request's body opening `Part k/n of #N` and carrying `Fixes #N` only when k
   equals n; text parts (documentation, skill text, rules, comments) share a cycle with any part.
+  A run refuses, before it makes a branch, when an open pull request from another branch carries
+  `Fixes #N`, or the `Part k/n of #N` line of the part it takes, on its own line.
   The issue's own `Flow:` line is the loosest class among the parts and its `Size:` measures the
   largest part; L stays a SPLIT verdict for a part that does not fit one session. The anchor
   lines of a checklist deliverable start with `Part k:`. The issue stays open until its last part
   lands, and the checklist carries the progress: the landing session ticks each part's box after
   its merge, the last included, and whoever reverts a part's pull request unticks it in the same
   step. SPLIT stays for a task that is two tasks.
+- **A path under `.claude/` is a manual step**, since the harness refuses the build node an edit
+  there. On a promotion the triage node names each such path the change edits among the body's
+  backticked ones, never under `.claude/worktrees/`, and triage writes a `Manual: <path>` line
+  for it; a checklist part takes the lines its own text names. The builder returns the edit it
+  would make, the pull request lists the steps, the union over the branch's commits, and waits
+  for a person to apply them and merge, whatever the policy; a denial under `.claude/` the
+  builder meets joins the list, and a direct-lane build with a step takes the pull request path.
 - **Cite by content, not position.** Code references anchor on **symbol + a short verbatim
   fragment** (`file — Symbol — "verbatim text"`); line numbers are advisory, stamped with the
   commit they were read at (`:171 @ <sha>`). **A fragment that no longer greps *is* the
@@ -87,7 +97,8 @@ names it under `[authority].local` and the skills cite it rather than restate it
   span names a tracked file, every double-quoted fragment of 12 to 120 characters is grepped in
   that one file, plain words as much as code, and a miss is dead however the fragment is spelled.
   Anywhere else a fragment is checked only if it looks like code, and then anywhere in the
-  repository. A fragment is matched within one line of the file, so a phrase the file wraps
+  repository. A backticked span holding a double quote is a command, not a fragment, and is
+  skipped on either kind of line. A fragment is matched within one line of the file, so a phrase the file wraps
   never greps.
   **A citation into another repository is written `<repo>:<path>`, with its fragment in
   backticks instead of — never inside — the double quotes.** The gate verifies only the repo it
@@ -127,7 +138,8 @@ Most issues resolve into a diff; some resolve into an answer. An issue whose blo
 **missing evidence** rather than a missing decision takes the `checkpoint` modifier (riding on
 `agent-ready`, as `trivial` does). Its deliverable is a reviewable analysis — a map, an
 inventory, a diagnosis, a recommendation — posted as a comment on the issue. No branch, no PR,
-no code change; the run is read-only. Same anchoring discipline as any other issue, and
+no code change; the run is read-only, by `ouro run N` with the read tools only, and a trusted
+finding newer than the newest trusted `**Triage**` makes a re-run refuse. Same anchoring discipline as any other issue, and
 `Doc impact on close: none` is the normal answer.
 
 **Delivery converts the issue; it never closes it.** The issue becomes `agent-ready` if the
@@ -233,38 +245,31 @@ reads.
 
 What each class runs:
 
-- **Gates.** Under express and standard the session runs no gate itself: the checks the pull
-  request runs are the gate run; a dispatched builder
-  still runs the gates its brief names in its worktree, and that run is §7's second re-run. The
-  draft PR opens at the first push under standard and full, and at convergence under express,
-  the point where the driver has the diff converged. The
-  brief names, under express and standard, the change's own acceptance run (its red-then-green
-  test, or the command the issue names, even when that command is a gate the checks also run)
-  and the selected gates the pull request's checks do not run at all or run only to print a
-  skip; under full it also names each selected gate whose own code the change changes (the file
-  a gate's `run` names and what that file reads), which the builder reads from its own
-  uncommitted changes, new files included, against the commit the build starts from; no other
-  selected gate the checks run goes in the brief, and a list that comes out empty is the
-  builder's run. Under
-  full the session runs, on the commit, the gates whose own code the diff changes — the file a
-  gate's `run` names and what that file reads: the suite, its fixtures, the script under test —
-  since the thing under change is the checker; the pull request's checks are the rest. In every
-  class, a gate the pull request's checks do not run at all, or run only to print a skip, runs
-  locally, selected by its paths.
+- **Gates.** In every class with a pull request the session runs no gate itself: the checks the
+  pull request runs are the gate run, and the record names the selected gates they run. A gate
+  the pull request's checks do not run at all, or run only to print a skip, runs locally,
+  selected by its paths. The draft PR opens at the first push under standard and full, and at
+  convergence under express, the point where the driver has the diff converged. The brief
+  names the change's own acceptance run (its red-then-green test, or the command the issue
+  names, even when that command is a gate the checks also run), the selected gates the checks
+  do not run at all or run only to print a skip, and each selected gate with paths, which the
+  builder runs when its own uncommitted changes, new files included, touch them; that run is
+  the builder's and §7's second re-run, and a list that comes out empty is the builder's run.
 - **Review**, where the table names a session review: express takes light mode,
   for code too; standard the **sized review**; full the **probe
   format**. Wherever the table names the external reader, in every class, it runs with a
   timeout of at most 600 s. The sized review is one
   reviewer reading the diff and probing only the hunks it changed and the claims it makes, with
   no attack-vector menu and no REJECTED ledger, its evidence one line per changed hunk, and one
-  verification message after a fix; it runs no build, gate or suite the pull request's checks
-  already ran. The probe format is the full campaign of `bin/ouro/prompts/REVIEWER-PROMPT.md`.
+  verification message after a fix. The probe format is the full campaign of
+  `bin/ouro/prompts/REVIEWER-PROMPT.md`. Neither runs a build, gate or suite the pull request's
+  checks already ran.
 - **A fix commit.** express: committed locally, one push at convergence, and the reviewer's
   verification is a reading one; a fix after that push (a red check, a late finding) is pushed
-  as under standard. standard: pushed, the checks re-run, and the reviewer verifies it. full: the gates whose paths the fix touches re-run locally on it,
-  then the checks and the verification. A prose round (§7) re-runs no gate locally under any
-  class, except a gate the pull request's checks do not run at all or run only to print a skip
-  (Gates above), and its verification does not wait on the pull request's checks.
+  as under standard. standard and full: pushed, the checks re-run, and the reviewer verifies
+  it. A prose round (§7) runs no gate locally under any class, except a gate the pull request's
+  checks do not run at all or run only to print a skip (Gates above), and its verification does
+  not wait on the pull request's checks.
 - **After the merge.** full: the default branch's runs are watched to their verdicts, unless the
   pull request's green run still applies, by the three conditions a gate run on file stands under:
   the merge commit's tree (`git rev-parse <merge commit>^{tree}`) equals the tree of the head those
@@ -352,12 +357,10 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
   (the node that built it never reviews it), prompted to
   break it, with file:line evidence. The one exception is `Flow: direct` (§4): it has no
   review, and CI on the default branch is its check. **The loop re-runs the checks**, twice:
-  CI, and under
-  express or standard (§4) the change's own acceptance run on the commit — its red-then-green
-  test, or the acceptance command the issue names, recorded in the PR body (the BUILD
-  node's run), CI alone for a change that executes nothing, under full the session's gate
-  run on the commit. A reviewer reads or probes; a review that only reads satisfies that
-  half of the loop.
+  CI, and the change's own acceptance run on the commit (§4) — its red-then-green test, the
+  acceptance command the issue names, or the selected gates its paths touch, the BUILD node's
+  run; CI alone for a change that executes nothing. A reviewer
+  reads or probes; a review that only reads satisfies that half of the loop.
 - **Deterministic done-condition + STOP rule in every dispatch.** A builder that cannot meet its
   done-condition STOPs and reports; an honest STOP routes the call to a human, silent tuning buries
   it. **Every dispatch also carries a turn budget: 100 turns.** Reaching it is that same STOP —

@@ -18,141 +18,72 @@ address the repository `origin` names in place of `[repo].slug`.
 
 ## Schema (v1)
 
-```toml
-schema = 1
+One row per key the validator accepts, spelled dotted; `[[gate]]` is a list with one entry per
+verify command, and `[docs.banned]` a table whose keys are data. Required means `check` refuses
+the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 
-[repo]
-slug = "owner/name"                      # required — the GitHub repo; never embed it in a skill
-default_branch = "master"                # required
-protected_branch_prefixes = ["release/"] # never squash-landed, pushed to, or branched from by an agent
-                                         # — nor removed by the branch sweep: a long-lived branch a
-                                         # merged PR once had as its head reads as finished, so list
-                                         # it here. The sweep's report mode lists everything first:
-                                         # read it before any -Delete
-checkout = "C:/src/name"                 # optional — canonical local path; skills use cwd when absent
-                                         # per-machine: belongs in ouro.local.toml (below), not here
+| Key | Values | Default | What it changes |
+|---|---|---|---|
+| `schema` | `1` | required | the schema version this document describes |
+| `repo.slug` | `"owner/name"` | required | the GitHub repository every `gh` call names; never embedded in a skill |
+| `repo.default_branch` | a branch name | required | the branch runs cut from, land on and watch |
+| `repo.protected_branch_prefixes` | branch-name prefixes | `[]` | branches an agent never squash-lands, pushes to, branches from or sweeps; list a long-lived branch a merged PR once had as its head, which the sweep otherwise reads as finished, and read the sweep's report mode before any `-Delete` |
+| `repo.checkout` | an absolute path | none | the canonical local checkout, which no ouro script reads (the driver finds the main checkout through git); per-machine, so it belongs in the overlay below, and `check` warns when the committed binding carries it |
+| `labels.scope` | label names | `[]` | scope or effort labels that may ride on any state |
+| `labels.area` | label names | `[]` | the area labels a gate's `areas` selects on; the shape gate requires at least one on every agent-ready issue, an empty or undeclared set skipping that check, and an issue with several runs every gate any of them selects |
+| `labels.type` | label names | `[]` | the type labels; the shape gate requires exactly one on every agent-ready issue, an empty or undeclared set skipping that check; disjoint from `area` |
+| `gate.areas` | area labels, or `"*"` | required per entry | the issues that select the gate; `"*"` is every issue |
+| `gate.run` | a command line | required per entry | the verify command, run from the repository root; `<ouro>` in it is the plugin root |
+| `gate.ci` | a pwsh command line | `run` | what CI runs in place of `run`; one that only prints a skip makes the driver run `run` locally in every class |
+| `gate.paths` | git pathspecs | none | the gate runs only when the diff changes one of them |
+| `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the effective policy is the stricter of the repository's and the issue's |
+| `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
+| `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe: Choosing `ship.review` below |
+| `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's |
+| `ship.external_cli` | `grok`, `claude`, `codex`, `copilot` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
+| `ship.external_model` | a model name | the CLI's own default | the reader's model; one the CLI refuses counts as a round-1 failure |
+| `ship.landing` | `merge-squash`, `rebase-squash`, `rebase-merge`, `merge-merge` | `merge-squash` | the sync and merge answers in one word: The landing policy below |
+| `ship.sync` | `merge`, `rebase` | `merge` | how a branch is brought up to date before its pull request |
+| `ship.merge` | `squash`, `merge` | `squash` | how a pull request lands |
+| `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing: Rules the skills apply below |
+| `ship.forbidden_check` | `required`, `off` | follows the target repository's visibility | whether the hook checks what a session posts against the private token list: The forbidden-token check below |
+| `ship.direct` | globs | none, the lane off | the files the direct lane may push |
+| `models.builder` | `opus`, `sonnet`, `haiku`, `fable` | `sonnet` | the model of the BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes |
+| `models.builder_trivial` | the same | `sonnet` | the BUILD node's model on a `trivial` issue |
+| `models.reviewer` | the same | `opus` | the REVIEW node's model |
+| `rolling_issues.loop_runs` | an exact issue title | none | the issue `bin/loop-outcomes.py` appends one comment per run to |
+| `rolling_issues.docs_freshness` | an exact issue title | none | the docs sweep's rolling issue; no ouro script reads it |
+| `rolling_issues.comments_freshness` | an exact issue title | none | the rolling issue of a comments sweep the repository runs itself; no ouro script reads it |
+| `docs.extensions` | file extensions | the gate's | what makes a code-span token path-shaped |
+| `docs.exclude` | substrings of the slash-prefixed relative path | the gate's | scope exclusions; `[]` means none, so a vendored tree is scanned |
+| `docs.suppress_prefixes` | path prefixes | the gate's | references never reported: another repository, build output |
+| `docs.generated_pattern` | a regex | the gate's | a generated doc tree the gate skips |
+| `docs.html_globs` | globs | the gate's | HTML pages whose relative hrefs and code paths must resolve; `exclude` still applies |
+| `docs.index_path` | a path | the gate's | the doc index; with `indexed_trees`, arms both index checks |
+| `docs.indexed_trees` | paths | the gate's | the trees whose docs must be indexed |
+| `docs.index_exempt` | regexes | the gate's | paths exempt from the coverage check |
+| `docs.planning_paths` | regexes | the gate's | docs where work-remaining content is allowed |
+| `docs.report_only` | signal ids | the gate's | signals that never block |
+| `docs.banned` | substring = reason | none | known-dead substrings, each with the reason the block names; the keys are data, so a typo in one is not caught |
+| `authority.local` | paths | `[]` | repository documents that bind beyond the contract: cited, never restated |
+| `overlays.implement` | paths | `[]` | checklists the builder reads before acting: a gate only CI runs, a write that corrupts state |
+| `overlays.review` | paths | `[]` | design and style standards for a reviewer; the driver's REVIEW brief does not carry them |
+| `overlays.land` | paths | `[]` | landing checklists and tail-append hazards; no ouro script reads it |
+| `owner.role` | text | none | the role the contract calls the owner |
+| `owner.ruling_approvers` | logins | required | whose comment closes a needs-ruling and converts an architecture issue; every trust decision reads this set beside the job token's bot: the rolling-issue ledgers, the shape gate's `**Triage**` provenance, the body edits that stop a run, a checkpoint finding's author, and the `**Stop:**`, `**Triage**` and `**Checkpoint finding**` comments `bin/loop-outcomes.py` counts (its Assisted count reads the set without the bot), so list every login that edits an agent-ready body or runs triage or run |
 
-[labels]
-# The eight states (agent-ready, human-ready, needs-ruling, blocked, needs-triage, idea, umbrella,
-# architecture) and the two modifiers (trivial, checkpoint) are fixed by the contract and are NOT
-# declared here.
-scope = ["compiler"]                     # scope/effort labels that may ride on any state
-area = ["app", "sdk"]                    # area labels; a gate selects on these
-type = ["bug", "enhancement", "documentation"]   # type labels the repo's policy requires on every issue
-# The shape gate requires at least one area label and exactly one type label on every agent-ready
-# issue; an issue with several area labels runs every gate any of them selects, less those whose
-# `paths` its diff misses. An empty or undeclared set skips that check. area and type must be
-# disjoint. `check` enforces that rule and the states-and-modifiers rule at the top of this table,
-# ignoring case as GitHub label names do.
-# The installer creates these on the repository too, alongside the contract's ten: only the ones
-# missing there, and never with --force, since they are the team's, not the contract's.
-
-[[gate]]                                 # one entry per verify command; areas = ["*"] matches every issue
-areas = ["sdk"]
-run = "wsl -e bash -lc 'dotnet test Sdk/Sdk.sln -c Debug'" # dev-box only: the CI runner has no wsl
-ci = "dotnet test Sdk/Sdk.sln -c Debug"  # optional — what CI runs in place of `run`, as a pwsh command line
-paths = ["Sdk/"]                         # optional — git pathspecs; `execute`, `land` and `fuse`, and CI with selection on, run this gate only when a diff changes one
-
-[[gate]]
-areas = ["*"]
-run = "pwsh -File scripts/Test-Invariants.ps1 -BaseRef origin/main"
-
-# [[gate]]                               # a gate the plugin ships, named through the plugin root
-# areas = ["*"]
-# run = 'pwsh -File <ouro>/bin/Test-DocsFreshness.ps1'
-
-[ship]
-policy = "stop-at-pr"                    # stop-at-pr | trivial-merge | merge-on-green   (effective policy = min(repo, issue))
-unattended_classes = ["express", "standard"]   # optional, only under merge-on-green; the Flow classes the driver may merge
-                                         # unattended — express, standard, full (default: express, standard)
-review = "copilot"                       # copilot | adversarial-review | external-audit | none — see "Choosing ship.review"
-copilot_bot_id = "BOT_kgDOCnlnWA"        # required when review = "copilot"; that id is github.com-wide, not this repo's
-external_cli = "grok"                    # required when review = "external-audit"; the adapter bin/external-audit.py runs — grok, claude, codex or copilot today
-external_model = "grok-4-fast"           # optional; "default" (the CLI's own default model) when absent
-landing = "merge-squash"                 # sync and merge in one word — see "The landing policy" (default: merge-squash)
-sync = "merge"                           # merge | rebase — how `land` brings the branch up to date (default: merge)
-merge = "squash"                         # squash | merge — how the PR lands (default: squash)
-forbidden_check = "required"             # required | off — whether the manifest applier checks what it
-                                         # posts against the private token list — see "The
-                                         # forbidden-token check" (default: follows the target's
-                                         # visibility)
-direct = ["docs/notes/*.md"]             # optional — globs of the files the direct lane may
-                                         # push; off when absent — see "Rules the validator
-                                         # enforces"
-
-[models]                                 # every key optional — the model tier per role, an alias
-                                         # never a pinned version, so a role follows the current
-                                         # model. Absent means the reading skill's own default.
-builder = "sonnet"                       # opus | sonnet | haiku | fable (default: sonnet)
-builder_trivial = "sonnet"               # the `trivial`-labelled M build (default: sonnet)
-reviewer = "opus"                        # the driver's REVIEW node (default: opus)
-verifier = "opus"                        # a dispatch of agents/verifier.md (default: opus)
-
-[rolling_issues]                         # exact titles; selected with an exact-title match, never `in:title`
-drift_audit = "Docs drift audit"
-loop_runs = "Loop runs"                  # the loop metrics: Get-LoopMetrics.ps1 and loop-outcomes.py each
-                                         # append one comment per run
-docs_freshness = "Docs freshness"        # the deterministic docs sweep's rolling issue
-comments_freshness = "Comments freshness" # the rolling issue of a comments-freshness sweep the repo
-                                         # runs itself; no ouro script reads it
-
-[docs]                                   # every key optional; an absent table means the docs
-                                         # gate runs on its own defaults, which name no repo.
-                                         # The gate READS these; an explicit parameter on the
-                                         # command line still wins over what is declared here.
-                                         # An empty list means EMPTY, not "use the default":
-                                         # `exclude = []` scans node_modules. Reading needs
-                                         # ouro-binding.py beside the gate and python3 on PATH;
-                                         # without the tool (a vendored tree) the gate says so
-                                         # and runs on its defaults. No python3 on PATH is not
-                                         # a fallback for a repo that has a binding: the gate
-                                         # stops naming it, as it stops for a python3 older
-                                         # than 3.11 with the floor message ouro-binding.py
-                                         # prints.
-extensions        = [".md", ".rs"]       # what makes a code-span token path-shaped
-exclude           = ["/vendor/"]         # scope exclusions, matched as substrings of "/<relpath>"
-suppress_prefixes = ["sibling/"]         # references never reported (another repo, build output)
-generated_pattern = "api/generated/"     # REGEX for a generated doc tree to skip
-html_globs        = ["site/*.html"]      # HTML pages whose relative hrefs and <code> paths resolve;
-                                         # exclude still applies, and its default covers /_site/
-index_path        = "docs/index.md"      # the doc index; with indexed_trees, arms both index checks
-indexed_trees     = ["src/"]             # trees whose docs must be indexed; with index_path, arms both
-index_exempt      = ['(^|/)CHANGELOG']   # REGEXES exempting a path from the coverage check
-planning_paths    = ['^docs/policy/']    # REGEXES for docs where work-remaining content is allowed
-report_only       = ["S9"]               # signals that never block
-
-[docs.banned]                            # known-dead substring -> reason. The KEYS are data, so a
-                                         # typo in one cannot be detected; the reason is required
-                                         # because this signal blocks.
-"dead.example.com/old" = "renamed; Pages URLs do not follow renames"
-
-[authority]
-local = ["docs/policies.md"]             # repo docs that bind beyond the contract; cited, not restated
-
-[overlays]                               # checklists READ at the named step — never protocol replacements
-implement = [".claude/rules/localization.md"]  # what the builder must know while acting:
-                                         # a gate only CI runs, a write that corrupts state
-review = ["docs/architecture-rules.md", "docs/coding-standards.md"]
-                                         # design and style standards, which the reviewer reads
-land = []                                # tail-append hazards, landing checklists
-drift = ["docs/incidents/**"]            # point-in-time paths the drift audit skips (path prefixes; `/**` is decoration)
-
-[owner]
-role = "loop owner"                      # the role the contract calls "the owner"
-ruling_approvers = ["BoJl4apa"]          # logins whose comment closes a needs-ruling, and who
-                                         # convert an architecture issue. Every trust decision reads
-                                         # this set beside the job token's bot: the rolling-issue
-                                         # ledgers and the intake and blocked-check markers, the
-                                         # shape gate's **Triage** provenance check, the issue-body
-                                         # edits that stop an execute run, and bin/loop-outcomes.py,
-                                         # which counts a **Stop:**, **Triage** or **Checkpoint
-                                         # finding** comment only from them, and whose Assisted
-                                         # count reads the set without the bot. List every login
-                                         # that edits an agent-ready body or runs /ouro:triage
-                                         # or /ouro:run: a checkpoint finding counts
-                                         # as delivered only from these logins (and the bot's), and
-                                         # a finding from another login repeats the checkpoint run
-```
+The eight states and two modifiers are the contract's and are not declared under `[labels]`;
+`check` refuses a declared label that names one, or one both `area` and `type` hold, ignoring
+case as GitHub does, and the installer creates the declared labels on the repository beside the
+contract's, only the missing ones and never with `--force`, since they are the team's. A
+`[rolling_issues]` title is matched exactly, never with `in:title`. Under `[docs]` an explicit
+parameter on the gate's command line wins over what is declared, and an empty list means empty,
+not the default; `docs.banned` carries a reason per entry because that signal blocks; reading
+the table needs `ouro-binding.py` beside the gate and `python3` 3.11+ on PATH: without the tool
+(a vendored tree) the gate says so and runs on its defaults, and a `python3` absent or below the
+floor stops it with the floor message. An overlay adds a checklist to its step and never
+replaces the protocol. `[models]` names an alias, never a pinned version, so a role follows the
+current model.
 
 ### Choosing `ship.review`
 
@@ -217,47 +148,38 @@ absent, which is the reader's cue to take today's behaviour.
 never a pinned version, so a role follows whatever the alias currently means. Every key is
 optional; absent means the reading skill's own default, named in the schema above.
 
-`builder` is the driver's BUILD, TRIAGE and FOLLOW-UP nodes, and its fix-round build;
+`builder` is the driver's BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes, and its fix-round build;
 `builder_trivial` is the BUILD node when the issue carries `trivial`. `reviewer` is the REVIEW
-node, the adversarial pass an M always takes whatever `ship.review` names. `verifier` is the
-model of a dispatch of `agents/verifier.md`, whose own front matter (`model: opus`) is only the
-fallback for a call that passes none.
+node, the adversarial pass an M always takes whatever `ship.review` names.
 
 ### The forbidden-token check
 
-`bin/apply-manifest.py` matches every body file and `create` title it would post against the
-private token list (README, "The private token list") and refuses on a hit, and on a missing
-list except where the key and the repository's visibility say below that it does not.
-`ship.forbidden_check = "off"` turns that check off for this repository: the applier skips the
-check and the matcher lookup, and prints one line saying the binding turned it off, as it does for
-`--no-forbidden-check`. It is for a private repository whose own issues legitimately carry the
-values a list would hold, where the check refuses every apply on a host with no list and nothing
+`bin/forbidden-tokens.py hook` matches the text of each publishing `gh` or `git` call a session
+makes against the private token list (README, "The private token list") and blocks on a hit, and on
+a missing list except where the key and the repository's visibility say below that it does not.
+`ship.forbidden_check = "off"` turns that check off for this repository: the hook passes the call,
+a hit on the list included. It is for a private repository whose own issues legitimately carry the
+values a list would hold, where the check blocks every call on a host with no list and nothing
 useful can go on one. `"required"` runs the check whatever the repository's visibility, and a
-missing list refuses.
+missing list blocks.
 
-Absent, the check follows the visibility of the repository the run posts to. When a list is set
-(`OURO_FORBIDDEN_TOKENS` set and non-empty) the check runs and a hit refuses, whatever the
-visibility. When none is set, the applier reads the visibility with one `gh repo view` call, in a
-dry run too: `PRIVATE` or `INTERNAL` prints `forbidden-token check skipped: no list, private
-repository` and goes on, while `PUBLIC`, a read that fails or runs past its time bound, or any other
-value refuses as a missing list does. A private repository that wants the refusal declares
-`"required"`, which holds for runs from its own checkout.
+Absent, the check follows the visibility of the repository the call posts to. When a list is set
+(`OURO_FORBIDDEN_TOKENS` set and non-empty) the check runs and a hit blocks, whatever the
+visibility. When none is set, the hook reads the visibility with one `gh repo view` call:
+`PRIVATE` or `INTERNAL` passes the call, while `PUBLIC`, a read that fails or runs past its time
+bound, or any other value blocks as a missing list does. A private repository that wants the block
+declares `"required"`.
 
-The applier reads the key from the working directory's binding, and honours it only when that
-binding's `repo.slug` is the repository the run posts to, compared case-insensitively, and
-`ouro-binding.py check` passes that binding: run from that checkout with `--repo` naming another,
-the key counts as absent whatever its value, and an `"off"` binding says it does not turn the check
-off there. No binding is absent too. For a binding naming the repository the run posts to, a
-failed `check` or any other value counts as `"required"`. A binding read that fails counts as
-`"required"` whatever the binding names. The key is repository policy, so the machine-local overlay
-below cannot set it. It does not reach `bin/forbidden-tokens.py`'s `scan` gate, which stays
-fail-closed whatever a binding declares, since it guards the plugin's own text; the `hook` mode
-follows this same rule, read from the binding at the session's working directory and the
-repository its `repo.slug` names: `"off"` passes a hit too, a call naming another repository
-with `-R` reads as if the key were absent, no key follows the visibility only with no list, and a
-binding that fails `check` blocks as `"required"` does. The hook's scan of the command text leaves
-out the value of a `-R` or `--repo` written outside quotes: it addresses the call, it is not
-published.
+The hook reads the key from the working directory's binding, and honours it only when that
+binding's `repo.slug` is the repository the call posts to, compared case-insensitively, and
+`ouro-binding.py check` passes that binding: with `-R` or `--repo` naming another repository, the
+key counts as absent whatever its value. No binding is absent too. For a binding naming the
+repository the call posts to, a failed `check` or any other value counts as `"required"`. A binding
+read that fails counts as `"required"` whatever the binding names. The key is repository policy, so
+the machine-local overlay below cannot set it. It does not reach `bin/forbidden-tokens.py`'s `scan`
+gate, which stays fail-closed whatever a binding declares, since it guards the plugin's own text.
+The hook's scan of the command text leaves out the value of a `-R` or `--repo` written outside
+quotes: it addresses the call, it is not published.
 
 ## The machine-local overlay — `.claude/ouro.local.toml`
 
@@ -407,8 +329,9 @@ sees as a directory. The overlay entry is unchecked.
 - **Ship policy is the minimum of repo and issue.** A `trivial` label cannot exceed
   `ship.policy`; `stop-at-pr` in the binding means `trivial` is advisory and the run stops at the
   PR.
-- **A gate is the narrowest command that can fail for the diff.** The driver runs the matching
-  `[[gate]]` entries as bound, and a gate that repeats a PR's required check
+- **A gate is the narrowest command that can fail for the diff.** CI runs the matching
+  `[[gate]]` entries as bound and the driver runs locally only those the checks skip, and a
+  gate that repeats a PR's required check
   (`gh pr checks <PR> --required`) is a binding smell: its `run` should name the narrow,
   already-scoped check and leave the full suite to CI.
 - **Protected prefixes are absolute.** The driver refuses to land them and never cuts a branch

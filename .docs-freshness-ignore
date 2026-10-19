@@ -17,3 +17,11 @@ skills/land-batch/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
 skills/intake/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
 skills/fuse/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
 skills/drift/SKILL.md  # CHANGELOG.md history: deleted in 1.0.0
+bin/apply-manifest.py  # CHANGELOG.md history: deleted after 1.0.2
+bin/drift-claims.py  # CHANGELOG.md history: deleted after 1.0.2
+bin/Get-IntakeTargets.ps1  # CHANGELOG.md history: deleted after 1.0.2
+bin/Get-DriftAuditTargets.ps1  # CHANGELOG.md history: deleted after 1.0.2
+bin/Test-BlockedTriggers.ps1  # CHANGELOG.md history: deleted after 1.0.2
+bin/Test-IssueLabelInvariants.ps1  # CHANGELOG.md history: deleted after 1.0.2
+bin/Test-RepoVariablesDoc.ps1  # CHANGELOG.md history: deleted after 1.0.2
+agents/verifier.md  # CHANGELOG.md history: deleted after 1.0.2

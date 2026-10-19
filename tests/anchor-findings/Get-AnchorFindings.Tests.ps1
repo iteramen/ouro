@@ -105,6 +105,13 @@ try {
     Assert-Case ('Anchor: "' + $bt + '$fixtureAnchor = 12345' + $bt + '"') 0 0 1 `
         'enclosing backticks stripped, fragment counted and greps' | Out-Null
 
+    Assert-Case "- Check ${bt}git grep -n `"foo_bar.*baz`" src${bt} here." 0 0 0 `
+        'a double-quoted argument inside a backticked command is no fragment' | Out-Null
+    Assert-Case "- Check ${bt}git grep -n `"foo_bar.*baz`" src${bt} and `"zzz_gone_fragment();`" here." 1 0 1 `
+        'a stale quoted fragment beside a backticked command is still reported' | Out-Null
+    Assert-Case "- ${bt}src/fixture.ps1${bt} - `"zzz_gone${bt}n_frag();`" ${bt}:171 @ abc1234${bt}" 1 1 1 `
+        'a stale fragment holding a backtick is reported despite a later span' | Out-Null
+
     # --- class 3: //-spans and prose-code composites are not anchors ------------------------
     Assert-Case "Loads ${bt}//cdn.example.com/lib.js${bt} at startup." 0 0 0 `
         'protocol-relative //-span is not a path' | Out-Null

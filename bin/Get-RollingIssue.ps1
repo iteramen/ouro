@@ -48,7 +48,7 @@
 
     An open exact-title match always wins over a closed one with the same title.
 .PARAMETER Key
-    Dotted binding key naming the title. Default: rolling_issues.drift_audit.
+    Dotted binding key naming the title. Default: rolling_issues.loop_runs.
 .PARAMETER ToolDir
     Directory holding ouro-binding.py. Default: this script's own directory.
 .PARAMETER Title
@@ -63,7 +63,7 @@
 
 function Get-RollingIssueNumber {
     param(
-        [string]$Key = 'rolling_issues.drift_audit',
+        [string]$Key = 'rolling_issues.loop_runs',
         [string]$ToolDir = $PSScriptRoot,
         [string]$Title,
         [string]$IssuesJson,
@@ -186,7 +186,7 @@ function Get-RollingIssueNumber {
     Make text a gate quotes into a rolling-issue comment inert. Dot-source, then call
     ConvertTo-InertCommentText.
 .DESCRIPTION
-    The weekly pass parses the drift ledger's comments for `<!-- ... -->` markers, and a comment a
+    The weekly pass parses a rolling issue's comments for `<!-- ... -->` markers, and a comment a
     gate posts there is by the job token's bot, which the trust filter keeps. A gate that quotes an
     issue's title or a document's text into such a comment therefore writes every `<` as `&lt;`,
     so no marker can appear in what it posts.

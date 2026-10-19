@@ -40,6 +40,7 @@ REVIEW_DENIED = ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"]
 BUILD_LINE = "Ouro-Build: "
 ACCEPTANCE = ("python3 ", "python ", "pwsh ", "dotnet ", "npm ", "npx ", "pytest", "bash ", "go test")
 NO_REPLY = "No reply came from the build for this thread; nothing was changed for it."
+ONE_ROUND = "Copilot's one review round on this pull request is spent; this thread is left for the merger."
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -98,6 +99,11 @@ def outside(f):
     return isinstance(f, dict) and str(f.get("scope", "")).strip().upper() == "OUTSIDE"
 
 
+def stands(f):
+    """A verification's re-report of a finding an earlier round made: counted in that round, still a fix to make."""
+    return isinstance(f, dict) and str(f.get("scope", "")).strip().upper() == "STANDS"
+
+
 def needs_fix(rec):
     """An H or M finding a fix must answer; a first review has no fix, so its scope is ignored."""
     verifying = rec.get("round", 1) > 1
@@ -138,7 +144,13 @@ def review_line(records, reviewer_on):
     if not reviewer_on:
         return "Review: none"
     fixes = sum(1 for r in records if needs_fix(r)) - (1 if records and needs_fix(records[-1]) else 0)
-    counts = {k: sum(1 for r in records for f in r["findings"] if sev(f) == k) for k in "HML"}
+    counts, seen = {k: 0 for k in "HML"}, set()
+    for r in records:
+        for f in r["findings"]:
+            key = (sev(f), str(f.get("file")), str(f.get("line")), " ".join(str(f.get("claim") or "").split()))
+            if sev(f) in counts and not (stands(f) and r.get("round", 1) > 1) and key not in seen:  # counted once, in the round that first reported it
+                seen.add(key)
+                counts[sev(f)] += 1
     falses = [r["false"] for r in records if isinstance(r["false"], int) and not isinstance(r["false"], bool)]
     return (f"Review: rounds:{fixes} findings:H{counts['H']}/M{counts['M']}/L{counts['L']} "
             f"false-sentences:{sum(falses) if falses else 'unread'}")
@@ -160,11 +172,23 @@ def render_body(rec, review):
     raw = json.dumps(rec).replace("--", "-\\u002d")
     out = [rec.get("part_line", ""), rec.get("fixes_line", ""), review]
     out = [x for x in out if x]
-    out += ["## Merge danger", f"- **Door:** {rec.get('door', 'unstated')}", f"- **Blast radius:** {rec.get('blast', 'unstated')}",
-            "## Summary", rec.get("summary", ""), "## Changes", *[f"- {x}" for x in c],
+    out += ["## Merge danger", f"- **Door:** {rec.get('door', 'unstated')}", f"- **Blast radius:** {rec.get('blast', 'unstated')}"]
+    if rec.get("manual"):
+        out.append("## Manual steps")
+        for m in rec["manual"]:
+            out.append(f"- `{m.get('path')}`" + ("" if m.get("edit") else ": the node gave no edit; make it by hand"))
+            if m.get("edit"):
+                fence = "`" * max(3, max((len(x) for x in re.findall(r"`+", str(m["edit"]))), default=0) + 1)
+                out += ["", "  " + fence, *["  " + l for l in str(m["edit"]).splitlines()], "  " + fence, ""]
+    out += ["## Summary", rec.get("summary", ""), "## Changes", *[f"- {x}" for x in c],
             "<details><summary>Verification</summary>", ""]
-    out += [f"- Gates at {g['sha'][:7]}: `{g['cmd']}` exit {g['exit']}" for g in gates] or ["- Gates: none run by the driver"]
+    out += [f"- Gates at {g['sha'][:7]}: `{g['cmd']}` exit {g['exit']}" for g in gates]
+    if rec.get("checked"):
+        out.append("- Gates the pull request's checks run: " + ", ".join(f"`{c}`" for c in rec["checked"]))
+    elif not gates:
+        out.append("- Gates: none selected")
     out += [f"- Gate skipped, the diff touches none of its paths: `{s}`" for s in rec.get("skipped", [])]
+    out += [f"- BUILD ran `{g.get('cmd')}`: exit {g.get('exit')}" for g in rec.get("build_gates") or []]
     if rec.get("note"):
         out.append(f"- {rec['note']}")
     out += [f"- {review}", ""]
@@ -227,13 +251,13 @@ def when(text):
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def newest_trusted_triage(comments, trusted):
-    """When the newest `**Triage**` comment from a trusted author was made (the epoch when it carries no time), else None."""
+def newest_trusted_triage(comments, trusted, mark="**Triage**"):
+    """When the newest `mark` comment from a trusted author was made (the epoch when it carries no time), else None."""
     best = None
     for c in comments:
         login = str((c.get("author") or {}).get("login") or "").lower()
         first = str(c.get("body") or "").replace("\r\n", "\n").split("\n", 1)[0].strip()
-        if login in trusted and first == "**Triage**":
+        if login in trusted and first == mark:
             t = when(c.get("createdAt")) or MIN_TIME
             best = t if best is None or t > best else best
     return best
@@ -314,6 +338,87 @@ class Run:
         self.worktree = self.env.main / ".claude" / "worktrees" / self.dirname
         self.fixes = self.k is None or self.k == self.parts_n
 
+    def part_scope(self, node):
+        """The brief text that pins a checklist part's node to that part; empty on a deliverable with no checklist."""
+        if not self.k:
+            return ""
+        line = [p for p in parse_parts(self.body) if p[0] == self.k][0][2]
+        head = f"## Part {self.k}/{self.parts_n}\n\nThis run is part {self.k}/{self.parts_n}: {line}\n\n"
+        if node == "build":
+            return head + "Build this part only. Every other part is out of scope: each lands in its own pull request.\n\n"
+        return head + "A gap that another part's acceptance covers is not a finding against this change.\n\n"
+
+    def refuse_other_pr(self):
+        """An open pull request from another branch whose body fixes the issue, or carries the part this run takes, on its own line: the run would duplicate it."""
+        e = self.env
+        part = rf"|Part {self.k}/\d+ of #{self.n}" if self.k else ""
+        mine = re.compile(rf"(?m)^(Fixes #{self.n}{part})\s*$")
+        for p in e.gh_json("pr", "list", "--state", "open", "--search", f"{self.n} in:body", "--limit", "50", "--json", "number,headRefName,body,url,state"):
+            if p.get("state", "OPEN") == "OPEN" and p.get("headRefName") != self.branch and mine.search(p.get("body") or ""):
+                raise Refused(f"#{self.n} is already being fixed by pull request #{p['number']} from {p['headRefName']} ({p.get('url') or ''}): nothing to build")
+
+    def manual_paths(self):
+        """The `Manual: <path>` lines triage wrote, those its own part names when the run takes a checklist part."""
+        paths = re.findall(r"(?m)^Manual: (\S+)\s*$", self.body)
+        if self.k:
+            text = [p for p in parse_parts(self.body) if p[0] == self.k][0][2]
+            paths = [p for p in paths if f"`{p}`" in text]
+        return paths
+
+    def manual_known(self):
+        """The manual paths so far: the planned ones, then those the branch's commits already carry."""
+        known = self.manual_paths()
+        if self.commits_past_base():
+            known += [m["path"] for m in self.build_facts()["manual"] if m["path"] not in known]
+        return known
+
+    def manual_block(self):
+        paths = self.manual_known()
+        if not paths:
+            return "(none)"
+        return ("\n".join(f"- `{p}`" for p in paths) + "\n\nYou cannot edit these: the harness refuses an edit under .claude/. Build everything else, "
+                "and answer `manual` with one entry per path holding the exact edit a person makes there, as a unified diff or the whole new content.")
+
+    def claude_path(self, fp):
+        """A path under this worktree's .claude/ (never its worktrees), worktree-relative, else None: what makes a node's path or a denial's a manual step."""
+        if not fp:
+            return None
+        p = Path(str(fp))
+        if p.is_absolute():
+            try:
+                p = p.resolve().relative_to(self.worktree.resolve())
+            except ValueError:
+                return None
+        rel = p.as_posix()
+        return rel if rel.startswith(".claude/") and not rel.startswith(".claude/worktrees/") else None
+
+    def manual_steps(self, ans):
+        """The record's manual steps from one answer: the node's `manual` entries under .claude/, then each planned or denied .claude/ path it gave no edit for."""
+        steps = []
+        for m in ans.get("manual") or []:
+            rel = self.claude_path(m.get("path")) if isinstance(m, dict) else None
+            if rel and rel not in [s["path"] for s in steps]:
+                steps.append({"path": rel, "edit": str(m.get("edit") or "")})
+        denied = []
+        for d in ans.get("_denied") or []:
+            rel = self.claude_path((d.get("tool_input") or {}).get("file_path")) if isinstance(d, dict) else None
+            if rel and rel not in denied:
+                denied.append(rel)
+        if denied:
+            say(f"  denied under .claude/: {', '.join(denied)}: manual steps")
+        for p in self.manual_paths() + denied:
+            if p not in [s["path"] for s in steps]:
+                steps.append({"path": p, "edit": ""})
+        return steps
+
+    def spec_comments(self):
+        """The newest trusted `**Triage**` comment and every trusted comment after it: what amends the body (contract section 8)."""
+        trusted = self.env.trusted()
+        cs = [c for c in self.issue.get("comments") or [] if str((c.get("author") or {}).get("login") or "").lower() in trusted]
+        since = newest_trusted_triage(cs, trusted)
+        cs = [c for c in cs if since is not None and (when(c.get("createdAt")) or MIN_TIME) >= since]
+        return "\n\n".join(f"{(c.get('author') or {}).get('login')} at {c.get('createdAt')}:\n{str(c.get('body') or '').strip()}" for c in cs) or "(none)"
+
     def find_pr(self, branch=None, states=("OPEN", "MERGED")):
         prs = self.env.gh_json("pr", "list", "--head", branch or self.branch, "--state", "all", "--limit", "20", "--json",
                                "number,state,isDraft,headRefOid,mergeCommit,title,body,url,baseRefName")
@@ -358,7 +463,10 @@ class Run:
             if self.issue.get("state") == "CLOSED":
                 say(f"[2] verify: #{self.n} is closed: nothing to do")
                 return 0
+            if "checkpoint" in self.labels:
+                return self.checkpoint()
             self.verify()
+            self.refuse_other_pr()
             if self.flow == "direct" and self.direct_eligible():
                 why = self.direct_blocked()
                 if why is None:
@@ -387,19 +495,51 @@ class Run:
         remote = bool(e.git("ls-remote", "--heads", "origin", f"refs/heads/{self.branch}", check=False).out.strip())
         return local or remote
 
-    def label_problem(self):
-        """Why the labels forbid a build, or None: agent-ready present, needs-ruling and checkpoint absent."""
+    def label_problem(self, checkpoint_ok=False):
+        """Why the labels forbid a run, or None: agent-ready present, needs-ruling absent, checkpoint absent unless a finding is wanted."""
         if "agent-ready" not in self.labels:
             return f"#{self.n} is not agent-ready; run `python3 bin/ouro triage {self.n}` first"
         if "needs-ruling" in self.labels:
             return f"#{self.n} is waiting on a ruling (needs-ruling)"
-        if "checkpoint" in self.labels:
+        if "checkpoint" in self.labels and not checkpoint_ok:
             return f"#{self.n} is a checkpoint: its deliverable is a finding comment, and the driver builds only changes"
         return None
 
-    def verify(self):
+    @staticmethod
+    def stop_text(stop):
+        """The question of a node's stop answer, whether it is an object or a bare string."""
+        return str((stop.get("question") if isinstance(stop, dict) else None) or (stop if isinstance(stop, str) else json.dumps(stop)))
+
+    def checkpoint(self):
+        """A checkpoint's run: the same spec checks as a build, then a read-only node whose finding is posted; no branch, worktree or commit."""
         e = self.env
-        why = self.label_problem()
+        trusted = e.trusted()
+        comments = self.issue.get("comments") or []
+        found = newest_trusted_triage(comments, trusted, "**Checkpoint finding**")
+        if found is not None and found > (newest_trusted_triage(comments, trusted) or MIN_TIME):
+            raise Refused(f"#{self.n} already has a `**Checkpoint finding**` newer than its newest `**Triage**`: "
+                          "triage converts the issue, or a new `**Triage**` comment reopens the checkpoint")
+        self.verify(checkpoint=True)
+        if e.dry:
+            say("[4] CHECKPOINT: would run node CHECKPOINT (read tools only) and post its finding as a `**Checkpoint finding**` comment")
+            return 0
+        prompt = briefs.render("checkpoint", number=self.n, title=self.title, body=self.body,
+                               anchors=briefs.anchors_block(e.main, self.body), contract=briefs.contract_sections(e, (3,)))
+        model = e.lookup("models.builder", "sonnet")
+        say(f"[4] CHECKPOINT node ({model})")
+        ans = node.run_node("CHECKPOINT", prompt, model, list(node.READ_TOOLS), str(e.main), node.TIMEOUTS["CHECKPOINT"])
+        if ans.get("stop"):
+            self.stop_issue("open decision", self.stop_text(ans["stop"]), 3)
+        finding = str(ans.get("finding") or "").strip()
+        if not finding:
+            raise DriverError("node CHECKPOINT answered no finding")
+        e.comment_issue(self.n, f"**Checkpoint finding**\n\n{finding}\n")
+        say(f"[4] finding posted on #{self.n}")
+        return 0
+
+    def verify(self, checkpoint=False):
+        e = self.env
+        why = self.label_problem(checkpoint)
         if why:
             raise Refused(why)
         self.check_spec_trust()
@@ -419,7 +559,7 @@ class Run:
             self.stop_issue("dead anchor", "\n".join(f"- {f}" for f in found), 2)
         say("[2] verify: agent-ready, shape green, anchors resolve")
         miss = [a for a in self.areas if not any("*" in g.get("areas", []) or a in g.get("areas", []) for g in e.data.get("gate", []))]
-        if miss:
+        if miss and not checkpoint:
             self.stop_issue("gate uncovered", f"No `[[gate]]` covers the area label(s): {', '.join(miss)}.", 3)
 
     def check_spec_trust(self):
@@ -525,7 +665,7 @@ class Run:
                 last = at_head[-1]
                 if needs_fix(last):
                     self.fix_round("\n".join(f"- {sev(f)} {f.get('file')}:{f.get('line')} {f.get('claim')} ({f.get('evidence')})"
-                                             for f in last["findings"]), records)
+                                             for f in last["findings"]), records, record_ok=True)
                     continue
             if pr is None:
                 pr = self.open_pr(head)
@@ -560,22 +700,24 @@ class Run:
         """(the brief's command list, the commands the node may run): contract section 4's Gates bullet."""
         runnable = acceptance_commands(self.body)
         lines = [f"- `{c}` (acceptance)" for c in runnable]
-        for run, g in self.area_gates(tree=False):
+        for run, g in self.area_gates():
             paths = g.get("paths")
-            if not (self.locally_run(run, g) or (self.flow == "full" and paths)):
+            if not (self.locally_run(run, g) or paths):
                 continue
-            when = f" (run it when the change touches: {', '.join(paths)})" if self.flow == "full" and paths and not self.locally_run(run, g) else ""
+            when = f" (run it when the change touches: {', '.join(paths)})" if paths and not self.locally_run(run, g) else ""
             lines.append(f"- `{run}`{when}")
             runnable.append(run)
         return "\n".join(lines) or "(none: the pull request's checks are the run)", runnable
 
-    def build(self, findings=None, threads=None, track=True):
-        """Ask the BUILD node and commit what it left; None when a Copilot round declined every thread and changed nothing."""
+    def build(self, findings=None, threads=None, track=True, record_ok=False):
+        """Ask the BUILD node and commit what it left; None when a Copilot round declined every thread and changed nothing.
+
+        `record_ok`: a review's fix round may change no file, since its findings may be the record's sentences; any other build must change the tree."""
         e = self.env
         cmds, gates = self.build_commands()
         contract = briefs.contract_sections(e, (4, 7))
-        prompt = briefs.render("build", number=self.n, title=self.title, body=self.body,
-                               anchors=briefs.anchors_block(self.worktree, self.body),
+        prompt = briefs.render("build", number=self.n, title=self.title, body=self.body, part=self.part_scope("build"),
+                               comments=self.spec_comments(), manual=self.manual_block(), anchors=briefs.anchors_block(self.worktree, self.body),
                                implement_docs=briefs.implement_docs(e, self.worktree), flow=self.flow,
                                commands=cmds, findings=findings or "(none)", contract=contract)
         tools = ["Edit", "Write", "Read", "Grep", "Glob"] + [f"Bash(git {c} *)" for c in ("rm", "mv", "status", "diff", "log", "ls-files")] + [f"Bash({c})" for c in gates]
@@ -583,22 +725,26 @@ class Run:
         say(f"[4] BUILD node ({model})" + (" fix round" if findings else ""))
         ans = node.run_node("BUILD", prompt, model, tools, str(self.worktree), node.TIMEOUTS["BUILD"])
         if ans.get("stop"):
-            self.stop_issue("open decision", str((ans["stop"] or {}).get("question") or json.dumps(ans["stop"])), 3)
+            self.stop_issue("open decision", self.stop_text(ans["stop"]), 3)
         subject = str(ans.get("subject") or "").strip()
         if not subject:
             raise DriverError("node BUILD answered no subject")
+        steps = self.manual_steps(ans)
         if not self.wt_git("status", "--porcelain", "-z").out:
             if threads and ans.get("replies"):
                 self.last_build = ans
                 return None
-            raise DriverError("node BUILD left no change in the tree")
+            if not (record_ok or steps):
+                raise DriverError("node BUILD left no change in the tree")
+            say("  no file changed: the record rides an empty commit" + (", with the manual steps" if steps else ""))
         msg = subject + "\n\n" + without_build_lines(str(ans.get("body") or "")) + "\n" + (f"\nFixes #{self.n}\n" if self.in_lane else "")
         facts = {"door": ans.get("door") or "", "blast_radius": ans.get("blast_radius") or "", "residue": ans.get("residue") or [],
-                 "replies": self.thread_replies(ans, threads) if threads else []}
+                 "gates_run": [g for g in ans.get("gates_run") or [] if isinstance(g, dict) and g.get("cmd")],
+                 "manual": steps, "replies": self.thread_replies(ans, threads) if threads else []}
         msg += f"\n{BUILD_LINE}{json.dumps(facts)}\n"
         f = e.body_file("commit-msg.txt", msg)
         self.wt_git("add", "-A")
-        self.wt_git("commit", "-q", "-F", f)
+        self.wt_git("commit", "-q", "--allow-empty", "-F", f)
         self.committed_here.add(self.head())
         self.last_build = ans
         say(f"  committed: {subject}")
@@ -627,22 +773,22 @@ class Run:
         say(f"  {sentence}")
         self.notes.append(sentence)
 
-    def fix_round(self, findings, records):
+    def fix_round(self, findings, records, record_ok=False):
         """A fix is a commit past the first build's, so the rounds already taken are read from the branch."""
         done = max(0, int(self.wt_git("rev-list", "--count", "--no-merges", f"origin/{self.env.default}..HEAD").out.strip() or 0) - 1)
         if done >= FIX_CAP:
             self.stop_issue("review cap", "Three fix rounds are spent and the change is not clean.\n\n" + findings, 3)
-        self.build(findings=findings)
+        self.build(findings=findings, record_ok=record_ok)
 
     # ---- gates
     def gate_entries(self, tree=True):
-        """The [[gate]] entries of the binding in the tree under test, as CI reads them; the main checkout's when `tree` is off or the tree has none."""
-        f = self.worktree / ".claude" / "ouro.toml"
-        if not (tree and f.is_file()):
+        """The [[gate]] entries of the binding at the tree's HEAD, as CI reads them; the main checkout's when `tree` is off, or there is no worktree yet (a dry run), or the commit has none."""
+        r = self.wt_git("show", "HEAD:.claude/ouro.toml", check=False) if tree and self.worktree.is_dir() else None  # the commit's, not the file's: a sync conflict leaves markers in the file
+        if r is None or r.code != 0:
             return list(self.env.data.get("gate", []))
         try:
-            return self.env.ob.read_toml(f).get("gate", [])
-        except SystemExit as x:
+            return self.env.ob.tomllib.loads(r.out).get("gate", [])
+        except ValueError as x:
             raise DriverError(f"the branch's .claude/ouro.toml cannot be read: {x}")
 
     def area_gates(self, tree=True):
@@ -660,34 +806,32 @@ class Run:
         return "forbidden-tokens.py" in run or bool(g.get("ci") and re.match(r"\s*(echo|pwsh -NoProfile -Command \"Write-Host)", g["ci"]))
 
     def runs_here(self, run, g, flow):
-        """Whether the driver runs a selected gate itself: the lane has no pull request, so it runs every one."""
-        return self.locally_run(run, g) or flow == "direct" or (flow == "full" and bool(g.get("paths")))
+        """Whether the driver runs a selected gate itself: one the checks only skip, or every one in the direct lane, which has no pull request."""
+        return self.locally_run(run, g) or flow == "direct"
 
-    def select_gates(self, flow, since=None):
-        """(gates to run here, gates skipped for their paths, green gates a full fix since `since` leaves standing): contract section 4's rule per class."""
-        chosen, skipped, kept = [], [], []
+    def select_gates(self, flow):
+        """(gates to run here, gates skipped for their paths): contract section 4's rule per class."""
+        chosen, skipped = [], []
         for run, g in self.area_gates():
             gp = g.get("paths")
             if gp and not self.touches(gp):
                 skipped.append(run)
-            elif not self.runs_here(run, g, flow):
-                continue
-            elif flow == "full" and since and not self.locally_run(run, g) and not (gp and self.touches(gp, since)):
-                kept.append((run, g))
-            else:
+            elif self.runs_here(run, g, flow):
                 chosen.append((run, g))
-        return chosen, skipped, kept
+        return chosen, skipped
 
-    def touches(self, entries, since=None):
-        rng = f"{since}..HEAD" if since else f"origin/{self.env.default}...HEAD"
-        r = self.wt_git("diff", "--quiet", rng, "--", *entries, check=False)
+    def checked_gates(self):
+        """The selected gates the pull request's checks run, each as CI runs it (`ci` where declared, else `run` as bound): what the record names where the driver ran none."""
+        return [str(g.get("ci") or g.get("run") or "") for run, g in self.area_gates()
+                if not self.runs_here(run, g, self.flow) and not (g.get("paths") and not self.touches(g["paths"]))]
+
+    def touches(self, entries):
+        r = self.wt_git("diff", "--quiet", f"origin/{self.env.default}...HEAD", "--", *entries, check=False)
         return r.code != 0
 
     def run_gates(self, head):
-        chosen, skipped, kept = self.select_gates(self.flow, getattr(self, "last_green", None))
-        green = {g["cmd"]: g for g in getattr(self, "green_log", [])}
-        rec_gates = [green[run] for run, _ in kept if run in green]
-        chosen += [(run, g) for run, g in kept if run not in green]  # a gate the fix added or rewrote has no green line to stand on
+        chosen, skipped = self.select_gates(self.flow)
+        rec_gates = []
         for i, (run, _) in enumerate(chosen):
             argv = shlex.split(run)
             exe = shutil.which(argv[0]) if argv else None
@@ -705,7 +849,6 @@ class Run:
                 return (run, r.code, tail)
         self.gate_log = rec_gates
         self.skipped = skipped
-        self.last_green, self.green_log = head, rec_gates
         return None
 
     # ---- push and the pull request
@@ -727,7 +870,7 @@ class Run:
             if left:
                 self.stop_issue("open decision", "The resolution still holds conflict markers in: " + ", ".join(left), 3)
             return False
-        lease = re.search(r"lease:\s*(\S+)", r.out)
+        lease = re.search(r"(?m)^lease: (\S+)\s*$", r.out)  # Sync-Branch's own line, not a merged commit subject
         args = ["-Lease", lease.group(1)] if lease else []
         p = sh.run(script("Push-Branch.ps1", *args), cwd=self.worktree)
         if p.code != 0:
@@ -738,14 +881,11 @@ class Run:
     def open_pr(self, head):
         e = self.env
         subject = self.wt_git("log", "-1", "--format=%s", self.first_commit()).out.strip()
-        facts = self.build_facts()
         rec = {"subject": subject, "flow": self.flow, "part_line": f"Part {self.k}/{self.parts_n} of #{self.n}" if self.k else "",
-               "fixes_line": f"Fixes #{self.n}" if self.fixes else "",
-               "door": facts["door"] or "unstated", "blast": facts["blast_radius"] or "unstated",
-               "summary": without_build_lines(self.wt_git("log", "-1", "--format=%b", self.first_commit()).out),
+               "fixes_line": f"Fixes #{self.n}" if self.fixes else "", **self.build_facts(),
                "changes": self.wt_git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines(),
-               "gates": getattr(self, "gate_log", []), "skipped": getattr(self, "skipped", []),
-               "note": " ".join(self.notes), "residue": facts["residue"], "usage": node.usage_table()}
+               "gates": getattr(self, "gate_log", []), "skipped": getattr(self, "skipped", []), "checked": self.checked_gates(),
+               "note": " ".join(self.notes), "usage": node.usage_table()}
         review = review_line(self.pending, bool(self.primary))
         f = e.body_file("pr-body.md", render_body(rec, review))
         argv = argv_for("gh", "pr", "create", "-R", e.slug, "--base", e.default, "--head", self.branch, "--draft",
@@ -773,14 +913,18 @@ class Run:
         return {}
 
     def build_facts(self):
-        """Door and blast radius from the first commit that states them, residue from all of them, past the default branch."""
-        door = blast = ""
-        residue = []
-        for sha in self.wt_git("rev-list", "--reverse", f"origin/{self.env.default}..HEAD").out.split():
-            f = self.commit_facts(sha)
-            door, blast = door or str(f.get("door") or ""), blast or str(f.get("blast_radius") or "")
-            residue += [str(x) for x in f.get("residue") or [] if str(x) not in residue]
-        return {"door": door, "blast_radius": blast, "residue": residue}
+        """The record's door, blast, summary, residue and build_gates: the newest BUILD answer on the branch, which describes the whole branch; its manual steps, the union over the branch's answers."""
+        shas = self.wt_git("rev-list", f"origin/{self.env.default}..HEAD").out.split()
+        facts = [(s, self.commit_facts(s)) for s in shas]
+        sha, f = next(((s, x) for s, x in facts if x), (shas[-1], {}))  # no facts anywhere: the first commit's body
+        manual = {}
+        for _, x in reversed(facts):  # oldest first: a later answer's edit replaces an earlier one, a later silence keeps it
+            for m in x.get("manual") or []:
+                if isinstance(m, dict) and m.get("path"):
+                    manual[m["path"]] = {"path": m["path"], "edit": str(m.get("edit") or "") or manual.get(m["path"], {}).get("edit", "")}
+        return {"door": str(f.get("door") or "") or "unstated", "blast": str(f.get("blast_radius") or "") or "unstated",
+                "summary": without_build_lines(self.wt_git("log", "-1", "--format=%b", sha).out),
+                "residue": [str(x) for x in f.get("residue") or []], "build_gates": f.get("gates_run") or [], "manual": list(manual.values())}
 
     def first_commit(self):
         return self.wt_git("rev-list", "--reverse", f"origin/{self.env.default}..HEAD").out.split()[0]
@@ -791,7 +935,9 @@ class Run:
         rec = read_record(body)
         if not rec:
             return
+        rec.update(self.build_facts())
         rec["gates"] = getattr(self, "gate_log", None) or rec.get("gates", [])
+        rec["skipped"], rec["checked"] = getattr(self, "skipped", rec.get("skipped", [])), self.checked_gates()
         rec["changes"] = self.wt_git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines()
         rec["flow"] = self.flow
         rec["usage"] = node.usage_table() or rec.get("usage", "")
@@ -825,7 +971,7 @@ class Run:
             return (f"This verifies a fix against the findings it answers. Its diff `{since}..{head}` cannot be shown whole, "
                     f"so leave `scope` empty on every finding. The findings it answers:\n\n{prior}")
         return (f"This verifies a fix against the findings it answers. The fix is `{since}..{head}`. A finding below that "
-                f"still stands is IN-FIX wherever its lines are; a new finding is IN-FIX in a line this diff changed and "
+                f"still stands is STANDS wherever its lines are; a new finding is IN-FIX in a line this diff changed and "
                 f"OUTSIDE in any other. Its diff:\n\n```diff\n{r.out}\n```\n\nThe findings it answers:\n\n{prior}")
 
     def node_review(self, pr, head, records, rnd):
@@ -836,7 +982,7 @@ class Run:
         rp = briefs.PROMPTS / "REVIEWER-PROMPT.md"
         record = (e.gh_json("pr", "view", str(pr["number"]), "--json", "body")["body"] if pr else "(no pull request yet)")
         prior = self.verification(records, head)
-        prompt = briefs.render("review", mode=MODE.get(self.flow, "sized"), number=self.n, head=head, title=self.title,
+        prompt = briefs.render("review", mode=MODE.get(self.flow, "sized"), number=self.n, head=head, title=self.title, part=self.part_scope("review"),
                                range=f"origin/{e.default}...{head}", diff=diff, record=record,
                                verification=prior,
                                reviewer_prompt=rp.read_text(encoding="utf-8") if rp.is_file() else "(REVIEWER-PROMPT.md is not in this tree)",
@@ -900,18 +1046,22 @@ class Run:
         return self.graphql(COPILOT_STATE_QUERY, o=owner, r=repo, n=pr["number"])["repository"]["pullRequest"]
 
     def copilot_threads(self, pr):
-        """Copilot's review threads still open and unanswered by a trusted author, as findings."""
+        """(Copilot's review threads still open and unanswered by a trusted author, as findings; how many a trusted author answered, the mark of a round taken)."""
         owner, repo = self.env.slug.split("/", 1)
-        trusted, cursor, out = self.env.trusted(), None, []
+        trusted, cursor, out, answered_n = self.env.trusted(), None, [], 0
         while True:
             page = self.graphql(THREADS_QUERY, o=owner, r=repo, n=pr["number"], **({"c": cursor} if cursor else {}))["repository"]["pullRequest"]["reviewThreads"]
             for t in page["nodes"]:
                 cs = t["comments"]["nodes"]
                 answered = any(str((c.get("author") or {}).get("login") or "").lower() in trusted for c in cs[1:])
-                if cs and is_copilot((cs[0].get("author") or {}).get("login")) and not t["isResolved"] and not answered:
+                if not (cs and is_copilot((cs[0].get("author") or {}).get("login"))):
+                    continue
+                if answered:
+                    answered_n += 1
+                elif not t["isResolved"]:
                     out.append({"id": cs[0]["databaseId"], "path": cs[0].get("path"), "line": cs[0].get("line"), "body": cs[0].get("body")})
             if not page["pageInfo"]["hasNextPage"]:
-                return out
+                return out, answered_n
             cursor = page["pageInfo"]["endCursor"]
 
     def request_copilot(self, node_id):
@@ -941,7 +1091,7 @@ class Run:
                 return "running"
             else:
                 time.sleep(poll_seconds())
-        threads = self.copilot_threads(pr)
+        threads, answered = self.copilot_threads(pr)
         if not threads:
             return "done"
         text = ("Copilot's review threads on the pull request, one round only. Fix a valid one in scope, or decline it with the reason; "
@@ -951,6 +1101,10 @@ class Run:
         if all(t["id"] in said for t in threads):
             say(f"[7] Copilot round: the commits since its review already answer {len(threads)} open thread(s)")
             self.post_replies(pr, [(t["id"], said[t["id"]]) for t in threads])
+            return "done"
+        if said or answered:  # one round per pull request: a thread Copilot opens after it, or left after a round that declined, gets a reply, not a build
+            say(f"[7] Copilot round: spent; {len(threads)} later thread(s) answered in a reply")
+            self.post_replies(pr, [(t["id"], said.get(t["id"], ONE_ROUND)) for t in threads])
             return "done"
         say(f"[7] Copilot round: {len(threads)} open thread(s)")
         if self.build(findings=text, threads=threads) is None:
@@ -1030,13 +1184,15 @@ class Run:
             raise DriverError(f"the head {view.get('headRefOid')} does not match the reviewed head {head}")
         if not clean:
             raise DriverError(f"the last verdict at {head} is not clean")
-        if not may_merge(policy, classes, self.labels, self.flow):
+        rec = read_record(e.gh_json("pr", "view", str(n), "--json", "body")["body"]) or {}
+        steps = rec.get("manual") or []
+        if steps or not may_merge(policy, classes, self.labels, self.flow):
             if not any(c.get("body", "").startswith("**Ready for merge**") and head in c.get("body", "") for c in self.pr_comments(pr)):
-                e.comment_pr(n, f"**Ready for merge**\n\n{facts}\n")
-            say(f"[9] ready for merge: #{n} waits for the owner's merge on GitHub")
+                manual = ("Manual steps, applied on the branch before the merge:\n" + "\n".join(f"- `{m.get('path')}`" for m in steps) + "\n\n") if steps else ""
+                e.comment_pr(n, f"**Ready for merge**\n\n{manual}{facts}\n")
+            say(f"[9] ready for merge: #{n} waits for the owner's merge on GitHub" + (", after the manual steps" if steps else ""))
             return 0
         subject = re.sub(r"\s*\(#\d+\)\s*$", "", pr["title"]) + f" (#{n})"
-        rec = read_record(e.gh_json("pr", "view", str(n), "--json", "body")["body"])
         tail = f"Fixes #{self.n}" if self.fixes else f"Part {self.k}/{self.parts_n} of #{self.n}"
         bf = e.body_file("merge-body.md", (rec.get("summary", "") + "\n\n" + "\n".join(f"- {c}" for c in rec.get("changes", [])) + f"\n\n{tail}\n"))
         sha = self.merge_pr(n, subject, bf, self.worktree)
@@ -1093,7 +1249,7 @@ class Run:
         line = lambda f: f"{f.get('file')}:{f.get('line')} {f.get('claim')}"
         left = [line(f) for f in (recs[-1]["findings"] if recs else []) if sev(f) == "L"]
         left += list(dict.fromkeys(line(f) for r in recs if r["round"] > 1 for f in r["findings"] if outside(f) and line(f) not in left))
-        residue = list(rec.get("residue", [])) + left
+        residue = [x for x in rec.get("residue", []) if not re.search(r"(?i)\b(filed|tracked|see|opened)\b.*#\d+", str(x))] + left  # filed already
         if not residue:
             return
         if any(str(c.get("body", "")).startswith("**Follow-ups filed**") for c in self.pr_comments(pr)):
@@ -1180,6 +1336,9 @@ class Run:
             say("[2a] direct: the main checkout holds this issue's unpushed commit(s): shipped without a build")
         else:
             self.build(track=False)
+            if self.build_facts()["manual"]:
+                say("[2a] direct: the build has manual steps, which the lane cannot carry")
+                return self.lane_fallback()
         sha = self.lane_ship(before)
         if sha is None:
             return self.lane_fallback()
@@ -1342,7 +1501,7 @@ class Run:
             f"{', then Copilot on the pull request' if self.copilot else ''}; mode {MODE.get(self.flow, 'sized')}, up to {FIX_CAP} fix rounds")
         say(f"[8] checks: {sh.cmdline(script('Watch-PullRequestChecks.ps1', '-Pr', '<PR>'))}")
         policy = e.lookup("ship.policy")
-        ok = may_merge(policy, e.lookup("ship.unattended_classes"), self.labels, self.flow)
+        ok = may_merge(policy, e.lookup("ship.unattended_classes"), self.labels, self.flow) and not self.manual_paths()
         say(f"[9] merge: policy {policy}, class {self.flow}: " + (f"would run {sh.cmdline(script('Merge-PullRequest.ps1', '-Pr', '<PR>', '-Subject', '<subject> (#<PR>)', '-BodyFile', '<file>', '-Linear', 'no'))}"
                                                            if ok else "would post **Ready for merge** and exit 0"))
         say(f"[10] after the merge: {sh.cmdline(script('Remove-LandedBranch.ps1', '-Pr', '<PR>'))}; "

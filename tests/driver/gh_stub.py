@@ -10,7 +10,7 @@ model exits 1 and names itself. The stand-in models what the driver and the land
 write: issues, one pull request (create, view, list, ready, edit, comment, merge), the viewer.
 Table keys beginning `_` seed that state: `_viewer`, `_issue_<N>`, `_pr`, `_comments_<N>`, and for the
 GraphQL model `_edits` (the issue body's edit history, pages keyed by cursor, "" for the first),
-`_threads` (the pull request's review threads), `_copilot_bot` (the bot id Copilot answers to),
+`_prs` (what a pull request search answers), `_threads` (the pull request's review threads), `_copilot_bot` (the bot id Copilot answers to),
 `_copilot_polls` (reads before its review shows) and `_copilot_never`. Copilot's review is made on
 the head the pull request has when it first shows, and keeps that commit.
 """
@@ -173,6 +173,8 @@ if verb == "pr create":
 pr = pr_state() if verb.startswith("pr ") else None
 if verb == "pr list" and "--head" in args:
     out([pr_view(pr, "number,state,isDraft,headRefOid,mergeCommit,title,body,url,baseRefName")] if pr and pr["head"] == flag("--head") else [])
+if verb == "pr list" and "--search" in args:
+    out(table.get("_prs", []))
 if verb == "pr list" and "--base" in args:
     out([])
 if pr and n == str(pr["number"]):

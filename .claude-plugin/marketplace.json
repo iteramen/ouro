@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "ouro",
-      "description": "init / triage / e2e / fuse / execute / land / land-batch / drift / compile / seam / review / external-audit / intake — the loop, repo-agnostic; each repo binds it with .claude/ouro.toml.",
+      "description": "init / run / triage / weekly — a driver runs the loop in code, repo-agnostic; each repo binds it with .claude/ouro.toml.",
       "source": "./",
       "category": "productivity"
     }

@@ -14,7 +14,8 @@
          at HEAD.
       2. Double-quoted fragments in the body (12 to 120 chars, following the contract's
          `File - Symbol - "fragment"` shape or free-standing, enclosing backticks
-         stripped) must literal-grep (git grep -F). On an anchor line, a list item whose
+         stripped; a backticked span holding a double quote is a command and is skipped)
+         must literal-grep (git grep -F). On an anchor line, a list item whose
          first backticked span names a tracked file, every fragment is grepped in that
          file; elsewhere a fragment that looks like code is grepped in the repo's tracked
          text files, and one with interior backticks that does not grep is a prose-code

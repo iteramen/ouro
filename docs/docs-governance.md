@@ -97,8 +97,7 @@ the work, not a follow-up: it lands in the same change as the code.
 
 No standalone documents for bug fixes, review findings, or resolved discussions — a fix lives in
 the code and the commit message. Delete superseded docs rather than archiving them. The sanctioned
-exception is a dated incident-investigation tree, whose point-in-time nature *is* the content;
-a repo naming one under `[overlays].drift` also excludes it from the LLM drift audit.
+exception is a dated incident-investigation tree, whose point-in-time nature *is* the content.
 
 ## 7. No future-plan cross-references in descriptive docs
 

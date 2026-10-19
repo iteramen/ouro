@@ -40,15 +40,13 @@ landing = "merge-squash"
 
 [models]
 # Optional, like every table below but [owner]. Absent means each role runs the reading
-# skill's own default -- builder sonnet, builder_trivial sonnet, reviewer opus, verifier opus.
+# skill's own default -- builder sonnet, builder_trivial sonnet, reviewer opus.
 # Values: opus | sonnet | haiku | fable. Table: ouro/docs/binding.md.
 # builder = "sonnet"
 # builder_trivial = "sonnet"
 # reviewer = "opus"
-# verifier = "opus"
 
 [rolling_issues]
-drift_audit = "Docs drift audit"
 loop_runs = "Loop runs"
 docs_freshness = "Docs freshness"
 # comments_freshness = "Comments freshness"
@@ -68,11 +66,11 @@ exclude = ["node_modules/", "/vendor/", "/_site/", ".claude/", "/tests/docs-fres
 # Uncomment after vendoring (bin/Vendor-Ouro.ps1), and only then: the vendored contract,
 # governance and binding docs cite plugin paths (bin/Get-RollingIssue.ps1,
 # bin/Test-AgentReadyAnchors.ps1, bin/Test-AgentReadyShape.ps1, bin/external-audit.py,
-# bin/apply-manifest.py, bin/forbidden-tokens.py, bin/loop-outcomes.py, docs/contract.md,
+# bin/forbidden-tokens.py, bin/loop-outcomes.py, docs/contract.md,
 # docs/binding.md, templates/) this repo does not have. suppress_prefixes is a prefix test on
 # every link and backticked path (S1, S2, S3), global to this repo's own docs -- live in a repo
 # that only installs the plugin, it hides real findings under those prefixes.
-# suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "bin/external-audit.py", "bin/apply-manifest.py", "bin/forbidden-tokens.py", "bin/loop-outcomes.py", "docs/contract.md", "docs/binding.md", "templates/"]
+# suppress_prefixes = ["bin/Get-RollingIssue.ps1", "bin/Test-AgentReadyAnchors.ps1", "bin/Test-AgentReadyShape.ps1", "bin/external-audit.py", "bin/forbidden-tokens.py", "bin/loop-outcomes.py", "docs/contract.md", "docs/binding.md", "templates/"]
 # generated_pattern = "api/generated/"
 # html_globs = ["site/*.html"]
 # index_path = "docs/index.md"
@@ -91,7 +89,6 @@ local = []
 implement = []
 review = []
 land = []
-drift = []
 
 [owner]
 role = "loop owner"

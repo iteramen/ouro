@@ -8,12 +8,16 @@ nodes are stubbed through OURO_NODE_STUB, a directory of canned answers per case
 is red when the driver ignores the answer. Nothing touches a network or a real remote.
 
 OURO_TEST_ONLY=<text> runs only the sections whose name holds the text (a mutation probe's row).
+OURO_TEST_WORKERS=<n> runs the sections in n children of this script at a time (default: the CPUs,
+at most 8); 1 runs them in this process, as OURO_TEST_ONLY does. OURO_TEST_INDEX=<k> is a child's
+own: section k alone. Each section prints its wall time.
 OURO_LIVE_NODE=1 adds one real `claude -p` call; without it that section prints a SKIP: line.
 
 stdlib only; python3 3.11+, git and pwsh on PATH. Its [[gate]] in .claude/ouro.toml:
 run = "python3 tests/driver/driver.Tests.py"
 """
 import atexit
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -23,6 +27,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 
 sys.dont_write_bytecode = True
@@ -66,11 +71,13 @@ def section(name, fn):
     if ONLY and ONLY not in name:
         return
     print(name)
+    t = time.monotonic()
     try:
         fn()
     except Exception:
         failures += 1
         print("FAIL: the section raised\n" + traceback.format_exc())
+    print(f"  ({time.monotonic() - t:.0f}s)")
 
 
 # ---- the stand-in gh, first on PATH ----------------------------------------------------------
@@ -143,6 +150,8 @@ review = "{review}"
 direct = ["docs/*.md"]
 [owner]
 ruling_approvers = ["o"]
+[authority]
+local = ["docs/runbook.md"]
 """
 ISSUE_BODY = """## What
 Fix the total.
@@ -320,6 +329,17 @@ def sec_pure():
     check("derive_flow: a hook is full", runmod.derive_flow(["hooks/x.py"], set()) == "full")
     check("derive_flow: a gate's own file is full", runmod.derive_flow(["tests/t.py"], {"tests/t.py"}) == "full")
     check("flow only tightens", runmod.tighter("full", "express") == "full" and runmod.tighter("express", "standard") == "standard")
+    recs = [{"round": 1, "findings": [finding("H"), finding("L", "an off-by-one")], "false": 0},
+            {"round": 2, "findings": [{**finding("L", "an off-by-one"), "scope": "STANDS"}, finding("L", "a nit")], "false": 0}]
+    check("the Review line counts a finding that still stands once, in the round that first reported it",
+          runmod.review_line(recs, True) == "Review: rounds:1 findings:H1/M0/L2 false-sentences:0")
+    check("and an unscoped restatement of the same finding once",
+          runmod.review_line([recs[0], {"round": 2, "findings": [finding("L", "an off-by-one")], "false": 0}], True) == "Review: rounds:1 findings:H1/M0/L1 false-sentences:0")
+    check("a standing M still needs a fix", runmod.needs_fix({"round": 2, "findings": [{**finding("M"), "scope": "STANDS"}]}))
+    check("a finding whose line is a list, or a line spelled 3 then '3', does not crash and counts once",
+          runmod.review_line([{"round": 1, "findings": [{**finding("M"), "line": [3, 5]}], "false": 0}, {"round": 2, "findings": [{**finding("M"), "line": [3, 5]}], "false": 0}], True)
+          == "Review: rounds:1 findings:H0/M1/L0 false-sentences:0"
+          and runmod.review_line([{"round": 1, "findings": [{**finding("L"), "line": "2"}], "false": 0}, {"round": 2, "findings": [finding("L")], "false": 0}], True).endswith("L1 false-sentences:0"))
     sha = "a" * 40
     good = {"author": {"login": "O"}, "body": f"**Review** round 2: FINDINGS @ {sha}\n\ntext\n```json\n{{\"findings\": [{{\"severity\": \"M\"}}]}}\n```\n"}
     trusted = {"o"}
@@ -344,8 +364,8 @@ def sec_pure():
     check("a duplicated round is counted once", len(dup) == 1)
     r1 = {"round": 1, "findings": [finding("H"), finding("l"), {"severity": "M"}], "false": 1}
     r2 = {"round": 2, "findings": [finding("L")], "false": "unread"}
-    check("review_line counts severities, fix rounds and false sentences",
-          runmod.review_line([r1, r2], True) == "Review: rounds:1 findings:H1/M1/L2 false-sentences:1")
+    check("review_line counts severities, fix rounds and false sentences, a restated finding once",
+          runmod.review_line([r1, r2], True) == "Review: rounds:1 findings:H1/M1/L1 false-sentences:1")
     check("review_line is `none` with no reviewer", runmod.review_line([], False) == "Review: none")
     check("review_line says unread when no round counted false sentences",
           runmod.review_line([{"round": 1, "findings": [], "false": None}], True).endswith("false-sentences:unread"))
@@ -383,6 +403,12 @@ def sec_labels():
     check("with_lines writes the three lines where missing", b.endswith("Size: M\nFlow: full\nDoc impact on close: none\n"))
     check("with_lines leaves a present line alone", t.with_lines("Size: S\n", "M", "", "") == "Size: S\n")
     check("with_lines is case-sensitive about the key", "Size: M" in t.with_lines("size: S\n", "M", "", ""))
+    named = [".claude/skills/x/SKILL.md", ".claude/worktrees/w", ".claude/elsewhere.md"]
+    mb, mp = t.with_manual("Edit `.claude/skills/x/SKILL.md` and `bin/a.py`, `.claude/worktrees/w`, `.claude/skills/x/SKILL.md`; read `.claude/ouro.toml`.\n", named)
+    check("with_manual writes one Manual: line per named .claude/ path the body backticks, skipping worktrees, repeats, a cited path and one the body lacks",
+          mp == [".claude/skills/x/SKILL.md"] and mb.endswith("\n\nManual: .claude/skills/x/SKILL.md\n") and mb.count("Manual:") == 1)
+    check("with_manual leaves a body with no such path unchanged", t.with_manual("Edit `bin/a.py`\n", ["bin/a.py"]) == ("Edit `bin/a.py`\n", []))
+    check("with_manual does not repeat a Manual: line already present", t.with_manual(mb, named)[0] == mb)
 
 
 def sec_node():
@@ -500,9 +526,36 @@ def sec_not_ready():
     check("an issue without agent-ready: exit 2", code == 2 and "agent-ready" in err)
     check("it writes nothing", c.wrote() == [])
     c = happy_case("checkpoint", table={"_issue_1": issue(labels=("agent-ready", "checkpoint", "gates", "bug"))})
+    c.node("CHECKPOINT", {"finding": "The total is summed at src/app.py:2.\n\nRecommendation: agent-ready."})
     code, out, err = c.ouro("run", "1")
-    check("a checkpoint issue is refused before any branch: exit 2, nothing built or written", code == 2 and "checkpoint" in err
-          and c.prompts("BUILD") == [] and c.branches() == ["master"] and c.wrote() == [])
+    posted = [x["body"] for x in c.issue_state()["comments"] if x["body"].startswith("**Checkpoint finding**")]
+    check("a checkpoint run posts one finding comment and exits 0", code == 0 and len(posted) == 1
+          and posted[0].split("\n")[0] == "**Checkpoint finding**" and "Recommendation" in posted[0])
+    check("it builds nothing and makes no branch or pull request", c.prompts("BUILD") == [] and c.branches() == ["master"] and c.pr() is None)
+    check("the node got the read tools only", c.node_call("CHECKPOINT")["tools"] == ["Read", "Grep", "Glob"])
+    c.clear_prompts()
+    code, out, err = c.ouro("run", "1")
+    check("a second run is refused, naming the finding, and writes nothing more", code == 2 and "Checkpoint finding" in err
+          and c.prompts("CHECKPOINT") == [] and len([s for s in c.wrote() if s.startswith("issue comment")]) == 1)
+    c.write("src/app.py", "def renamed(items):\n    return sum(items)\n")
+    git(c.main, "commit", "-q", "-am", "rename")
+    git(c.main, "push", "-q", "origin", "master")
+    code, out, err = c.ouro("run", "1")
+    check("a re-run with a dead anchor is refused for the finding, not stopped: no stop comment, labels kept",
+          code == 2 and "Checkpoint finding" in err and stops_of(c) == [] and "agent-ready" in labels_of(c) and "needs-ruling" not in labels_of(c))
+    ck = {"_issue_1": issue(labels=("agent-ready", "checkpoint", "gates", "bug"))}
+    c = happy_case("checkpointuncovered", table=ck,
+                   binding=BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('areas = ["*"]', 'areas = ["elsewhere"]'))
+    c.node("CHECKPOINT", {"finding": "Fine."})
+    code, out, err = c.ouro("run", "1")
+    check("a checkpoint whose area no gate covers still posts its finding: exit 0, no stop", code == 0 and stops_of(c) == []
+          and any(x["body"].startswith("**Checkpoint finding**") for x in c.issue_state()["comments"]))
+    c = happy_case("checkpointstop", table=ck)
+    c.node("CHECKPOINT", {"stop": "open decision: which format?"})
+    code, out, err = c.ouro("run", "1")
+    stops = stops_of(c)
+    check("a stop answered as a bare string: exit 3, `**Stop:** open decision` carrying the text",
+          code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision") and "which format?" in stops[0])
     c = happy_case("needsruling", table={"_issue_1": issue(labels=("agent-ready", "needs-ruling", "gates", "bug"))})
     code, out, err = c.ouro("run", "1")
     check("an issue waiting on a ruling is refused before any branch: exit 2, nothing built or written", code == 2 and "needs-ruling" in err
@@ -561,7 +614,7 @@ def sec_happy():
     last_line = git(c.origin, "log", "-1", "--format=%B", branch_head).splitlines()[-1]
     check("the commit message ends with one Ouro-Build line holding the answer's door, blast radius, residue and replies",
           last_line.startswith("Ouro-Build: ") and json.loads(last_line[len("Ouro-Build: "):]) ==
-          {"door": BUILD["door"], "blast_radius": BUILD["blast_radius"], "residue": [], "replies": []})
+          {"door": BUILD["door"], "blast_radius": BUILD["blast_radius"], "residue": [], "gates_run": [], "manual": [], "replies": []})
     check("the local gate (checks print a skip) ran", "gate `python3 gates/check.py`: exit 0" in out)
     pr = c.pr()
     check("a draft pull request was opened, then marked ready", pr is not None and pr["isDraft"] is False and any(s.startswith("pr create") and "--draft" in s for s in c.sigs()))
@@ -623,8 +676,11 @@ def sec_trivial_merge():
 
 def sec_findings_fix():
     c = Case("fixround")
-    c.node("BUILD", BUILD, 1)
-    c.node("BUILD", {**BUILD, "subject": "fix(app): handle the last item", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"}}, 2)
+    c.node("BUILD", {**BUILD, "residue": ["later: the last item"]}, 1)
+    c.node("BUILD", {**BUILD, "subject": "fix(app): handle the last item", "body": "Sum the items, then add the last one.",
+                     "door": "one-way: the total changes for every caller", "residue": ["later: the empty list"],
+                     "gates_run": [{"cmd": "python3 gates/check.py", "exit": 0}],
+                     "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"}}, 2)
     c.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("H"), finding("L", "a nit")], "false_record_sentences": 1, "files_read": ["x"]}, 1)
     c.node("REVIEW", CLEAN, 2)
     code, out, err = c.ouro("run", "1")
@@ -639,6 +695,32 @@ def sec_findings_fix():
           re.search(r"(?m)^Review: rounds:1 findings:H1/M0/L1 false-sentences:1$", c.pr()["body"]) is not None)
     check("the second review's brief carries the first round's report", "**Review** round 1: FINDINGS" in open(c.nodes / "REVIEW.2.prompt.txt", encoding="utf-8").read())
     check("an L-only round is clean: no fix round for it", len(c.prompts("BUILD")) == 2)
+    body = c.pr()["body"]
+    check("after the fix round the record is the latest BUILD answer's: door, summary, residue and the gates it ran",
+          "- **Door:** one-way: the total changes for every caller" in body and "Sum the items, then add the last one." in body
+          and "- later: the empty list" in body and "later: the last item" not in body and "- BUILD ran `python3 gates/check.py`: exit 0" in body)
+    c = Case("fixopensafter", table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: express"))})
+    c.node("BUILD", {**BUILD, "writes": {"docs/note.md": "note, edited\n"}}, 1)
+    c.node("BUILD", {**BUILD, "subject": "docs: reword the note", "door": "two-way: words only", "writes": {"docs/note.md": "note, fixed\n"}}, 2)
+    c.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", "the note is wrong")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
+    c.node("REVIEW", CLEAN, 2)
+    code, out, err = c.ouro("run", "1")
+    check("a pull request that opens after the fix round carries the latest answer's record too", code == 0 and "- **Door:** two-way: words only" in c.pr()["body"])
+    c = Case("recordround")
+    c.node("BUILD", BUILD, 1)
+    c.node("BUILD", {**BUILD, "subject": "fix(app): correct the record", "body": "Sum the items; the record said otherwise.", "writes": {}}, 2)
+    c.node("REVIEW", {"verdict": "FINDINGS", "findings": [{**finding("M", "the summary says the total is averaged"), "file": "PR body"}], "false_record_sentences": 1, "files_read": ["x"]}, 1)
+    c.node("REVIEW", CLEAN, 2)
+    code, out, err = c.ouro("run", "1")
+    check("a fix round that changes no file commits its record on an empty commit and the run goes on: exit 0",
+          code == 0 and "rides an empty commit" in out and git(c.origin, "rev-list", "--count", "master..gates/1-fix-the-total") == "2")
+    check("the record's summary is the corrected one", "Sum the items; the record said otherwise." in c.pr()["body"])
+    c = Case("gatefixnone")
+    c.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], "gates/exit.txt": "1"}}, 1)
+    c.node("BUILD", {**BUILD, "subject": "fix(app): nothing", "writes": {}}, 2)
+    c.node("REVIEW", CLEAN)
+    code, out, err = c.ouro("run", "1")
+    check("a red-gate fix that changes no file is still a driver error, not an empty commit", code == 1 and "left no change" in err and len(c.prompts("BUILD")) == 2)
 
     class FakeEnv:
         def lookup(self, key, default=None):
@@ -756,10 +838,10 @@ def sec_full_paths():
     c.node("BUILD", BUILD)
     c.node("REVIEW", CLEAN)
     code, out, err = c.ouro("run", "1")
-    check("under full a selected gate whose paths the diff touches runs on the commit", code == 0 and "gate `python3 gates/src_gate.py`: exit 0" in out)
-    check("a selected gate whose paths the diff misses does not run", "doc_gate" not in out.split("[6]")[0])
+    check("under full a selected gate the checks run does not run here, its paths touched or not", code == 0 and "src_gate" not in out and "doc_gate" not in out)
     check("the record says which gate was skipped for its paths", "Gate skipped, the diff touches none of its paths: `python3 gates/doc_gate.py`" in c.pr()["body"])
-    check("the gate the checks run only to print a skip also ran", "gate `python3 gates/check.py`: exit 0" in out)
+    check("the record names the selected gate the checks run", "- Gates the pull request's checks run: `python3 gates/src_gate.py`" in c.pr()["body"] and "none run by the driver" not in c.pr()["body"])
+    check("the gate the checks run only to print a skip ran here", "gate `python3 gates/check.py`: exit 0" in out)
     check("under full the REVIEW node is the probe mode", "Mode: probe" in open(c.nodes / "REVIEW.1.prompt.txt", encoding="utf-8").read())
     call = c.node_call("REVIEW")
     check("under full the REVIEW node runs in its own detached worktree copy, not the build worktree", "review-1" in call["cwd"] and call["cwd_exists"] is True
@@ -767,20 +849,23 @@ def sec_full_paths():
     check("under full its tools are Read, Grep, Glob and Bash, with push, commit and gh denied", call["tools"] == ["Read", "Grep", "Glob", "Bash"] and call["denied"] == ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"])
     check("the copy is removed afterwards, its registration with it", "review-1" not in git(c.main, "worktree", "list", "--porcelain") and not pathlib.Path(call["cwd"]).exists())
     c2 = happy_case("standardpaths", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"})
+    c2.write(".claude/ouro.toml", b + '[[gate]]\nareas = ["*"]\nrun = "python3 gates/main_only.py"\npaths = ["src/"]\n')  # the main checkout's binding, uncommitted
     code, out, err = c2.ouro("run", "1")
-    check("under standard the pull request's checks run a gate whose paths are touched: not run here", code == 0 and "src_gate" not in out.split("[6]")[0])
-    brief = open(c.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read()
-    check("under full the BUILD brief lists each gate with paths, with its paths and when to run it",
-          "- `python3 gates/src_gate.py` (run it when the change touches: src/)" in brief and "- `python3 gates/doc_gate.py` (run it when the change touches: docs/)" in brief)
-    check("under full the BUILD node may run those gates", {"Bash(python3 gates/src_gate.py)", "Bash(python3 gates/doc_gate.py)"} <= set(c.node_call("BUILD")["tools"]))
-    check("under standard the BUILD brief leaves a gate the checks run out", "src_gate" not in open(c2.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read())
+    check("under standard the pull request's checks run a gate whose paths are touched: not run here", code == 0 and "src_gate" not in out)
+    check("the brief and the allowlist read the branch's binding, not the main checkout's",
+          "main_only" not in open(c2.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read() and not any("main_only" in t for t in c2.node_call("BUILD")["tools"]))
+    for name, case in (("full", c), ("standard", c2)):
+        brief = open(case.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read()
+        check(f"under {name} the BUILD brief lists each gate with paths, with its paths and when to run it",
+              "- `python3 gates/src_gate.py` (run it when the change touches: src/)" in brief and "- `python3 gates/doc_gate.py` (run it when the change touches: docs/)" in brief)
+        check(f"under {name} the BUILD node may run those gates", {"Bash(python3 gates/src_gate.py)", "Bash(python3 gates/doc_gate.py)"} <= set(case.node_call("BUILD")["tools"]))
     c3 = Case("branchbinding", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"},
               table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: full"))})
     c3.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], ".claude/ouro.toml": b.replace('run = "python3 gates/src_gate.py"', 'run = "python3 gates/doc_gate.py"')}})
     c3.node("REVIEW", CLEAN)
     code, out, err = c3.ouro("run", "1")
-    check("a gate the branch's binding drops does not run, and the one it rewrites in does", code == 0
-          and "src_gate" not in out.split("[6]")[0] and "gate `python3 gates/doc_gate.py`: exit 0" in out.split("[6]")[0])
+    check("the record's checks line reads the branch's binding: the gate it rewrites in, not the one it drops", code == 0
+          and "- Gates the pull request's checks run: `python3 gates/doc_gate.py`" in c3.pr()["body"] and "src_gate" not in c3.pr()["body"])
 
 
 def sec_fix_round_scope():
@@ -795,16 +880,16 @@ def sec_fix_round_scope():
     c.node("REVIEW", CLEAN, 2)
     code, out, err = c.ouro("run", "1")
     check("a full fix round that touches only docs/: exit 0", code == 0)
-    check("the gate whose paths the fix misses ran once, before the fix", out.count("gate `python3 gates/src_gate.py`: exit 0") == 1)
-    check("the gate whose paths the fix touches ran again on it", out.count("gate `python3 gates/doc_gate.py`: exit 0") == 2)
+    check("no gate the checks run ran here, on either head", "src_gate" not in out and "doc_gate" not in out)
     check("the gate the checks run only to print a skip ran on both heads", out.count("gate `python3 gates/check.py`: exit 0") == 2)
     body = c.pr()["body"]
-    check("the record keeps the standing gate's green line and does not call it skipped",
-          "`python3 gates/src_gate.py` exit 0" in body and "touches none of its paths: `python3 gates/src_gate.py`" not in body)
+    check("after the fix the record names both selected gates as the checks' and calls neither skipped",
+          "- Gates the pull request's checks run: `python3 gates/src_gate.py`, `python3 gates/doc_gate.py`" in body and "touches none of its paths" not in body)
 
     c2 = happy_case("outsidefix", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     c2.node("BUILD", BUILD, 1)
-    c2.node("BUILD", {**BUILD, "subject": "fix(app): handle the last item", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"}}, 2)
+    c2.node("BUILD", {**BUILD, "subject": "fix(app): handle the last item", "residue": ["filed as #12", "do the thing"],
+                      "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"}}, 2)
     c2.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("H")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
     c2.node("REVIEW", {"verdict": "FINDINGS", "findings": [{**finding("M", "an older helper drops a row"), "scope": "OUTSIDE"}],
                        "false_record_sentences": 0, "files_read": ["x"]}, 2)
@@ -814,6 +899,8 @@ def sec_fix_round_scope():
     check("and the change merges as clean", code == 0 and "done: #1 landed" in out)
     check("the Review line counts one fix round", re.search(r"(?m)^Review: rounds:1 findings:H1/M1/L0 ", c2.pr()["body"]) is not None)
     check("the OUTSIDE finding reaches the FOLLOWUP node", c2.prompts("FOLLOWUP") != [] and "an older helper drops a row" in open(c2.nodes / c2.prompts("FOLLOWUP")[0], encoding="utf-8").read())
+    fprompt = open(c2.nodes / c2.prompts("FOLLOWUP")[0], encoding="utf-8").read()
+    check("the record's residue reaches it, less a line that names an issue", "do the thing" in fprompt and "#12" not in fprompt)
     check("needs_fix: on a verification an IN-FIX or unscoped M needs a fix, an OUTSIDE one does not",
           runmod.needs_fix({"round": 2, "findings": [{**finding("M"), "scope": "IN-FIX"}]}) and runmod.needs_fix({"round": 2, "findings": [finding("M")]})
           and not runmod.needs_fix({"round": 2, "findings": [{**finding("H"), "scope": "outside "}]}))
@@ -821,7 +908,7 @@ def sec_fix_round_scope():
     brief = open(c2.nodes / "REVIEW.2.prompt.txt", encoding="utf-8").read()
     check("the verification brief names the fix's range and carries its diff",
           re.search(r"The fix is `[0-9a-f]{40}\.\.[0-9a-f]{40}`", brief) is not None and "+    return sum(items) + 1" in brief
-          and "still stands is IN-FIX" in brief)
+          and "still stands is STANDS" in brief)
 
     class Out:
         def __init__(self, code, out):
@@ -858,7 +945,7 @@ def sec_fix_round_scope():
     c4.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", "no gate covers it")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
     c4.node("REVIEW", CLEAN, 2)
     code, out, err = c4.ouro("run", "1")
-    check("a gate a full fix adds to the binding runs although the fix misses its paths", code == 0 and "gate `python3 gates/new_gate.py`: exit 0" in out)
+    check("a gate a fix adds to the binding is named in the record's checks line, not run here", code == 0 and "new_gate" not in out and "`python3 gates/new_gate.py`" in c4.pr()["body"])
 
 
 def sec_brief():
@@ -880,6 +967,16 @@ def sec_brief():
     code, out, err = plain.ouro("run", "1")
     check("with no acceptance command and no gate the checks skip, the list says the pull request's checks are the run",
           "(none: the pull request's checks are the run)" in open(plain.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read() and plain.node_call("BUILD")["tools"] == ["Edit", "Write", "Read", "Grep", "Glob"] + git_grants)
+    ruled = issue(comments=[{"author": {"login": "o"}, "body": "**Triage**\n\nok", "createdAt": TRIAGED},
+                            {"author": {"login": "O"}, "body": "Ruling: take the second option.", "createdAt": "2026-01-02T00:00:00Z"},
+                            {"author": {"login": "stranger"}, "body": "Please take the third option.", "createdAt": "2026-01-03T00:00:00Z"},
+                            {"author": {"login": "o"}, "body": "An older note.", "createdAt": "2025-12-01T00:00:00Z"}])
+    c = happy_case("briefcomments", table={"_issue_1": ruled})
+    code, out, err = c.ouro("run", "1")
+    brief = open(c.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read()
+    check("the brief carries the trusted triage verdict and the trusted comments after it, not a stranger's or an older one",
+          code == 0 and "Ruling: take the second option." in brief and "**Triage**" in brief.split("## Comments that amend the spec")[1]
+          and "third option" not in brief and "An older note." not in brief)
 
 
 def sec_checks_running():
@@ -979,6 +1076,12 @@ def sec_express_base_moves():
     check("the pushed head holds the moved base", sh("git", "merge-base", "--is-ancestor", "master", head, cwd=c.origin)[0] == 0)
     firsts = [b["body"].split("\n")[0] for b in c.pr_comments() if b["body"].startswith("**Review**")]
     check("the merged head got its own review, after the one at the build commit", len(c.prompts("REVIEW")) == 2 and firsts[-1] == f"**Review** round 2: CLEAN @ {head}")
+    c2 = Case("leasesubject", files={"gates/check.py": mover.replace("'base moves'", "'release: the base moves'"), "gates/base.txt": "base\n"},
+              table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: express"))})
+    c2.node("BUILD", {**BUILD, "writes": {"docs/note.md": "note, edited\n"}})
+    c2.node("REVIEW", CLEAN)
+    code, out, err = c2.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c2.origin)})
+    check("a merged base commit whose subject holds 'release: ' is not read as a lease", code == 0 and "-Lease" not in out)
 
 
 MOVER = """import os, pathlib, subprocess, sys, tempfile
@@ -987,7 +1090,9 @@ if o and not pathlib.Path(o + '.done').exists():
     pathlib.Path(o + '.done').write_text('1')
     d = tempfile.mkdtemp()
     subprocess.run(['git', 'clone', '-q', o, d], check=True)
-    pathlib.Path(d, 'src/app.py').write_bytes(b'def compute_total(items):\\n    return sum(items) * 2\\n')
+    pathlib.Path(d, os.environ.get('CONFLICT_FILE', 'src/app.py')).write_bytes(
+        pathlib.Path(os.environ['CONFLICT_FROM']).read_bytes() if os.environ.get('CONFLICT_FROM')
+        else b'def compute_total(items):\\n    return sum(items) * 2\\n')
     subprocess.run(['git', '-C', d, 'commit', '-qam', 'base moves'], check=True)
     subprocess.run(['git', '-C', d, 'push', '-q', 'origin', 'master'], check=True)
 sys.exit(0)
@@ -1011,6 +1116,16 @@ def sec_sync_conflict():
     stops = [x["body"] for x in (c2.issue_state() or {"comments": []})["comments"] if x["body"].startswith("**Stop:**")]
     check("a resolution that leaves markers is `open decision`, exit 3", code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision"))
     check("nothing was pushed to the branch", "gates/1-fix-the-total" not in c2.branches())
+    b = BINDING.format(policy="stop-at-pr", review="adversarial-review")
+    base_gate, branch_gate = '[[gate]]\nareas = ["*"]\nrun = "python3 gates/base_gate.py"\n', '[[gate]]\nareas = ["*"]\nrun = "python3 gates/branch_gate.py"\n'
+    c3 = Case("syncconflicttoml", files={"gates/check.py": MOVER})
+    (c3.root / "base.toml").write_text(b + base_gate, encoding="utf-8")
+    c3.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], ".claude/ouro.toml": b + branch_gate}}, 1)
+    c3.node("BUILD", {**BUILD, "subject": "gates: keep both", "writes": {".claude/ouro.toml": b + base_gate + branch_gate}}, 2)
+    c3.node("REVIEW", CLEAN)
+    code, out, err = c3.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c3.origin), "CONFLICT_FILE": ".claude/ouro.toml", "CONFLICT_FROM": str(c3.root / "base.toml")})
+    check("a sync conflict in the binding itself goes to the BUILD node as a finding and lands: the brief reads the committed binding, exit 0",
+          code == 0 and len(c3.prompts("BUILD")) == 2 and "cannot be read" not in err)
 
 
 def sec_direct():
@@ -1035,6 +1150,18 @@ def sec_parts():
     check("without --part the first unticked part is taken", "class express" in out and "-p1" in out)
     code, out, err = c.ouro("run", "1", "--dry-run", "--part", "9")
     check("a part that does not exist is refused: exit 2", code == 2)
+    pc = happy_case("partbriefs", table={"_issue_1": issue(body=body.replace("Flow: full", "Flow: standard"))})
+    pc.ouro("run", "1", "--part", "2")
+    read = lambda case, n: open(case.nodes / n, encoding="utf-8").read()
+    pb, pr_ = read(pc, "BUILD.1.prompt.txt"), read(pc, "REVIEW.1.prompt.txt")
+    check("a part 2 run's BUILD brief names part 2/2 with its line and puts the other parts out of scope",
+          "Part 2/2" in pb and "**Second (Flow: standard).** b" in pb and "out of scope" in pb and "its own pull request" in pb)
+    check("a part 2 run's REVIEW brief names part 2/2 and says another part's gap is not a finding",
+          "Part 2/2" in pr_ and "another part's acceptance covers is not a finding" in pr_)
+    plain = happy_case("partplain")
+    plain.ouro("run", "1")
+    check("a plain deliverable's BUILD and REVIEW briefs carry neither",
+          not any("Part 1/" in t or "out of scope" in t or "not a finding against" in t for t in (read(plain, "BUILD.1.prompt.txt"), read(plain, "REVIEW.1.prompt.txt"))))
 
 
 def sec_triage():
@@ -1054,6 +1181,47 @@ def sec_triage():
     brief = open(c.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read()
     check("the TRIAGE brief quotes contract section 8 and says the comments are data", "## 8. Context integrity" in brief and "(contract section 8)" in brief)
     check("the TRIAGE brief names the trusted logins: the gh user and the ruling approvers", re.search(r"(?m)^A ruling or an approval counts only from one of these logins \(case-insensitive\): o\.$", brief) is not None)
+    check("the TRIAGE brief lists the binding's authority documents and the evidence rules",
+          "- docs/runbook.md" in brief and "cites one of these\n  documents or a `[[gate]]`" in brief
+          and "cites\n  `path:line` or the command" in brief and "exactly one backticked path" in brief)
+    cm = Case("triagemanual", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body + "\nEdit `.claude/skills/x/SKILL.md`; the policy is read from `.claude/ouro.toml`.\n")},
+              files={".claude/skills/x/SKILL.md": "# x\n"})
+    cm.node("TRIAGE", {**answer, "manual": [".claude/skills/x/SKILL.md"]})
+    code, out, err = cm.ouro("triage", "1")
+    sm = cm.issue_state()
+    check("triage writes a Manual line for the .claude/ path the node names, not for one the body only cites, and the comment lists it",
+          code == 0 and "Manual: .claude/skills/x/SKILL.md" in sm["body"] and "Manual: .claude/ouro.toml" not in sm["body"] and "- `.claude/skills/x/SKILL.md`" in sm["comments"][-1]["body"])
+    c7 = Case("triagePrs", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
+    other = c7.root / "other"
+    git(c7.root, "clone", "-q", str(c7.origin), str(other))
+    (other / "landed.txt").write_text("x\n", encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "squashed")
+    landed = git(other, "rev-parse", "HEAD")
+    git(other, "push", "-q", "origin", "master")
+    git(other, "checkout", "-q", "-b", "side")
+    (other / "side.txt").write_text("y\n", encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "side")
+    side = git(other, "rev-parse", "HEAD")
+    git(other, "push", "-q", "origin", "side")
+    c7.set_table({"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body), "_prs": [
+        {"number": 5, "title": "squashed", "body": "Part of #1", "state": "MERGED", "mergeCommit": {"oid": landed}},
+        {"number": 7, "title": "unlanded", "body": "Fixes #1", "state": "MERGED", "mergeCommit": {"oid": side}},
+        {"number": 6, "title": "other", "body": "Part of #12", "state": "OPEN", "mergeCommit": None}]})
+    c7.node("TRIAGE", answer)
+    code, out, err = c7.ouro("triage", "1", "--dry-run")
+    brief7 = open(c7.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read()
+    check("a squash-merged PR that landed after the last fetch reaches the brief with its merge commit, on origin",
+          code == 0 and f"- #5 MERGED, merge commit {landed}; on origin/master: yes: squashed" in brief7 and "git merge-base --is-ancestor" in brief7)
+    check("a merged PR whose commit is not on the default branch reads no", f"- #7 MERGED, merge commit {side}; on origin/master: no: unlanded" in brief7)
+    check("a PR that names another issue number does not", "#6 " not in brief7)
+    check("the brief says the main checkout is behind origin", "commit(s) behind origin/master" in brief7)
+    sh("git", "remote", "set-url", "origin", str(c7.root / "missing.git"), cwd=c7.main)
+    code, out, err = c7.ouro("triage", "1", "--dry-run")
+    check("a failed fetch says freshness is unknown and does not claim the checkout is current",
+          code == 0 and "WARNING: Whether the main checkout's master is behind" in out
+          and "is not behind origin" not in open(c7.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read())
     c2 = Case("triageL", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
     c2.node("TRIAGE", {**answer, "size": "L", "comment": "Split into two."})
     code, out, err = c2.ouro("triage", "1")
@@ -1063,10 +1231,22 @@ def sec_triage():
     code, out, err = c3.ouro("triage", "1")
     check("a question for the owner is needs-ruling with the recommendation attached",
           "needs-ruling" in labels_of(c3) and "I recommend the first" in c3.issue_state()["comments"][-1]["body"])
+    c5 = Case("triageShape", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body="## What\nthing, with no anchor\n")})
+    c5.node("TRIAGE", answer)
+    code, out, err = c5.ouro("triage", "1")
+    check("a promotion the shape gate refuses exits 3", code == 3)
+    check("and goes back to needs-triage", "agent-ready" not in labels_of(c5) and "needs-triage" in labels_of(c5))
+    check("and the gate posted its finding after the triage comment", len([s for s in c5.sigs() if s.startswith("issue comment 1")]) == 2
+          and "no parseable anchor" in out)
+    check("a promotion the shape gate accepts keeps agent-ready", "agent-ready" in labels_of(c))
     c4 = Case("triageBad", table={"_issue_1": issue(body=body)})
     c4.node("TRIAGE", {"verdict": "WHATEVER", "comment": "x"})
     code, out, err = c4.ouro("triage", "1")
     check("a verdict outside the set is a driver error: exit 1, nothing written", code == 1 and c4.wrote() == [])
+    c6 = Case("triageFinding", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
+    c6.node("TRIAGE", {**answer, "deliverable": "finding"})
+    code, out, err = c6.ouro("triage", "1")
+    check("a PROMOTE whose deliverable is a finding is refused: nothing written, no agent-ready", code == 1 and c6.wrote() == [] and "agent-ready" not in labels_of(c6))
 
 
 def sec_ops():
@@ -1223,6 +1403,15 @@ def sec_copilot():
     code, out, err = c.ouro("run", "1")
     again = c.sigs()[before:]
     check("a second invocation repeats nothing: no request, no build, no reply", code == 0 and not any("requestReviews" in s or "/replies" in s for s in again) and c.prompts("BUILD") == [])
+    tbl = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
+    tbl["_threads"] = [THREAD, {"id": "T2", "isResolved": False, "comments": {"nodes": [{"databaseId": 502, "author": {"login": "copilot-pull-request-reviewer"}, "body": "also here", "path": "src/app.py", "line": 3}]}}]
+    c.set_table(tbl)
+    c.clear_prompts()
+    code, out, err = c.ouro("run", "1")
+    replies = json.loads((c.state / "replies.json").read_text(encoding="utf-8"))
+    check("a thread Copilot opens after the round is declined in a reply, with no build: one round per pull request",
+          code == 0 and c.prompts("BUILD") == [] and "spent" in out and any(r["id"] == 502 and "one review round" in r["body"] for r in replies)
+          and git(c.origin, "rev-list", "--count", "master..gates/1-fix-the-total") == "2")
     c = copilot_case("copilotM", body=M_BODY, table={"_threads": [THREAD]})
     c.node("BUILD", FIX, 2)
     c.node("REVIEW", CLEAN, 1)
@@ -1240,6 +1429,14 @@ def sec_copilot():
     replies = json.loads((c.state / "replies.json").read_text(encoding="utf-8")) if (c.state / "replies.json").is_file() else []
     check("a round that declines every thread changes nothing and still answers each thread", code == 0 and git(c.origin, "rev-list", "--count", "master..gates/1-fix-the-total") == "1"
           and len(replies) == 1 and replies[0]["body"] == "Declined: fsum changes the result type.")
+    tbl = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
+    tbl["_threads"] = [THREAD, {"id": "T2", "isResolved": False, "comments": {"nodes": [{"databaseId": 502, "author": {"login": "copilot-pull-request-reviewer"}, "body": "and here", "path": "src/app.py", "line": 3}]}}]
+    c.set_table(tbl)
+    c.clear_prompts()
+    code, out, err = c.ouro("run", "1")
+    replies = json.loads((c.state / "replies.json").read_text(encoding="utf-8"))
+    check("a round that only declined still counts as the one round: a later thread is answered, not built",
+          code == 0 and c.prompts("BUILD") == [] and any(r["id"] == 502 and "one review round" in r["body"] for r in replies))
     c = copilot_case("copilotnever", table={"_copilot_never": True})
     code, out, err = c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "2", "OURO_POLL_SECONDS": "0"})
     check("no Copilot review at the watch limit is exit 0 `re-invoke`, with no Ready for merge", code == 0 and "still pending" in out and not any(b["body"].startswith("**Ready for merge**") for b in c.pr_comments()))
@@ -1299,8 +1496,8 @@ def sec_resume():
     c.node("REVIEW", CLEAN)
     code, out, err = c.ouro("run", "1")
     body = (c.pr() or {}).get("body", "")
-    check("with two commits the first door that was stated wins and the residue is their union, once each", code == 0 and "- **Door:** one-way: a migration" in body
-          and body.split("## Follow-up", 1)[-1].split("<!--", 1)[0].strip().splitlines() == ["- first", "- second"])
+    check("with two commits the newest answer's door and residue are the record's", code == 0 and "- **Door:** two-way: later" in body
+          and body.split("## Follow-up", 1)[-1].split("<!--", 1)[0].strip().splitlines() == ["- second", "- first"])
 
 
 def sec_external():
@@ -1414,6 +1611,12 @@ def sec_lane():
     c = lane_case("laneclosed", table={"_issue_1": issue(body=DIRECT_BODY, state="CLOSED")})
     code, out, err = c.ouro("run", "1")
     check("a closed issue with no branch is not run again", code == 0 and "is closed" in out and c.prompts("BUILD") == [])
+    c = lane_case("lanemanual")
+    c.node("BUILD", {**NOTE_BUILD, "_denied": [{"tool_name": "Edit", "tool_input": {"file_path": ".claude/rules/x.md"}}]})
+    code, out, err = c.ouro("run", "1")
+    check("a lane build with a manual step does not ship through the lane: the commit moves to a worktree branch and a pull request lists the step",
+          code == 0 and "which the lane cannot carry" in out and git(c.origin, "rev-list", "--count", "master") == "1" and c.pr() is not None
+          and "- `.claude/rules/x.md`" in c.pr()["body"] and not any(s.startswith("pr merge") for s in c.sigs()))
     c = lane_case("lanepr", protection={"api repos/o/n/rules/branches/master": {"Exit": 0, "Out": [{"type": "required_status_checks"}]},
                                         "api repos/o/n/branches/master/protection": {"Exit": 1, "Out": "Branch not protected"}})
     code, out, err = c.ouro("run", "1")
@@ -1567,7 +1770,64 @@ def sec_lane_moved_main():
           and git(c.main, "rev-parse", "--abbrev-ref", "HEAD") == "feature-y")
 
 
-for name, fn in [("may_merge: the merge decision", sec_may_merge), ("pure: parsers, markers, the Review line", sec_pure),
+def sec_other_pr():
+    other = {"number": 9, "headRefName": "ci/1-by-hand", "body": "## Summary\nhand-built\n\nFixes #1\n", "url": "https://x/pull/9", "state": "OPEN"}
+    c = happy_case("otherpr", table={"_prs": [other]})
+    code, out, err = c.ouro("run", "1")
+    check("an open pull request from another branch with a Fixes line for the issue: exit 2 naming it, nothing built",
+          code == 2 and "#9" in err and "ci/1-by-hand" in err and c.prompts("BUILD") == [] and c.branches() == ["master"])
+    c = happy_case("otherprclosed", table={"_prs": [{**other, "state": "CLOSED"}]})
+    code, out, err = c.ouro("run", "1")
+    check("a closed one refuses nothing", code == 0)
+    c = happy_case("otherprpart", table={"_prs": [{**other, "body": "Part 1/2 of #1\n"}]})
+    code, out, err = c.ouro("run", "1")
+    check("a Part line alone does not refuse a run that takes the whole issue", code == 0)
+
+
+def sec_manual():
+    body = ISSUE_BODY.replace("- `src/app.py`", "- `.claude/skills/x/SKILL.md` -- the skill\n- `src/app.py`") + "\nManual: .claude/skills/x/SKILL.md\n"
+    trivial = ("agent-ready", "trivial", "gates", "bug")
+    c = Case("manualplanned", policy="trivial-merge", table={"_issue_1": issue(labels=trivial, body=body)}, files={".claude/skills/x/SKILL.md": "# x\n"})
+    c.node("BUILD", {**BUILD, "manual": [{"path": ".claude/skills/x/SKILL.md", "edit": "add the line `- step 3`"}]})
+    c.node("REVIEW", CLEAN)
+    code, out, err = c.ouro("run", "1")
+    brief = open(c.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read()
+    check("the BUILD brief names the planned manual path as one the node cannot edit", "- `.claude/skills/x/SKILL.md`" in brief.split("## Paths you cannot edit")[1].split("\n## ")[0])
+    pbody = c.pr()["body"]
+    check("the record lists the manual step with the node's edit, above the summary",
+          "## Manual steps" in pbody and pbody.index("## Manual steps") < pbody.index("## Summary") and "add the line `- step 3`" in pbody)
+    ready = [x["body"] for x in c.pr_comments() if x["body"].startswith("**Ready for merge**")]
+    check("a run with manual steps never merges itself, whatever the policy: Ready for merge lists the steps first",
+          code == 0 and bool(ready) and ready[0].index("Manual steps") < ready[0].index("Head:") and ".claude/skills/x/SKILL.md" in ready[0] and not any(s.startswith("pr merge") for s in c.sigs()))
+    c = happy_case("manualdenied", policy="trivial-merge", table={"_issue_1": issue(labels=trivial)})
+    c.node("BUILD", {**BUILD, "_denied": [{"tool_name": "Edit", "tool_input": {"file_path": ".claude/rules/x.md"}}, {"tool_name": "Edit", "tool_input": {"file_path": "src/other.py"}}]})
+    code, out, err = c.ouro("run", "1")
+    check("a denial under .claude/ triage did not foresee is a manual step found late: the run reaches its pull request, which waits, and the issue is untouched",
+          code == 0 and "- `.claude/rules/x.md`: the node gave no edit" in c.pr()["body"] and "src/other.py" not in c.pr()["body"]
+          and not any(s.startswith("pr merge") for s in c.sigs()) and c.issue_state() is None and "denied under .claude/" in out)
+    c = Case("manualkept", policy="trivial-merge", table={"_issue_1": issue(labels=trivial)})
+    c.node("BUILD", {**BUILD, "_denied": [{"tool_name": "Edit", "tool_input": {"file_path": ".claude/rules/x.md"}}]}, 1)
+    c.node("BUILD", {**BUILD, "subject": "fix(app): handle the last item", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"}}, 2)
+    c.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
+    c.node("REVIEW", CLEAN, 2)
+    code, out, err = c.ouro("run", "1")
+    check("a step a fix round's answer does not repeat survives in the record, and the brief of that round named it",
+          code == 0 and "- `.claude/rules/x.md`" in c.pr()["body"] and "- `.claude/rules/x.md`" in open(c.nodes / "BUILD.2.prompt.txt", encoding="utf-8").read().split("## Paths you cannot edit")[1].split("\n## ")[0]
+          and not any(s.startswith("pr merge") for s in c.sigs()))
+    c = Case("manualonly", table={"_issue_1": issue(body=ISSUE_BODY.replace("- `src/app.py` -- compute_total -- \"def compute_total(items):\"", "- `.claude/skills/x/SKILL.md` -- the skill") + "\nManual: .claude/skills/x/SKILL.md\n")},
+             files={".claude/skills/x/SKILL.md": "# x\n"})
+    wt = c.main / ".claude" / "worktrees" / "1-fix-the-total"
+    c.node("BUILD", {**BUILD, "writes": {}, "manual": [{"path": str(wt / ".claude" / "skills" / "x" / "SKILL.md"), "edit": "add `- step 3`"}, {"path": "src/app.py", "edit": "no"}]})
+    c.node("REVIEW", CLEAN)
+    code, out, err = c.ouro("run", "1")
+    check("an issue whose only deliverable is a manual step reaches its pull request on an empty commit; the node's absolute path is relative there and a path outside .claude/ is no step",
+          code == 0 and "with the manual steps" in out and c.pr() is not None and c.pr()["body"].count("- `.claude/skills/x/SKILL.md`") == 1 and "add `- step 3`" in c.pr()["body"]
+          and "src/app.py`" not in c.pr()["body"].split("## Manual steps")[1].split("## Summary")[0])
+    code, out, err = c.ouro("run", "1", "--dry-run")
+    check("the dry run of a run with manual steps says it would wait, not merge", code == 0 and "would post **Ready for merge**" in out)
+
+
+SECTIONS = [("may_merge: the merge decision", sec_may_merge), ("pure: parsers, markers, the Review line", sec_pure),
                  ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node),
                  ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof),
                  ("run: no binding", sec_no_binding), ("run: a binding the reader refuses", sec_bad_binding),
@@ -1581,9 +1841,36 @@ for name, fn in [("may_merge: the merge decision", sec_may_merge), ("pure: parse
                  ("run: sync conflict", sec_sync_conflict), ("run: spec trust", sec_spec_trust), ("review table: plan and size", sec_review_plan),
                  ("run: review none and size tightening", sec_review_none), ("run: Copilot", sec_copilot), ("run: resume from the tracker", sec_resume), ("run: external reader", sec_external),
                  ("run: lane outcomes", sec_lane), ("run: lane resumed in a moved main checkout", sec_lane_moved_main), ("triage: the TRIAGE node", sec_triage), ("ops: weekly and compile", sec_ops),
-                 ("live: one real claude -p call", sec_live)]:
-    section(name, fn)
+                 ("run: another branch's pull request", sec_other_pr), ("run: manual steps", sec_manual), ("live: one real claude -p call", sec_live)]
+INDEX = os.environ.get("OURO_TEST_INDEX")
+WORKERS = int(os.environ.get("OURO_TEST_WORKERS") or min(8, os.cpu_count() or 1))
 
+
+def run_parallel():
+    """Every section in a child of this script, WORKERS at a time, each with its own scratch world; the failed checks, their output printed in list order."""
+    def child(i):
+        p = subprocess.run([sys.executable, "-u", __file__], env={**os.environ, "OURO_TEST_INDEX": str(i)}, stdin=subprocess.DEVNULL, capture_output=True)
+        return p.returncode, p.stdout + p.stderr
+    failed = 0
+    with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
+        for i, (code, raw) in enumerate(pool.map(child, range(len(SECTIONS)))):
+            sys.stdout.flush()
+            sys.stdout.buffer.write(raw)  # the child's bytes as they are: a text write would double the CR on Windows
+            if code != 0 and b"\nFAIL:" not in raw:
+                sys.stdout.buffer.write(f"FAIL: section {i} ({SECTIONS[i][0]}) exited {code} without a FAIL line\n".encode("utf-8"))
+            sys.stdout.buffer.flush()
+            failed += raw.count(b"\nFAIL:") or int(code != 0)
+    return failed
+
+
+if INDEX is not None:
+    section(*SECTIONS[int(INDEX)])
+    sys.exit(1 if failures else 0)
+if ONLY or WORKERS <= 1:
+    for name, fn in SECTIONS:
+        section(name, fn)
+else:
+    failures = run_parallel()
 if failures:
     print(f"\n{failures} check(s) failed")
     sys.exit(1)
