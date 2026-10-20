@@ -112,6 +112,20 @@ $PathCompare = if ($IsWindows) { 'OrdinalIgnoreCase' } else { 'Ordinal' }
 function Get-FullPath([string]$Path) {
     [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
 }
+# The path with every link on it followed, parents included, as git lists a worktree's path.
+function Get-RealPath([string]$Path, [int]$Hops = 40) {
+    $dir = [System.IO.DirectoryInfo]::new($Path)
+    if (-not $dir.Parent -or $Hops -le 0) { return $dir.FullName }  # a root, or a link into itself
+    $here = Join-Path (Get-RealPath $dir.Parent.FullName $Hops) $dir.Name
+    $target = try { [System.IO.Directory]::ResolveLinkTarget($here, $true) } catch { $null }
+    if ($target) { Get-RealPath $target.FullName ($Hops - 1) } else { $here }
+}
+# A symlinked .claude/worktrees: git lists each worktree at the link's target.
+function Get-WorktreeRoot([string]$Main) {
+    $root = Get-FullPath (Join-Path $Main '.claude/worktrees')
+    $target = try { [System.IO.Directory]::ResolveLinkTarget($root, $true) } catch { $null }
+    if ($target) { Get-FullPath (Get-RealPath $target.FullName) } else { $root }
+}
 function Test-Within([string]$Path, [string]$Root) {
     $Path.Equals($Root, $PathCompare) -or
         $Path.StartsWith($Root + [System.IO.Path]::DirectorySeparatorChar, $PathCompare)
@@ -265,7 +279,7 @@ try {
         elseif ($line -cmatch '^prunable( |$)') { $entries[$entries.Count - 1].Prunable = $true }
     }
     $mainBranch = $entries[0].Branch
-    $wtRoot = Get-FullPath (Join-Path $entries[0].Path '.claude/worktrees')
+    $wtRoot = Get-WorktreeRoot $entries[0].Path
     $here = Get-FullPath (@(Invoke-Read git @('rev-parse', '--show-toplevel'))[0])
     $worktrees = @($entries | Select-Object -Skip 1 | Where-Object { Test-Within $_.Path $wtRoot })
     # A branch checked out in a worktree outside .claude/worktrees/ belongs to that worktree, as the

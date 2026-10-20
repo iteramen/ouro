@@ -22,7 +22,7 @@ READ_TOOLS = ["Read", "Grep", "Glob"]
 SCHEMAS = {
     "TRIAGE": {"type": "object", "required": ["verdict", "comment"], "properties": {
         "verdict": {"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "SPLIT", "FUSE", "STALE"]},
-        "size": {"type": "string"}, "flow": {"type": "string"}, "doc_impact": {"type": "string"}, "manual": {"type": "array"},
+        "size": {"type": "string"}, "flow": {"type": "string"}, "doc_impact": {"type": "string"}, "manual": {"type": "array"}, "labels": {"type": "array"},
         "comment": {"type": "string"}, "question": {"type": "string"}}},
     "BUILD": {"type": "object", "properties": {
         "subject": {"type": "string"}, "body": {"type": "string"}, "claims": {"type": "array"},

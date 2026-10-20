@@ -20,7 +20,7 @@ back to it; the rows that exercise --cwd itself, and diff mode's own two-commit 
 
 stdlib only, like bin/*.py. Run: python3 tests/external-audit/external-audit.Tests.py
 """
-import atexit, json, os, pathlib, re, shutil, signal, stat, subprocess, sys, tempfile, time
+import atexit, json, os, pathlib, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, time
 
 # Two levels up is the plugin root (the driver under bin/) or, once vendored, the scripts dir
 # itself, where the vendor copies it flat.
@@ -47,6 +47,14 @@ def _remove_tmp():
 atexit.register(_remove_tmp)
 
 failures = 0
+
+# The user's grok home the grok adapter copies from: every child this suite starts inherits it.
+USER_GROK = PARENT_TMP / "user-grok"
+USER_GROK.mkdir()
+for _n in ("auth.json", "config.toml", "models_cache.json"):
+    (USER_GROK / _n).write_text(f"user {_n}", encoding="utf-8")
+(USER_GROK / "other.txt").write_text("not seeded", encoding="utf-8")
+os.environ["GROK_HOME"] = str(USER_GROK)
 
 
 def check(what, cond):
@@ -84,7 +92,13 @@ import json, os, sys
 argv = sys.argv[1:]
 stdin_text = sys.stdin.read() if os.environ.get("STUB_RECORD_STDIN") else None
 with open(os.environ["STUB_RECORD_ARGV"], "w", encoding="utf-8") as f:
-    json.dump({"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(), "stdin": stdin_text}, f)
+    gh = os.environ.get("GROK_HOME")
+    seeded = {n: open(os.path.join(gh, n), encoding="utf-8").read() for n in sorted(os.listdir(gh))} if gh and os.path.isdir(gh) else None
+    env = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "GROK_HOME")}
+    modes = {p: os.stat(p).st_mode & 0o777 for p in (gh, os.path.dirname(gh), os.path.join(gh, "auth.json"))
+             if os.path.exists(p)} if gh else None
+    json.dump({"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(), "stdin": stdin_text, "env": env, "seeded": seeded,
+               "modes": modes, "home_files": os.listdir(env["HOME"]) if env["HOME"] and os.path.isdir(env["HOME"]) else None}, f)
 fork_record = os.environ.get("STUB_FORK_CHILD_RECORD")
 if fork_record:
     child_pid = os.fork()
@@ -225,6 +239,10 @@ def read_cwd(record_path):
     return json.loads(record_path.read_text(encoding="utf-8"))["cwd"]
 
 
+def read_record(record_path):
+    return json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else {}
+
+
 def read_stdin(record_path):
     if not record_path.exists():
         return None
@@ -301,7 +319,7 @@ GROK_DISALLOWED = "write,search_replace,run_terminal_command,spawn_subagent"
 
 def expected_grok_argv(prompt_path, session, resume=False, model=None):
     a = ["--prompt-file", str(prompt_path), ("-r" if resume else "-s"), session,
-         "--disallowed-tools", GROK_DISALLOWED]
+         "--disallowed-tools", GROK_DISALLOWED, "--reasoning-effort", "medium"]
     if model and model != "default":
         a += ["-m", model]
     return a
@@ -428,7 +446,7 @@ session1 = session_of(r1.stdout)
 check("round 1 mints and prints a session id", bool(session1))
 argv1 = read_argv(record)
 prompt_path = argv1[argv1.index("--prompt-file") + 1] if "--prompt-file" in argv1 else None
-check("round 1's argv is exactly --prompt-file <path> -s <id> --disallowed-tools <list>",
+check("round 1's argv is exactly --prompt-file <path> -s <id> --disallowed-tools <list> --reasoning-effort medium",
       prompt_path is not None and session1 is not None and
       argv1 == expected_grok_argv(prompt_path, session1))
 check("and the prompt file (not argv) holds the goal",
@@ -441,9 +459,59 @@ r2 = run_driver(BASE_ARGS + ["--resume", session1 or "missing", "--digest", str(
                 stub_dir2, env_extra2, cwd=REPO)
 argv2 = read_argv(record2)
 prompt_path2 = argv2[argv2.index("--prompt-file") + 1] if "--prompt-file" in argv2 else None
-check("round 2's argv is exactly --prompt-file <path> -r <round-1 id> --disallowed-tools <list>",
+check("round 2's argv is exactly --prompt-file <path> -r <round-1 id> --disallowed-tools <list> --reasoning-effort medium",
       prompt_path2 is not None and
       argv2 == expected_grok_argv(prompt_path2, session1, resume=True))
+
+# --- the grok CLI starts bare: home variables at an empty directory, GROK_HOME at a per-session
+# directory seeded with three files, the copied login gone when the round ends ----------------
+rec1, rec2 = read_record(record), read_record(record2)
+env1, env2 = rec1.get("env", {}), rec2.get("env", {})
+grok_home1 = pathlib.Path(env1["GROK_HOME"]) if env1.get("GROK_HOME") else None
+check("grok's home variables point at one empty directory, none of them the user's",
+      bool(env1.get("HOME")) and env1["HOME"] == env1["USERPROFILE"] and env1["HOME"] != os.environ.get("HOME")
+      and rec1.get("home_files") == []
+      and (os.name != "nt" or env1["HOMEDRIVE"] + env1["HOMEPATH"] == env1["HOME"]))
+check("GROK_HOME is a per-session directory under the artifact folder, seeded with the three files and nothing else",
+      grok_home1 is not None and grok_home1 != USER_GROK and grok_home1.parent.name == session1
+      and rec1.get("seeded") == {n: f"user {n}" for n in ("auth.json", "config.toml", "models_cache.json")})
+check("round 2 resumes in round 1's GROK_HOME", env2.get("GROK_HOME") == env1.get("GROK_HOME") and bool(env2.get("GROK_HOME")))
+check("the copied auth.json is gone once the round ends, the rest of the session directory stays",
+      grok_home1 is not None and not (grok_home1 / "auth.json").exists() and (grok_home1 / "config.toml").exists())
+check("the user's own grok home is untouched", (USER_GROK / "auth.json").read_text(encoding="utf-8") == "user auth.json")
+
+if os.name == "nt":
+    print("  skip: a pre-existing world-writable grok home needs POSIX modes")
+elif grok_home1 is None:
+    check("a pre-existing world-writable grok home: round 1 left no grok home to reuse", False)
+else:
+    os.chmod(grok_home1.parent, 0o777)
+    os.chmod(grok_home1, 0o777)
+    stub_dir, record_m, env_extra = make_stub(reply_text=APPROVE_REPLY)
+    r = run_driver(BASE_ARGS + ["--resume", session1, "--digest", str(DIGEST)], stub_dir, env_extra, cwd=REPO)
+    modes = read_record(record_m).get("modes") or {}
+    check("a pre-existing world-writable grok home and session directory are 0700 for the round, auth.json 0600",
+          r.returncode == 0 and modes == {str(grok_home1): 0o700, str(grok_home1.parent): 0o700,
+                                          str(grok_home1 / "auth.json"): 0o600})
+    check("and the grok home ends the round at 0700", stat.S_IMODE(grok_home1.stat().st_mode) == 0o700)
+
+for what, kw, extra in (("a failed CLI", {"exit_code": 7}, []), ("a timeout kill", {"sleep_s": 30}, ["--timeout", "2"])):
+    stub_dir, record_x, env_extra = make_stub(**kw)
+    r = run_driver(BASE_ARGS + extra, stub_dir, env_extra, cwd=REPO)
+    home_x = pathlib.Path(read_record(record_x)["env"]["GROK_HOME"])
+    check(f"{what} leaves no auth.json behind", r.returncode == 1 and home_x.is_dir() and not (home_x / "auth.json").exists())
+
+empty_grok = PARENT_TMP / "empty-grok"
+empty_grok.mkdir()
+stub_dir, record_x, env_extra = make_stub(reply_text=APPROVE_REPLY)
+r = run_driver(BASE_ARGS, stub_dir, {**env_extra, "GROK_HOME": str(empty_grok)}, cwd=REPO)
+check("a user grok home with no auth.json fails the round naming it, starting nothing",
+      r.returncode == 1 and "auth.json" in r.stderr and not record_x.exists() and "Traceback" not in r.stderr)
+
+r = run_driver(BASE_ARGS + ["--dry-run"], cwd=REPO)
+dry_dir = re.search(r"-> (.+)$", r.stdout, re.M)
+check("--dry-run makes no grok home", r.returncode == 0 and dry_dir is not None
+      and not (pathlib.Path(dry_dir.group(1).strip()).parent / "grok-home").exists())
 
 # --- ClaudeAdapter: stdin transport, the safe-mode flag shape, the result-object verdict source -
 # The stub's argv never carries "claude" itself (STUB_IMPL_SOURCE records sys.argv[1:]), so the
@@ -481,10 +549,23 @@ CLAUDE_ERROR_ENVELOPE = claude_envelope(CLAUDE_INNER_APPROVE, is_error=True, sub
 CLAUDE_BASE_ARGS = ["--claims", str(CLAIMS), "--goal", "prove the stub CLI is driven correctly", "--cli", "claude"]
 
 stub_dir, record, env_extra = make_stub(name="claude", reply_text=CLAUDE_APPROVE_ENVELOPE, exit_code=0, record_stdin=True)
+per_user = pathlib.Path(re.search(r"-> (.+)$", r1.stdout, re.M).group(1).strip()).parent.parent  # the parent every round of this suite shares
+if os.name != "nt":
+    os.chmod(per_user, 0o775)  # the upgrade case: a parent an earlier version left at the umask default
 r1c = run_driver(CLAUDE_BASE_ARGS, stub_dir, env_extra, cwd=REPO)
 check("claude round 1 exits 0 on a canned APPROVE inside result", r1c.returncode == 0)
 session1c = session_of(r1c.stdout)
 check("claude round 1 mints and prints a session id", bool(session1c))
+rec_c = read_record(record)
+check("the claude adapter leaves the environment alone: the user's home and grok home reach it as they were",
+      rec_c.get("env", {}).get("GROK_HOME") == str(USER_GROK)
+      and rec_c["env"]["HOME"] == os.environ.get("HOME") and rec_c["env"]["USERPROFILE"] == os.environ.get("USERPROFILE"))
+if os.name == "nt":
+    print("  skip: the artifact tree's modes need POSIX modes")
+else:
+    out1c = pathlib.Path(re.search(r"^external-audit: session \S+ round 1 -> (.+)$", r1c.stdout, re.M).group(1).strip())
+    check("the artifact tree is owner-only for a non-grok adapter: the per-user parent (widened before the round), the session directory and the round folder 0700, prompt.txt 0600",
+          out1c.parent.parent == per_user and [stat.S_IMODE(p.stat().st_mode) for p in (per_user, out1c.parent, out1c, out1c / "prompt.txt")] == [0o700, 0o700, 0o700, 0o600])
 argv1c = read_argv(record)
 check("claude round 1's argv is exactly the --safe-mode shape",
       session1c is not None and argv1c == expected_claude_argv(session1c))
@@ -496,8 +577,15 @@ check("the prompt arrives on stdin, not on argv",
 
 # --- claude round 2: --resume in place of --session-id, same exact shape -------------------
 stub_dir2, record2, env_extra2 = make_stub(name="claude", reply_text=CLAUDE_APPROVE_ENVELOPE, exit_code=0)
-run_driver(CLAUDE_BASE_ARGS + ["--resume", session1c or "missing", "--digest", str(DIGEST)],
-          stub_dir2, env_extra2, cwd=REPO)
+round2c = out1c.parent / "round-2" if os.name != "nt" else None  # the folder the resume reuses, pre-created wide as a failed round or an earlier version leaves it
+if round2c is not None:
+    round2c.mkdir(mode=0o775)
+    os.chmod(round2c, 0o775)
+r2c = run_driver(CLAUDE_BASE_ARGS + ["--resume", session1c or "missing", "--digest", str(DIGEST)],
+                 stub_dir2, env_extra2, cwd=REPO)
+if round2c is not None:
+    check("a round folder that already exists is re-set to 0700 for the round, its prompt.txt 0600",
+          f"-> {round2c}" in r2c.stdout and [stat.S_IMODE(p.stat().st_mode) for p in (round2c, round2c / "prompt.txt")] == [0o700, 0o600])
 argv2c = read_argv(record2)
 check("claude round 2's argv holds --resume and round 1's id, same exact shape",
       argv2c == expected_claude_argv(session1c, resume=True))
@@ -800,6 +888,35 @@ r = run_driver(BASE_ARGS + ["--dry-run"], stub_dir=None, env_extra={"PATH": str(
 check("--dry-run prints the argv and exits 0 with no CLI on PATH at all",
       r.returncode == 0 and "argv: grok" in r.stdout)
 
+# --- --effort: each adapter's route for a non-default value, and what "default" passes ---------
+def dry_argv(cli, *extra, resume=False):
+    args = ["--claims", str(CLAIMS), "--goal", "g", "--cli", cli, "--dry-run", *extra]
+    if resume:
+        args += ["--resume", "sess", "--digest", str(DIGEST)]
+    r = run_driver(args, stub_dir=None, env_extra={"PATH": str(empty_path)}, cwd=REPO)
+    line = next((l for l in r.stdout.splitlines() if l.startswith("argv: ")), "")
+    return r.returncode, shlex.split(line[len("argv: "):])
+
+
+for cli, want in (("grok", ["--reasoning-effort", "max"]), ("claude", ["--effort", "max"]),
+                  ("copilot", ["--reasoning-effort", "max"]), ("codex", ["-c", "model_reasoning_effort=max"])):
+    for resume in (False, True):
+        code, argv = dry_argv(cli, "--effort", "max", resume=resume)
+        at = next((i for i in range(len(argv)) if argv[i:i + 2] == want), -1)
+        check(f"--effort max puts exactly {' '.join(want)} on {cli}'s {'resume' if resume else 'first'} argv, once",
+              code == 0 and at >= 0 and "max" not in argv[:at] + argv[at + 2:])
+    code, argv = dry_argv(cli)
+    check(f"--effort default on {cli} passes " + ("--reasoning-effort medium" if cli == "grok" else "no effort flag"),
+          code == 0 and (("--reasoning-effort" in argv and argv[argv.index("--reasoning-effort") + 1] == "medium")
+                         if cli == "grok" else
+                         not any(a in ("--effort", "--reasoning-effort") or a.startswith("model_reasoning_effort") for a in argv)))
+code, argv = dry_argv("grok", "--effort", "")
+check("an empty --effort on grok is the adapter's own, the medium default", code == 0 and argv.count("--reasoning-effort") == 1 and argv[argv.index("--reasoning-effort") + 1] == "medium")
+code, argv = dry_argv("claude", "--effort", "")
+check("an empty --effort on claude passes no effort flag", code == 0 and "--effort" not in argv)
+code, argv = dry_argv("grok", "--effort", "high")
+check("a grok effort replaces its medium default", code == 0 and argv.count("--reasoning-effort") == 1 and "medium" not in argv)
+
 
 # --- the per-user segment of the artifact folder: getpass reads the user from these variables
 # first, so a --dry-run under each name prints the folder that name gets -----------------------
@@ -899,7 +1016,7 @@ class StdinAdapter(mod.Adapter):
     name = "stdin-test"
     binary = "grok"
     stdin_prompt = True
-    def argv(self, prompt_path, session, resume, model):
+    def argv(self, prompt_path, session, resume, model, effort):
         return ["grok"]
 
 mod.ADAPTERS["stdin-test"] = StdinAdapter()
@@ -908,6 +1025,27 @@ sys.exit(mod.main())
 '''
 stdin_harness = PARENT_TMP / "stdin_harness.py"
 stdin_harness.write_text(STDIN_HARNESS_SOURCE, encoding="utf-8")
+# An adapter with no effort route refuses a non-default --effort before anything starts: --dry-run
+# would otherwise print an argv and exit 0, and the stub grok on PATH would record a run.
+stub_dir, record, env_extra = make_stub(reply_text=None, exit_code=0)
+env = dict(os.environ)
+env["PYTHONDONTWRITEBYTECODE"] = "1"
+env["PATH"] = str(stub_dir) + os.pathsep + SAFE_PATH
+env.update(env_extra)
+for extra in (["--effort", "high", "--dry-run"], ["--effort", "high"]):
+    r = subprocess.run([sys.executable, str(stdin_harness), str(DRIVER), "--cli", "stdin-test",
+                        "--claims", str(CLAIMS), "--goal", "g", *extra],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       cwd=REPO, env=env, timeout=20)
+    check(f"a no-route adapter given --effort high {' '.join(extra[2:]) or 'live'} exits 1 naming itself, running nothing",
+          r.returncode == 1 and "stdin-test" in r.stderr and "no reasoning-effort route" in r.stderr
+          and "argv:" not in r.stdout and not pathlib.Path(record).exists())
+r = subprocess.run([sys.executable, str(stdin_harness), str(DRIVER), "--cli", "stdin-test",
+                    "--claims", str(CLAIMS), "--goal", "g", "--effort", "", "--dry-run"],
+                   capture_output=True, text=True, encoding="utf-8", errors="replace",
+                   cwd=REPO, env=env, timeout=20)
+check("a no-route adapter given an empty --effort is not refused: it is the adapter's own, as default is",
+      r.returncode == 0 and "argv:" in r.stdout and "no reasoning-effort route" not in r.stderr)
 # Bigger than any pipe's kernel buffer once inside the prompt, so a synchronous write (the old
 # bug) blocks for real rather than completing instantly into the buffer regardless of whether
 # the child ever reads it.

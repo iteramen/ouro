@@ -1009,6 +1009,29 @@ try {
     Assert-Equal $true (Test-Path -LiteralPath (Join-Path $innerDir 'wip.txt')) 'the inner worktree and its uncommitted file survive -Delete'
     Assert-Equal 'feat/inner,feat/outer,master' (Get-Heads $m) 'both branches stay'
 
+    # ── .claude/worktrees as a symlink into the repository ──────────────────────────────────
+    Write-Host 'a symlinked .claude/worktrees: its worktrees are the sweep''s, listed at the target'
+    $w = New-World 'wlink'; $m = $w.Main
+    $null = New-Item -ItemType Directory -Path (Join-Path $m '.claude/worktrees.noindex')
+    # A relative target, as a host makes it; a junction where Windows will not make a symbolic link.
+    $linked = try { New-Item -ItemType SymbolicLink -Path (Join-Path $m '.claude/worktrees') -Target 'worktrees.noindex' -ErrorAction Stop | Out-Null; $true } catch { $false }
+    if (-not $linked -and $IsWindows) {
+        $linked = try { New-Item -ItemType Junction -Path (Join-Path $m '.claude/worktrees') -Target (Join-Path $m '.claude/worktrees.noindex') -ErrorAction Stop | Out-Null; $true } catch { $false }
+    }
+    if (-not $linked) { Write-Host '  skip: cannot create a link here' -ForegroundColor DarkGray }
+    else {
+        $linkDir = Join-Path $m '.claude/worktrees/linked'
+        $null = G $m worktree add -q -b feat/linked .claude/worktrees/linked master
+        $linkedHead = New-Commit $linkDir 'linked.txt'
+        $null = G $linkDir push -q origin feat/linked
+        Set-Answer $w 'feat/linked' @(New-PrRow 150 MERGED $linkedHead)
+        Set-BaseAnswer $w 'feat/linked'
+        $run = Invoke-Sweep $w @('-Delete')
+        Assert-Equal 0 $run.Code '-Delete exits 0 under a symlinked worktrees directory'
+        Assert-Line $run 'deleted: worktree .claude/worktrees/linked (feat/linked, PR #150 MERGED)'
+        Assert-Equal $false (Test-Path -LiteralPath (Join-Path $m '.claude/worktrees.noindex/linked')) 'the worktree is gone from the target'
+    }
+
     # ── an ignored name holding a CR ─────────────────────────────────────────────────────────
     if ($IsWindows) { Write-Host '  skip: a CR in a directory name cannot exist on Windows' -ForegroundColor DarkGray }
     else {

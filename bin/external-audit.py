@@ -18,7 +18,9 @@ below); an unknown one, or one whose binary is not on PATH, is a round-1 failure
 where that CLI runs and what it may read; the default is the repository root of the current
 working directory (git rev-parse --show-toplevel), not the working directory itself. --model
 defaults to "default", which passes no model flag, so the CLI's own default applies; any other
-value maps to the adapter's own model flag. Claims mode reads no diff, so --cwd may sit above
+value maps to the adapter's own model flag. --effort likewise: "default", or an empty value, is the adapter's own
+effort (grok's medium, no flag on the others), any other value maps to its effort flag, and an
+adapter with none refuses it with exit 1. Claims mode reads no diff, so --cwd may sit above
 several repositories when the claims span more than one. A run that starts the CLI still runs
 git status there (silent outside a repository), or, with no git on PATH, skips it with one
 stderr line; without --cwd the default comes from git rev-parse, and with no git it is the
@@ -33,7 +35,10 @@ empty diff, diff mode with no git on PATH, a CLI not found on PATH, or a CLI fou
 starts), and 3 when an APPROVE carries no evidence that anything was read - no critique and an
 empty files_read. A 3 is a failed round, not a round: re-run it, and do not spend the two-round
 budget on it. Every artifact (prompt, raw stdout, verdict.json) lands under
-%TEMP%/external-audit-<user>/<session>/round-N/ -- never in the repo. Repo-agnostic by design.
+%TEMP%/external-audit-<user>/<session>/round-N/ -- never in the repo -- each level created
+owner-only (on POSIX re-set to 0700 and refused when another account owns it), before anything
+is written; the grok adapter's bare home and grok home sit beside the round folders, under
+<session>/. Repo-agnostic by design.
 
 Ported from the owner's prior single-CLI reader; the adapter seam below is what this port adds,
 so a second CLI is a new Adapter subclass, not a rewrite of main().
@@ -41,6 +46,7 @@ so a second CLI is a new Adapter subclass, not a rewrite of main().
 from __future__ import annotations
 
 import argparse
+import atexit
 import getpass
 import hashlib
 import json
@@ -138,6 +144,19 @@ def _artifact_user() -> str:
     if safe == user:
         return user
     return f"{safe}-{hashlib.sha256(user.encode('utf-8', 'surrogatepass')).hexdigest()[:8]}"
+
+
+def _owned_tree(out: Path) -> None:
+    """Create the per-user parent, the session directory and the round folder owner-only, before
+    anything is written. mkdir leaves an existing directory's mode, and in a shared temp dir another
+    account can create a level first, so each one is re-set to 0700 and one another account owns is
+    refused."""
+    for d in (out.parent.parent, out.parent, out):
+        d.mkdir(mode=0o700, exist_ok=True)
+        if os.name != "nt":
+            if os.lstat(d).st_uid != os.getuid():
+                raise RuntimeError(f"{d} is owned by another account; refused")
+            os.chmod(d, 0o700)
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -297,9 +316,27 @@ class Adapter:
     binary = ""
     #: True when the adapter's argv omits the prompt file and main() pipes it over stdin instead.
     stdin_prompt = False
+    #: The argv template a non-default effort maps to ({} takes the value); empty means no route.
+    effort_route: tuple[str, ...] = ()
+    #: What "default" means for this adapter; None passes no effort flag.
+    default_effort: str | None = None
 
-    def argv(self, prompt_path: Path, session: str, resume: bool, model: str) -> list[str]:
+    def effort_args(self, effort: str) -> list[str]:
+        if effort in ("default", ""):  # an empty value is the adapter's own effort, as "default" is
+            effort = self.default_effort
+        return [p.format(effort) for p in self.effort_route] if effort else []
+
+    def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
         raise NotImplementedError
+
+    def env(self, session_dir: Path) -> dict[str, str]:
+        """Environment variables laid over the driver's own for the CLI's launch; none by default.
+        An adapter that needs session-scoped state creates it under session_dir here, and
+        cleanup() takes back whatever must not outlive the round."""
+        return {}
+
+    def cleanup(self, session_dir: Path) -> None:
+        """Called when the driver exits after env(), on every path; must tolerate a half-made env()."""
 
     def verdict_text(self, stdout_text: str, out_dir: Path) -> str:
         """Where the verdict text lands before the parse reads it: stdout by default. An adapter
@@ -318,15 +355,61 @@ class Adapter:
 class GrokAdapter(Adapter):
     """As the prior single-CLI reader ran it: the prompt file, -s to mint a session and -r to
     resume, its disallowed-tools list, and the last JSON object on stdout. Model flag -m (grok
-    --help, 1.0.34)."""
+    --help, 1.0.34). Effort --reasoning-effort, medium by default: at the CLI's own default, high,
+    reasoning took 75-90% of a repo-reading round's wall time and most rounds ran past 900 s
+    (grok 1.0.52).
+
+    The CLI starts bare. It loads the user's and the repository's CLAUDE.md files, a skill list,
+    the working directory's Claude Code MCP servers and hooks on its own (about 87 KB a round),
+    and no flag turns that off (--system-prompt-override leaves it). It reads them through the
+    home variables, so env() points HOME and USERPROFILE (HOMEDRIVE and HOMEPATH on Windows) at
+    an empty directory and GROK_HOME at a per-session directory seeded with copies of auth.json,
+    config.toml and models_cache.json from the user's grok home ($GROK_HOME, else ~/.grok), cutting
+    the load to about 450 bytes: grok's bundled skills only, no instruction file, MCP server or
+    hook. The working directory stays the repository, so the reader still reads it. On POSIX, env()
+    re-sets both homes to 0700 whether they existed or not, refuses one another account owns, and
+    writes auth.json 0600 (main secures the artifact tree above them for every adapter). The directory
+    outlives the round for --resume, which finds the session under it; cleanup() removes the
+    copied auth.json on every exit path."""
 
     name = "grok"
     binary = "grok"
     DISALLOWED = "write,search_replace,run_terminal_command,spawn_subagent"
+    effort_route = ("--reasoning-effort", "{}")
+    default_effort = "medium"
+    SEEDED = ("auth.json", "config.toml", "models_cache.json")
 
-    def argv(self, prompt_path: Path, session: str, resume: bool, model: str) -> list[str]:
+    def env(self, session_dir: Path) -> dict[str, str]:
+        source = Path(os.environ.get("GROK_HOME") or Path.home() / ".grok")
+        if not (source / "auth.json").is_file():
+            raise RuntimeError(f"no {source / 'auth.json'}: log in to grok first")
+        home, grok_home = session_dir / "home", session_dir / "grok-home"
+        for d in (home, grok_home):
+            d.mkdir(mode=0o700, exist_ok=True)
+            # mkdir leaves an existing directory's mode, and another account can create one first.
+            if os.name != "nt":
+                if os.lstat(d).st_uid != os.getuid():
+                    raise RuntimeError(f"{d} is owned by another account; refused")
+                os.chmod(d, 0o700)
+        for name in self.SEEDED:
+            if (source / name).is_file():
+                (grok_home / name).unlink(missing_ok=True)  # a planted symlink would take the copy elsewhere
+                shutil.copyfile(source / name, grok_home / name)
+        os.chmod(grok_home / "auth.json", 0o600)
+        env = {"HOME": str(home), "USERPROFILE": str(home), "GROK_HOME": str(grok_home)}
+        if sys.platform == "win32":
+            env["HOMEDRIVE"], env["HOMEPATH"] = os.path.splitdrive(str(home))
+        return env
+
+    def cleanup(self, session_dir: Path) -> None:
+        try:
+            (session_dir / "grok-home" / "auth.json").unlink(missing_ok=True)
+        except OSError as e:
+            print(f"external-audit: WARNING - could not remove the copied grok login from {session_dir}: {e}", file=sys.stderr)
+
+    def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
         cmd = ["grok", "--prompt-file", str(prompt_path), ("-r" if resume else "-s"), session,
-               "--disallowed-tools", self.DISALLOWED]
+               "--disallowed-tools", self.DISALLOWED, *self.effort_args(effort)]
         if model and model != "default":
             cmd += ["-m", model]
         return cmd
@@ -338,18 +421,19 @@ class ClaudeAdapter(Adapter):
     2+. --tools limits the round to the three read-only tools; --permission-mode dontAsk and
     --permission-prompts none deny anything that would otherwise prompt; --safe-mode disables
     CLAUDE.md, skills, plugins, hooks and MCP servers, so the reader brings neither the invoking
-    session's hooks nor the ouro plugin itself into its round. Model flag --model."""
+    session's hooks nor the ouro plugin itself into its round. Model flag --model, effort --effort."""
 
     name = "claude"
     binary = "claude"
     stdin_prompt = True
     TOOLS = "Read,Grep,Glob"
+    effort_route = ("--effort", "{}")
 
-    def argv(self, prompt_path: Path, session: str, resume: bool, model: str) -> list[str]:
+    def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
         cmd = ["claude", "-p", "--output-format", "json",
                ("--resume" if resume else "--session-id"), session,
                "--tools", self.TOOLS, "--permission-mode", "dontAsk",
-               "--permission-prompts", "none", "--safe-mode"]
+               "--permission-prompts", "none", "--safe-mode", *self.effort_args(effort)]
         if model and model != "default":
             cmd += ["--model", model]
         return cmd
@@ -380,22 +464,24 @@ class CodexAdapter(Adapter):
     travels in the file -o/--output-last-message names, not stdout -- an event stream, not the
     reply -- read back by verdict_text() below only when newer than this round's prompt.txt, so a
     stale file left by an earlier failed attempt at the same round (main()'s round folder is
-    reused, exist_ok=True) is never mistaken for this attempt's answer. Model flag -m."""
+    reused, exist_ok=True) is never mistaken for this attempt's answer. Model flag -m; effort is
+    the config override `-c model_reasoning_effort=<v>` on both commands."""
 
     name = "codex"
     binary = "codex"
     stdin_prompt = True
+    effort_route = ("-c", "model_reasoning_effort={}")
 
     def _last_message_path(self, out_dir: Path) -> Path:
         return out_dir / "codex-last-message.txt"
 
-    def argv(self, prompt_path: Path, session: str, resume: bool, model: str) -> list[str]:
+    def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
         out_file = self._last_message_path(prompt_path.parent)
         if resume:
             cmd = ["codex", "exec", "resume", session, "-c", "sandbox_mode=read-only"]
         else:
             cmd = ["codex", "exec", "-s", "read-only"]
-        cmd += ["--skip-git-repo-check", "--json", "-o", str(out_file)]
+        cmd += ["--skip-git-repo-check", "--json", "-o", str(out_file), *self.effort_args(effort)]
         if model and model != "default":
             cmd += ["-m", model]
         cmd.append("-")
@@ -444,16 +530,17 @@ class CopilotAdapter(Adapter):
     `--allow-all-tools`, `--allow-all`, `--yolo`, `--allow-all-paths` or `--disable-builtin-mcps`:
     the built-in GitHub MCP server stays on its default read-only tool set. `--deny-tool` takes a
     variadic value, so each denial is its own `=`-joined argv element. Model flag --model, `auto`
-    included."""
+    included; effort --reasoning-effort."""
 
     name = "copilot"
     binary = "copilot"
     stdin_prompt = True
+    effort_route = ("--reasoning-effort", "{}")
 
-    def argv(self, prompt_path: Path, session: str, resume: bool, model: str) -> list[str]:
+    def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
         cmd = ["copilot", "-s", "--no-ask-user",
                ("--resume" if resume else "--session-id"), session,
-               "--deny-tool=write", "--deny-tool=shell"]
+               "--deny-tool=write", "--deny-tool=shell", *self.effort_args(effort)]
         if model and model != "default":
             cmd += ["--model", model]
         return cmd
@@ -480,6 +567,8 @@ def main() -> int:
     ap.add_argument("--cwd", help="where the CLI runs and what it may read; default: the repository root of the current working directory, or with no git the working directory")
     ap.add_argument("--model", default="default",
                     help="the CLI's model, or 'default' (the default) to pass no model flag")
+    ap.add_argument("--effort", default="default",
+                    help="the CLI's reasoning effort, or 'default' (the default) or an empty value for the adapter's own: grok's medium, no flag on the others")
     ap.add_argument("--range", help="diff mode: git diff range, e.g. master..HEAD or <sha>..<sha>")
     ap.add_argument("--claims", metavar="FILE", help="claims mode: a file of numbered factual claims about the repo, each with the file:line it cites")
     ap.add_argument("--goal", required=True, help="one paragraph: what the change must do (diff mode), or what the claims underpin (claims mode)")
@@ -495,6 +584,9 @@ def main() -> int:
     adapter = ADAPTERS.get(args.cli)
     if adapter is None:
         print(f"external-audit: unknown --cli {args.cli!r}; adapters: {', '.join(sorted(ADAPTERS))}", file=sys.stderr)
+        return 1
+    if args.effort not in ("default", "") and not adapter.effort_route:
+        print(f"external-audit: the {adapter.name} adapter has no reasoning-effort route; refused --effort {args.effort!r}, nothing started", file=sys.stderr)
         return 1
 
     if bool(args.resume) != bool(args.digest):
@@ -517,7 +609,11 @@ def main() -> int:
     # Per-user parent, not a bare "external-audit": a shared temp dir where another account
     # already owns that folder must not fail every round with a PermissionError traceback.
     out = Path(tempfile.gettempdir()) / f"external-audit-{_artifact_user()}" / session / f"round-{round_no}"
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        _owned_tree(out)
+    except (RuntimeError, OSError) as e:
+        print(f"external-audit: the artifact tree could not be secured - {e}; nothing written", file=sys.stderr)
+        return 1
 
     if claims_mode:
         # No git call to build the subject: the claims may span several repositories, so --cwd
@@ -542,7 +638,8 @@ def main() -> int:
     digest = Path(args.digest).read_text(encoding="utf-8") if args.digest else None
     prompt = (build_claims_prompt if claims_mode else build_prompt)(subject, args.goal, lens, digest, round_no)
     (out / "prompt.txt").write_text(prompt, encoding="utf-8")
-    cmd = adapter.argv(out / "prompt.txt", session, bool(args.resume), args.model)
+    os.chmod(out / "prompt.txt", 0o600)  # the diff under review, in a shared temp dir
+    cmd = adapter.argv(out / "prompt.txt", session, bool(args.resume), args.model, args.effort)
     print(f"external-audit: session {session} round {round_no} -> {out}")
     if args.dry_run:
         print("argv: " + shlex.join(cmd))
@@ -579,6 +676,14 @@ def main() -> int:
         dirty_before = sh("git", "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
     else:
         print("external-audit: 'git' not found on PATH; the working-tree check is skipped", file=sys.stderr)
+    # Registered before env() runs, so a copy that fails half way is cleaned too; atexit also runs
+    # for the SystemExit that main()'s timeout, interrupt and SIGTERM paths end in.
+    atexit.register(adapter.cleanup, out.parent)
+    try:
+        child_env = {**os.environ, **adapter.env(out.parent)}
+    except (RuntimeError, OSError) as e:
+        print(f"external-audit: {adapter.binary} could not be prepared - {e}; nothing started", file=sys.stderr)
+        return 1
     started = time.time()
     stdin_arg = None
     if adapter.stdin_prompt:
@@ -599,7 +704,7 @@ def main() -> int:
     # stderr goes straight to a file, so a CLI that writes more of it than a pipe holds is never blocked
     with stdout_path.open("w", encoding="utf-8") as sink, stderr_path.open("w", encoding="utf-8") as stderr_sink:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_sink, stdin=stdin_arg,
-                                text=True, encoding="utf-8", errors="replace", cwd=cwd, **popen_kwargs)
+                                text=True, encoding="utf-8", errors="replace", cwd=cwd, env=child_env, **popen_kwargs)
         def pump():
             for chunk in iter(lambda: proc.stdout.read(256), ""):
                 stdout_chunks.append(chunk); sink.write(chunk); sink.flush()

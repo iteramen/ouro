@@ -104,6 +104,49 @@ try {
 }
 finally { Pop-Location }
 
+Write-Host 'a symlinked .claude/worktrees: the worktree at its target is removed'
+$w = New-World 'wlink'
+$null = G $w.Main checkout -q -b feat/x master
+$null = New-Commit $w.Main 'x1.txt'
+$null = G $w.Main push -q -u origin feat/x
+$null = G $w.Main checkout -q master
+$null = New-Item -ItemType Directory -Path (Join-Path $w.Main '.claude/worktrees.noindex')
+# An absolute target, so a temp directory reached through a link (macOS /var) is resolved too; a
+# symbolic link where one can be made, else on Windows a junction, which needs no privilege.
+$link = @{ Path = (Join-Path $w.Main '.claude/worktrees'); Target = (Join-Path $w.Main '.claude/worktrees.noindex'); ErrorAction = 'Stop' }
+$linked = try { New-Item -ItemType SymbolicLink @link | Out-Null; $true } catch { $false }
+if (-not $linked -and $IsWindows) { $linked = try { New-Item -ItemType Junction @link | Out-Null; $true } catch { $false } }
+if (-not $linked) { Write-Host '  skip: cannot create a link here' -ForegroundColor DarkGray }
+else {
+    $null = G $w.Main worktree add -q (Join-Path $w.Main '.claude/worktrees/x') feat/x
+    Push-Location -LiteralPath $w.Main
+    try {
+        Set-Gh (Table)
+        $r = Invoke-Step { Invoke-RemoveLandedBranch -Pr 7 }
+        Assert-Equal '' $r.Stop 'the run ends without a stop'
+        Assert-Equal $false (Test-Path -LiteralPath (Join-Path $w.Main '.claude/worktrees.noindex/x')) 'the worktree is gone from the target'
+        Assert-Equal 'master' (Get-Heads $w.Main) 'and the local branch with it'
+    }
+    finally { Pop-Location }
+}
+
+Write-Host 'a link into its own subdirectory: the path comes back, no hang'
+$loop = Join-Path $Scratch 'loop'
+$null = New-Item -ItemType Directory -Path $loop
+$looped = try { New-Item -ItemType SymbolicLink -Path (Join-Path $loop 'd') -Target (Join-Path $loop 'd/e') -ErrorAction Stop | Out-Null; $true } catch { $false }
+if (-not $looped) { Write-Host '  skip: cannot create a link here' -ForegroundColor DarkGray }
+else {
+    # A child process, so a hang is stopped and reported rather than holding the suite.
+    $job = Start-Job { param($f, $p) . $f; Get-RealPath $p } -ArgumentList (Join-Path (Split-Path -Parent $Script) 'Get-LandBinding.ps1'), (Join-Path $loop 'd/e')
+    $done = $null -ne (Wait-Job $job -Timeout 30)
+    $failed = @()
+    $out = @(try { Receive-Job $job -ErrorVariable failed 2>$null } catch { $failed = @($_) })
+    Stop-Job $job; Remove-Job $job -Force
+    Assert-Equal $true $done 'Get-RealPath returns within 30 s'
+    Assert-Equal 0 $failed.Count 'with no error (no call depth overflow)'
+    Assert-Equal $true ($out.Count -eq 1 -and "$($out[0])" -like '*loop*d*') 'and one path, through the loop''s link'
+}
+
 Write-Host 'the main checkout on the branch stops; a worktree outside .claude/worktrees/ stops'
 $w = New-World 'w3'
 $null = G $w.Main checkout -q -b feat/x master

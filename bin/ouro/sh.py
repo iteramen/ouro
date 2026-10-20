@@ -12,10 +12,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[2]
 BIN = PLUGIN / "bin"
+NO_ANCHOR = "no parseable anchor in the body (a backticked repo path or a quoted code fragment): the shape gate refuses a promotion without one"
 
 
 class DriverError(Exception):
@@ -23,7 +25,7 @@ class DriverError(Exception):
 
 
 class Refused(Exception):
-    """Exit 2: refused before any branch was made."""
+    """Exit 2: refused; a fresh run has made no branch, a resumed run leaves its branch as it stands."""
 
 
 class Stopped(Exception):
@@ -31,7 +33,7 @@ class Stopped(Exception):
 
 
 def say(msg=""):
-    print(msg, flush=True)
+    print(f"{time.strftime('%H:%M:%S', time.gmtime())} {msg}".rstrip(), flush=True)  # UTC, as the tracker's stamps: the log is its own timeline
 
 
 _RESOLVED = {}
@@ -148,9 +150,11 @@ class Env:
             self._viewer = self.gh("api", "user", "--jq", ".login").out.strip().lower()
         return self._viewer
 
+    def approvers(self):
+        return {str(a).lower() for a in self.lookup("owner.ruling_approvers", []) or []}
+
     def trusted(self):
-        approvers = self.lookup("owner.ruling_approvers", []) or []
-        return {self.viewer(), *[str(a).lower() for a in approvers]}
+        return {self.viewer(), *self.approvers()}
 
     # writes --------------------------------------------------------------------------------
     def write(self, desc, argv, cwd=None, input_text=None, timeout=None, check=True):
@@ -168,6 +172,22 @@ class Env:
         p = self.scratch / name
         write_bytes(p, text)
         return str(p)
+
+    def dead_anchors(self, body, ref, need_one=False):
+        """The anchor gate's findings for a body at a ref (`Get-AnchorFindings.ps1` over the tracked files): none when every anchor line resolves; with `need_one`, a body with no parseable anchor is a finding, as the shape gate reads it."""
+        q = lambda p: str(p).replace("'", "''")  # a PowerShell single-quoted literal
+        bf = self.body_file("anchor-body.md", body)
+        ps = self.scratch / "anchors.ps1"
+        write_bytes(ps, f". '{q((BIN / 'Get-AnchorFindings.ps1').as_posix())}'\n$t = [IO.File]::ReadAllText('{q(Path(bf).as_posix())}')\n"
+                        f"$r = Get-AnchorFindings -Text $t -Ref '{q(ref)}'\nWrite-Output \"COUNT: $($r.PathCount + $r.FragCount)\"\n"
+                        f"$r.Findings | ForEach-Object {{ Write-Output \"FINDING: $_\" }}\n")
+        r = run([which("pwsh"), "-NoProfile", "-File", str(ps)], cwd=self.main)
+        if r.code != 0:
+            raise DriverError(f"the anchor check failed: {r.text}")
+        out = [l[len("FINDING:"):].strip() for l in r.out.splitlines() if l.startswith("FINDING:")]
+        if need_one and "COUNT: 0" in r.out.splitlines():
+            out.append(NO_ANCHOR)
+        return out
 
     def comment_issue(self, n, text):
         f = self.body_file(f"comment-{n}.md", text)

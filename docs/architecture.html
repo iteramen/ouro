@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ouro architecture</title>
+<meta name="description" content="The map of ouro: the layers, the driver's sequence, the model nodes, where each protocol fact is written, read and checked, and the modules that hold them.">
+<style>
+  :root {
+    --bg: rgb(255 255 255); --fg: rgb(28 36 32); --muted: rgb(91 102 96); --line: rgb(215 221 217); --soft: rgb(244 246 245);
+    --person: rgb(255 243 196); --person-line: rgb(183 121 31);
+    --driver: rgb(227 238 252); --driver-line: rgb(43 108 176);
+    --model: rgb(220 239 231); --model-line: rgb(14 107 84);
+    --halt: rgb(253 226 226); --halt-line: rgb(197 48 48);
+    --state: rgb(236 232 247); --state-line: rgb(85 60 154);
+    --accent: rgb(14 107 84);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: rgb(21 26 24); --fg: rgb(230 235 232); --muted: rgb(154 168 161); --line: rgb(46 56 51); --soft: rgb(29 36 33);
+      --person: rgb(74 63 20); --person-line: rgb(226 180 74);
+      --driver: rgb(26 43 64); --driver-line: rgb(127 179 240);
+      --model: rgb(22 50 41); --model-line: rgb(111 207 174);
+      --halt: rgb(67 32 31); --halt-line: rgb(242 139 130);
+      --state: rgb(42 35 64); --state-line: rgb(184 166 240);
+      --accent: rgb(111 207 174);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: rgb(21 26 24); --fg: rgb(230 235 232); --muted: rgb(154 168 161); --line: rgb(46 56 51); --soft: rgb(29 36 33);
+    --person: rgb(74 63 20); --person-line: rgb(226 180 74);
+    --driver: rgb(26 43 64); --driver-line: rgb(127 179 240);
+    --model: rgb(22 50 41); --model-line: rgb(111 207 174);
+    --halt: rgb(67 32 31); --halt-line: rgb(242 139 130);
+    --state: rgb(42 35 64); --state-line: rgb(184 166 240);
+    --accent: rgb(111 207 174);
+  }
+  * { box-sizing: border-box; }
+  html { font-size: 16px; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  main { max-width: 72rem; margin: 0 auto; padding: 2rem 16px 4rem; }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h2 { font-size: 1.35rem; margin: 2.5rem 0 .75rem; padding-top: .5rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+  p { margin: .5rem 0 .75rem; max-width: 64rem; }
+  .lede { color: var(--muted); margin-bottom: 1.5rem; }
+  nav.toc { font-size: .95rem; color: var(--muted); margin-bottom: 1rem; }
+  nav.toc a { margin-right: 1rem; white-space: nowrap; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace; font-size: .9em; background: var(--soft); padding: .05em .3em; border-radius: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: .75rem 0 1.25rem; font-size: .95rem; }
+  th, td { text-align: left; vertical-align: top; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; background: var(--soft); }
+  tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--soft) 50%, transparent); }
+  table.steps td:first-child, table.nodes td:first-child { white-space: nowrap; }
+  table.facts td:first-child { min-width: 14rem; }
+  .wrap { overflow-x: auto; }
+  figure { margin: 1rem 0 1.5rem; }
+  figcaption { color: var(--muted); font-size: .9rem; margin-top: .4rem; }
+  svg { width: 100%; height: auto; display: block; font-family: inherit; }
+  svg text { fill: var(--fg); font-size: 13px; }
+  svg .small { font-size: 11.5px; fill: var(--muted); }
+  svg .mono { font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace; font-size: 12px; }
+  svg .person { fill: var(--person); stroke: var(--person-line); }
+  svg .driver { fill: var(--driver); stroke: var(--driver-line); }
+  svg .model  { fill: var(--model);  stroke: var(--model-line); }
+  svg .halt   { fill: var(--halt);   stroke: var(--halt-line); }
+  svg .state  { fill: var(--state);  stroke: var(--state-line); }
+  svg .plain  { fill: var(--soft);   stroke: var(--line); }
+  svg rect { stroke-width: 1.5; rx: 6; }
+  svg .edge { stroke: var(--muted); stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+  svg .edge.dashed { stroke-dasharray: 5 4; }
+  svg #arrow path { fill: var(--muted); }
+  .legend { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; font-size: .9rem; color: var(--muted); margin: .25rem 0 1rem; }
+  .legend span::before { content: ""; display: inline-block; width: .9em; height: .9em; border-radius: 3px; margin-right: .4em; vertical-align: -.1em; border: 1.5px solid; }
+  .legend .l-person::before { background: var(--person); border-color: var(--person-line); }
+  .legend .l-driver::before { background: var(--driver); border-color: var(--driver-line); }
+  .legend .l-model::before  { background: var(--model);  border-color: var(--model-line); }
+  .legend .l-halt::before   { background: var(--halt);   border-color: var(--halt-line); }
+  .legend .l-state::before  { background: var(--state);  border-color: var(--state-line); }
+  ul { padding-left: 1.25rem; }
+  li { margin: .25rem 0; }
+  @media (max-width: 640px) { html { font-size: 15px; } h1 { font-size: 1.5rem; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>ouro architecture</h1>
+  <p class="lede">The map: what exists, where it lives, and which layer owns it. <a href="contract.md">contract.md</a> is the protocol, <a href="binding.md">binding.md</a> what a repository declares, <a href="rationale.md">rationale.md</a> the reasons, and the <a href="../README.md">README</a> the way in. Every path in the page's prose and tables is a code span the docs-freshness gate resolves against the tree, so a path that stops existing fails a pull request.</p>
+  <nav class="toc">
+    <a href="#layers">Layers</a>
+    <a href="#run">The run</a>
+    <a href="#triage">Triage</a>
+    <a href="#nodes">The nodes</a>
+    <a href="#protocol">Where each protocol fact lives</a>
+    <a href="#gates">Gates, CI and hooks</a>
+    <a href="#modules">The driver's modules</a>
+    <a href="#ideas">Placing an idea</a>
+  </nav>
+
+  <h2 id="layers">Layers</h2>
+  <p>Five layers, one direction of dependency: a caller invokes the driver, the driver calls the node adapter and the scripts, and everything reads and writes the protocol, which is state in the repository and its tracker. The binding feeds the driver, the gates and the installer. The hooks sit beside the stack: they guard a Claude Code session's shell calls and are not part of the protocol.</p>
+  <div class="legend"><span class="l-person">a person or a caller</span><span class="l-driver">the driver, fixed code</span><span class="l-model">a model node</span><span class="l-state">repository state</span></div>
+  <figure>
+    <svg viewBox="0 0 960 500" role="img" aria-labelledby="layers-title">
+      <title id="layers-title">The layers of ouro and their dependencies</title>
+      <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z"/></marker></defs>
+      <!-- callers -->
+      <rect class="person" x="20" y="20" width="290" height="62"/>
+      <text x="35" y="44" font-weight="600">entry skills</text>
+      <text x="35" y="64" class="mono">/ouro:run · triage · weekly · init</text>
+      <rect class="person" x="335" y="20" width="290" height="62"/>
+      <text x="350" y="44" font-weight="600">a cron or a bot on any host</text>
+      <text x="350" y="64" class="small">the binding, git, gh, pwsh, python3 and claude</text>
+      <rect class="person" x="650" y="20" width="290" height="62"/>
+      <text x="665" y="44" font-weight="600">a person at a terminal</text>
+      <text x="665" y="64" class="mono">python3 bin/ouro run N</text>
+      <path class="edge" d="M165 82 L165 118"/>
+      <path class="edge" d="M480 82 L480 118"/>
+      <path class="edge" d="M795 82 L795 118"/>
+      <!-- driver -->
+      <rect class="driver" x="20" y="120" width="920" height="92"/>
+      <text x="35" y="145" font-weight="600">the driver</text>
+      <text x="130" y="145" class="mono">bin/ouro — run · triage · weekly · compile</text>
+      <text x="35" y="168" class="small">one process per call: reads the issue, the branch and the pull request, continues from the first state not yet reached, keeps nothing between calls</text>
+      <text x="35" y="185" class="small">exit 0 landed or waiting · 1 driver error · 2 refused · 3 stopped</text>
+      <text x="35" y="202" class="small">the README says what each exit covers</text>
+      <!-- binding -->
+      <rect class="state" x="20" y="240" width="200" height="62"/>
+      <text x="35" y="264" font-weight="600">the binding</text>
+      <text x="35" y="284" class="mono">.claude/ouro.toml</text>
+      <path class="edge" d="M120 240 L120 212"/>
+      <!-- node adapter -->
+      <rect class="model" x="240" y="240" width="360" height="92"/>
+      <text x="255" y="264" font-weight="600">node adapter</text>
+      <text x="370" y="264" class="mono">bin/ouro/node.py</text>
+      <text x="255" y="286" class="small">claude -p · a JSON schema · a tool allowlist · a timeout</text>
+      <text x="255" y="303" class="small">briefs: prompts/*.md + sections of the contract</text>
+      <text x="255" y="320" class="small">nodes: TRIAGE · BUILD · REVIEW · CHECKPOINT · FOLLOWUP</text>
+      <path class="edge" d="M420 240 L420 212"/>
+      <!-- scripts and gates -->
+      <rect class="driver" x="620" y="240" width="320" height="92"/>
+      <text x="635" y="264" font-weight="600">scripts and gates</text>
+      <text x="635" y="286" class="mono">bin/*.ps1 · bin/*.py · release/*.py</text>
+      <text x="635" y="303" class="small">subprocesses: sync, push, watch, merge, remove,</text>
+      <text x="635" y="320" class="small">shape and anchor gates, binding reader, outcomes</text>
+      <path class="edge" d="M780 240 L780 212"/>
+      <!-- hooks -->
+      <rect class="plain" x="240" y="358" width="360" height="56"/>
+      <text x="255" y="380" font-weight="600">hooks</text>
+      <text x="310" y="380" class="small">beside the stack, not in it</text>
+      <text x="255" y="402" class="mono">hooks/hooks.json → five PreToolUse guards</text>
+      <!-- CI -->
+      <rect class="driver" x="620" y="358" width="320" height="56"/>
+      <text x="635" y="380" font-weight="600">CI</text>
+      <text x="665" y="380" class="small">the binding's gates on every pull request and push</text>
+      <text x="635" y="402" class="mono">actions/gates · actions/docs-freshness</text>
+      <path class="edge dashed" d="M780 358 L780 332"/>
+      <!-- protocol -->
+      <rect class="state" x="20" y="440" width="920" height="46"/>
+      <text x="35" y="460" font-weight="600">the protocol: repository state</text>
+      <text x="35" y="478" class="small">labels · comment shapes · anchors · Size, Flow, Doc impact, Manual lines · the pull-request record and its Review line · outcomes</text>
+      <path class="edge" d="M120 302 L120 440"/>
+      <path class="edge" d="M420 332 L420 358"/>
+      <path class="edge" d="M420 414 L420 440"/>
+      <path class="edge" d="M780 414 L780 440"/>
+    </svg>
+    <figcaption>A caller invokes the driver; the driver asks a node or runs a script; all of it reads and writes the tracker.</figcaption>
+  </figure>
+
+  <h2 id="run">The run</h2>
+  <p><code>python3 bin/ouro run N</code> is one sequence. The log tags each step with the number below; the same tags are how a resumed run reports where it picked up. Blue is code, green a model call, yellow a person, red a stop that hands the issue back as <code>needs-ruling</code> with a <code>**Stop:**</code> comment.</p>
+  <figure>
+    <svg viewBox="0 0 1100 360" role="img" aria-labelledby="run-title">
+      <title id="run-title">The driver's sequence from the verified issue to the landed change</title>
+      <!-- row 1 -->
+      <rect class="driver" x="10" y="20" width="140" height="54"/>
+      <text x="20" y="42" font-weight="600">[1–2] verify</text>
+      <text x="20" y="60" class="small">shape, anchors, trust</text>
+      <rect class="driver" x="166" y="20" width="140" height="54"/>
+      <text x="176" y="42" font-weight="600">[3] worktree</text>
+      <text x="176" y="60" class="small">branch off default</text>
+      <rect class="model" x="322" y="20" width="140" height="54"/>
+      <text x="332" y="42" font-weight="600">[4] BUILD</text>
+      <text x="332" y="60" class="small">edit, claims, residue</text>
+      <rect class="driver" x="478" y="20" width="140" height="54"/>
+      <text x="488" y="42" font-weight="600">[5] gates</text>
+      <text x="488" y="60" class="small">those the checks skip</text>
+      <rect class="driver" x="634" y="20" width="140" height="54"/>
+      <text x="644" y="42" font-weight="600">[6] push, draft PR</text>
+      <text x="644" y="60" class="small">synced; the record</text>
+      <rect class="model" x="790" y="20" width="140" height="54"/>
+      <text x="800" y="42" font-weight="600">[7] REVIEW</text>
+      <text x="800" y="60" class="small">findings, verdict</text>
+      <rect class="model" x="946" y="20" width="144" height="54"/>
+      <text x="956" y="42" font-weight="600">BUILD fix</text>
+      <text x="956" y="60" class="small">three rounds at most</text>
+      <path class="edge" d="M150 47 L166 47"/>
+      <path class="edge" d="M306 47 L322 47"/>
+      <path class="edge" d="M462 47 L478 47"/>
+      <path class="edge" d="M618 47 L634 47"/>
+      <path class="edge" d="M774 47 L790 47"/>
+      <path class="edge" d="M930 40 L946 40"/>
+      <path class="edge" d="M946 56 L930 56"/>
+      <text x="10" y="96" class="small">H or M findings start a fix round, which the same reviewer verifies; an approver's **Ruling** on the pull request ends the rounds for the record it follows.</text>
+      <!-- row 2 -->
+      <path class="edge" d="M860 74 L860 110 L80 110 L80 136"/>
+      <rect class="driver" x="10" y="138" width="140" height="54"/>
+      <text x="20" y="160" font-weight="600">[8] checks</text>
+      <text x="20" y="178" class="small">a flake re-run once</text>
+      <rect class="driver" x="166" y="138" width="140" height="54"/>
+      <text x="176" y="160" font-weight="600">[9] decide</text>
+      <text x="176" y="178" class="small">policy × Flow class</text>
+      <rect class="driver" x="322" y="138" width="140" height="54"/>
+      <text x="332" y="160" font-weight="600">merge at head SHA</text>
+      <text x="332" y="178" class="small">Landed unattended</text>
+      <rect class="driver" x="478" y="138" width="140" height="54"/>
+      <text x="488" y="160" font-weight="600">[10] after merge</text>
+      <text x="488" y="178" class="small">branch gone, anchors</text>
+      <rect class="model" x="634" y="138" width="140" height="54"/>
+      <text x="644" y="160" font-weight="600">[11] FOLLOWUP</text>
+      <text x="644" y="178" class="small">issues with anchors</text>
+      <rect class="driver" x="790" y="138" width="140" height="54"/>
+      <text x="800" y="160" font-weight="600">[12] close</text>
+      <text x="800" y="178" class="small">Fixes #N, part tick</text>
+      <path class="edge" d="M150 165 L166 165"/>
+      <path class="edge" d="M306 165 L322 165"/>
+      <path class="edge" d="M462 165 L478 165"/>
+      <path class="edge" d="M618 165 L634 165"/>
+      <path class="edge" d="M774 165 L790 165"/>
+      <rect class="person" x="166" y="218" width="340" height="50"/>
+      <text x="176" y="239" font-weight="600">Ready for merge: a person merges</text>
+      <text x="176" y="257" class="small">stop-at-pr, a class not unattended, or a manual step</text>
+      <path class="edge" d="M236 192 L236 218"/>
+      <path class="edge dashed" d="M400 218 L400 192"/>
+      <!-- stop lane -->
+      <rect class="halt" x="10" y="292" width="1080" height="56"/>
+      <text x="20" y="314">a stop, from [2] to [8]: dead anchor · open decision · gate uncovered · review cap. The driver posts a <tspan class="mono">**Stop:**</tspan> comment and swaps <tspan class="mono">agent-ready</tspan> for <tspan class="mono">needs-ruling</tspan>;</text>
+      <text x="20" y="336">an approver answers in a comment, triage runs again, and the next <tspan class="mono">run N</tspan> resumes from the first state not yet reached.</text>
+    </svg>
+    <figcaption>A resumed run re-reads the tracker and skips every step whose state already exists: a pushed branch, an open pull request, a posted review, green checks. The direct lane (<code>Flow: direct</code>, step [2a]) commits on the default branch instead and has no review.</figcaption>
+  </figure>
+
+  <div class="wrap">
+  <table class="steps">
+    <thead><tr><th>Step</th><th>What happens</th><th>Code</th></tr></thead>
+    <tbody>
+      <tr><td>[1] bind</td><td>Reads <code>.claude/ouro.toml</code> through the binding reader; no binding, or one that fails <code>check</code>, ends the run before any tracker call.</td><td><code>bin/ouro/cli.py</code> (bind), <code>bin/ouro/sh.py</code> (<code>Env</code>), <code>bin/ouro-binding.py</code></td></tr>
+      <tr><td>[2] verify</td><td>The issue is open, carries <code>agent-ready</code> and not <code>needs-ruling</code>, and no other branch's open pull request fixes it; the shape gate is green; every anchor resolves at the tip (a dead anchor line under the body's <code>Anchors</code> heading whose fragments all grep in one other tracked file of the same suffix is re-pointed and the body re-stamped; any other dead anchor stops the run); the body's edit history since the newest trusted <code>**Triage**</code> comment holds no untrusted editor; every area label has a gate. A checklist deliverable picks its first unticked part. A failed check is a stop or a refusal.</td><td><code>Run.verify</code>, <code>check_spec_trust</code>, <code>refuse_other_pr</code> in <code>bin/ouro/run.py</code>; <code>bin/Test-AgentReadyShape.ps1</code>; <code>bin/Test-AgentReadyAnchors.ps1</code></td></tr>
+      <tr><td>[2a] direct</td><td>Under <code>Flow: direct</code>, every path the deliverable names inside <code>[ship].direct</code>: the build commits on the default branch in the main checkout, the selected gates run locally, the push is read back, a red default-branch run gets one fix, then a revert; a diff that reaches outside the globs, or a manual step, moves the commit to a worktree and the pull-request path.</td><td><code>Run.direct</code>, <code>lane_*</code>; <code>bin/Push-Direct.ps1</code></td></tr>
+      <tr><td>[3] worktree</td><td>A worktree under <code>.claude/worktrees/</code> on a branch cut from the remote default branch, named from <code>[repo].branch_prefix</code>, else the first area label, else the first type label, else <code>ouro</code>, then the issue number and the slug.</td><td><code>Run.ensure_worktree</code></td></tr>
+      <tr><td>[4] BUILD or CHECKPOINT</td><td>The BUILD node edits the worktree and answers with the subject, the record's facts, its claims, the gates it ran, the residue and the manual steps; the driver commits under the human who ran it. A <code>checkpoint</code> issue takes the CHECKPOINT node instead, read-only, and its finding is posted on the issue.</td><td><code>Run.build</code>, <code>Run.checkpoint</code>; <code>bin/ouro/prompts/build.md</code>, <code>bin/ouro/prompts/checkpoint.md</code></td></tr>
+      <tr><td>[5] gates</td><td>Flow and Size are re-derived from the diff and only tighten. The selected gates are every <code>[[gate]]</code> whose areas match, narrowed by <code>paths</code>; the driver runs locally only those the checks cannot run (a <code>ci</code> whose printed text starts with skip, and the token scan) and, in the direct lane, all of them; a <code>ci</code> that prints any other notice means another workflow runs the gate in CI: neither the driver nor the builder runs it, and the record names it among the checks.</td><td><code>select_gates</code>, <code>run_gates</code>, <code>derive_flow</code>, <code>derive_size</code></td></tr>
+      <tr><td>[6] push, pull request</td><td>The branch is synced onto the default branch, pushed, and a draft pull request opens with the record: merge danger, manual steps, summary, changes, verification, follow-up, and the machine-readable record comment. A sync conflict goes to the BUILD node as a finding. Under <code>express</code> with a first reader, the review reads the local range first, and the push and the draft come at convergence.</td><td><code>sync_and_push</code>, <code>open_pr</code>, <code>render_body</code>; <code>bin/Sync-Branch.ps1</code>, <code>bin/Push-Branch.ps1</code></td></tr>
+      <tr><td>[7] review</td><td>By <code>[ship].review</code> and the Size: the REVIEW node (on a full-class run with Bash in a detached copy of the head), a Copilot round through GraphQL, or an external reader CLI. H or M findings start a fix round by the BUILD node, verified by the same reviewer; three rounds, then the review-cap stop, a hand-off that names the branch and the pull request: a fix commit pushed there, <code>agent-ready</code> back in place of <code>needs-ruling</code>, and a new run verify it as any fix round. An approver's <code>**Ruling**</code> comment on the pull request ends the rounds for the record it follows.</td><td><code>Run.review</code>, <code>node_review</code>, <code>copilot_round</code>, <code>reader_round</code>, <code>review_records</code>; <code>bin/ouro/prompts/review.md</code>, <code>bin/external-audit.py</code></td></tr>
+      <tr><td>[8] checks</td><td>The pull request is marked ready and its workflow runs are watched to the end; a failed run is re-run once, and a failure after that goes to the BUILD node as a fix round, with the tail of the failed log. A pull request GitHub ran nothing for because it conflicts with the base, or a merge refused as CONFLICTING, is synced onto the base once per head and the pass repeats.</td><td><code>Run.checks</code>; <code>bin/Watch-PullRequestChecks.ps1</code></td></tr>
+      <tr><td>[9] decide</td><td><code>may_merge</code> reads <code>[ship].policy</code>, <code>unattended_classes</code>, the issue's labels and the Flow class; a run with manual steps never merges itself. Yes: squash or merge at the head SHA the checks saw, branch deleted, <code>**Landed unattended**</code> posted. No: <code>**Ready for merge**</code> with the manual steps first, and the run waits for a person.</td><td><code>may_merge</code>, <code>Run.decide</code>; <code>bin/Merge-PullRequest.ps1</code></td></tr>
+      <tr><td>[10] after merge</td><td>On a full-class change the default branch's runs are watched; the branch and worktree go; the anchor gate reports the queue's stale anchors into the run's log.</td><td><code>Run.after_merge</code>; <code>bin/Remove-LandedBranch.ps1</code>, <code>bin/Test-AgentReadyAnchors.ps1</code></td></tr>
+      <tr><td>[11] follow-ups</td><td>The record's residue and the review's unfixed L and OUTSIDE findings (one bullet per finding, the latest round's) go to the FOLLOWUP node, which answers with issues; the driver files each one whose anchors resolve at the merge commit, with the area and type labels the node names from the binding's sets, the run's own area labels when it names no area, and <code>needs-triage</code> (one titled <code>Cleanup: area</code> is appended to the area's ledger, reopened if closed, and filed only when none exists) and posts <code>**Follow-ups filed**</code>; a write that fails after an earlier one succeeded leaves the unfiled items in that comment, and a resume files exactly those.</td><td><code>Run.follow_up</code>; <code>bin/ouro/prompts/followup.md</code></td></tr>
+      <tr><td>[12] close</td><td>The squash message's <code>Fixes #N</code> closes the issue; a part of a checklist is ticked in the body instead, and the next <code>run N</code> takes the next part.</td><td><code>Run.tick_part</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="triage">Triage</h2>
+  <p><code>python3 bin/ouro triage N</code> asks the TRIAGE node for a verdict, with the issue, its comments, the anchor gate's answer and contract sections in the brief, then acts on it: the <code>**Triage**</code> comment is posted, the labels move (an area or type label the node names for an issue that lacks it joins the verdict's move), and on a promotion the <code>Size:</code>, <code>Flow:</code> and <code>Doc impact on close:</code> lines are written into the body where they are missing. Six verdicts: <code>PROMOTE</code> to <code>agent-ready</code>, <code>NEEDS-RULING</code> with a recommendation, <code>CHECKPOINT</code>, <code>SPLIT</code> for an L, <code>FUSE</code>, <code>STALE</code>. A promotion the shape gate would demote for a label count becomes <code>NEEDS-RULING</code> before anything is posted, and the gate runs once more after the move. A Deliverable clause naming a file the repository no longer has is stale, not a question: the issue is graded by the clauses that remain and the comment says the clause is not delivered. Code: <code>bin/ouro/triage.py</code>, <code>bin/ouro/prompts/triage.md</code>.</p>
+
+  <h2 id="nodes">The nodes</h2>
+  <p>Five judgment nodes, all through one function, <code>run_node</code> in <code>bin/ouro/node.py</code>: a prompt on stdin, a JSON schema for the answer, a tool allowlist, <code>--permission-mode dontAsk</code>, a timeout. What no node is granted is in the README's "Under the hood". The model per role is <code>[models]</code> in the binding; a stub mode, selected by <code>OURO_NODE_STUB</code>, returns canned answers for the driver suite.</p>
+  <div class="wrap">
+  <table class="nodes">
+    <thead><tr><th>Node</th><th>Role, default model</th><th>Tools</th><th>Timeout</th><th>Answers with</th></tr></thead>
+    <tbody>
+      <tr><td>TRIAGE</td><td>builder, Sonnet</td><td>Read, Grep, Glob</td><td>10 min</td><td>verdict, size, flow, doc_impact, manual, labels, comment, question</td></tr>
+      <tr><td>BUILD</td><td>builder, Sonnet; builder_trivial on a <code>trivial</code> issue</td><td>Edit, Write, Read, Grep, Glob; <code>git rm</code>, <code>mv</code>, <code>status</code>, <code>diff</code>, <code>log</code> and <code>ls-files</code>; the gates the checks skip, the gates that declare paths, and the runner commands the issue's acceptance section lists</td><td>60 min</td><td>subject, body, claims, gates_run, residue, manual, door, blast_radius, stop, replies</td></tr>
+      <tr><td>REVIEW</td><td>reviewer, Opus</td><td>Read, Grep, Glob; on a <code>full</code> run also Bash in a detached copy of the head</td><td>60 min</td><td>verdict, findings (severity, file, line, claim, evidence, scope), false_record_sentences, files_read</td></tr>
+      <tr><td>CHECKPOINT</td><td>builder, Sonnet</td><td>Read, Grep, Glob</td><td>60 min</td><td>finding, stop</td></tr>
+      <tr><td>FOLLOWUP</td><td>builder, Sonnet</td><td>Read, Grep, Glob</td><td>10 min</td><td>issues (title, body, labels)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>A brief is a template under <code>bin/ouro/prompts/</code> with slots the driver fills, such as the issue body and its spec comments, the anchors' current lines, the binding's relevant keys, the diff or the record, and the contract sections the node needs, pasted from <code>docs/contract.md</code> by <code>bin/ouro/briefs.py</code>. The REVIEW brief embeds <code>bin/ouro/prompts/REVIEWER-PROMPT.md</code>.</p>
+
+  <h2 id="protocol">Where each protocol fact lives</h2>
+  <p>The protocol is what any harness can read and write without the driver. Each fact has a writer, a reader and a check; the check is what makes the fact trustworthy to an unattended run.</p>
+  <div class="wrap">
+  <table class="facts">
+    <thead><tr><th>Fact</th><th>Written by</th><th>Read by</th><th>Checked by</th></tr></thead>
+    <tbody>
+      <tr><td>state labels</td><td>triage (<code>bin/ouro/triage.py</code>), the driver's stops, a person</td><td>the driver's verify step, the queue compile</td><td>the driver's own label check at verify; <code>bin/Test-AgentReadyShape.ps1</code> demotes on its anchor, Size, Doc impact, provenance and area/type label checks</td></tr>
+      <tr><td><code>**Triage**</code> comment</td><td>triage</td><td>the driver: the newest one from a trusted author is the spec's baseline</td><td>the shape gate's provenance check</td></tr>
+      <tr><td><code>Size:</code>, <code>Flow:</code>, <code>Doc impact on close:</code>, <code>Manual:</code> lines</td><td>triage, into the body</td><td>the driver: the class picks the ceremony, the lines pick the gates and the manual steps</td><td>the shape gate, for Size and Doc impact; the diff re-derives Size and Flow and only tightens</td></tr>
+      <tr><td>anchors: a backticked path, a symbol, a double-quoted fragment</td><td>the issue's author</td><td>the briefs carry each anchor's current lines</td><td><code>bin/Get-AnchorFindings.ps1</code>, through <code>bin/Test-AgentReadyAnchors.ps1</code> in CI, at the run's verify step and after each merge</td></tr>
+      <tr><td>checklist parts: <code>- [ ] k. **title (Flow: class).**</code></td><td>the author, in the contract's form; triage names them</td><td>the driver takes the first unticked part; <code>Part k/n of #N</code> opens the part's pull request</td><td>a part in flight refuses a second run; the tick after the merge</td></tr>
+      <tr><td><code>**Stop:** reason</code> comment</td><td>the driver (<code>stop_issue</code>): dead anchor, open decision, gate uncovered, review cap</td><td>an approver; the outcomes</td><td>its first line is exact; the swap to <code>needs-ruling</code> goes with it</td></tr>
+      <tr><td><code>**Checkpoint finding**</code> comment</td><td>the driver, from the CHECKPOINT node</td><td>triage, which applies the proposed conversion</td><td>trusted author; newer than the newest trusted triage</td></tr>
+      <tr><td>body edits after the verdict</td><td>anyone with write access</td><td>the driver's spec-trust check, on a fresh and a resumed run</td><td>an editor outside the driver's own gh login and <code>[owner].ruling_approvers</code> stops the run</td></tr>
+      <tr><td>the pull-request record: Merge danger, Summary, Changes, Verification, Follow-up, the <code>ouro-record</code> comment</td><td>the driver, from the newest BUILD answer (<code>render_body</code>)</td><td><code>read_record</code> on resume; the FOLLOWUP node; <code>bin/loop-outcomes.py</code></td><td>the REVIEW node reads the record's sentences as claims</td></tr>
+      <tr><td><code>**Review** round k</code> comment</td><td>the driver, from each REVIEW answer</td><td><code>review_records</code>: the rounds, the standing findings, what a fix must answer</td><td>trusted author; a record at a new head needs a new ruling</td></tr>
+      <tr><td><code>**Ruling**</code> comment on the pull request</td><td>an approver</td><td><code>review_records</code>: the newest prior record is ruled, its findings need no fix</td><td>author in <code>[owner].ruling_approvers</code></td></tr>
+      <tr><td><code>Review: rounds:k findings:H/M/L false-sentences:n</code></td><td>the driver (<code>review_line</code>) in the record</td><td><code>bin/loop-outcomes.py</code> for the quality table</td><td>one pattern, defined in the contract</td></tr>
+      <tr><td><code>Fixes #N</code> in the squash message</td><td>the driver's merge</td><td>GitHub closes the issue; the outcomes tie the landing to the attempt</td><td>a second open pull request carrying it refuses a run</td></tr>
+      <tr><td><code>**Landed unattended**</code>, <code>**Ready for merge**</code></td><td>the driver's decide step</td><td>a person; the outcomes</td><td>the first names the checks, the review line and the class</td></tr>
+      <tr><td><code>**Follow-ups filed**</code></td><td>the driver's follow-up step</td><td>the driver: a resume files only the items the newest trusted comment holds as unfiled, and nothing when it holds none</td><td>each filed issue passed the anchor check at the merge commit; a comment from any other account is data</td></tr>
+      <tr><td><code>Cleanup: area</code> umbrella issues</td><td>a session, one line per below-floor finding, as comments</td><td>triage, which proposes a sweep at about five lines</td><td>found by exact title in any state: the contract's rule for a session, and the follow-up step's lookup in <code>Run.follow_up</code></td></tr>
+      <tr><td>outcomes and the weekly table</td><td>nobody: read from GitHub's own record</td><td><code>bin/loop-outcomes.py</code> through <code>ouro weekly</code>; the <code>[rolling_issues].loop_runs</code> issue</td><td>every promotion is an attempt with exactly one outcome</td></tr>
+      <tr><td>the next wave</td><td>nobody: computed</td><td><code>ouro compile</code> through <code>bin/Get-FootprintGraph.ps1</code> and <code>bin/Get-CompileProgram.ps1</code></td><td>footprints from the anchors' paths; the areas pick the gates</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="gates">Gates, CI and hooks</h2>
+  <p><strong>Gates</strong> are the binding's <code>[[gate]]</code> entries, each a verify command with the keys <a href="binding.md">binding.md</a> defines. <code>python3 bin/ouro-binding.py get gate</code> prints the plugin's own, and <code>gates '*'</code> the ones every issue selects: fixture suites under <code>tests/</code>, selftests, the docs, changelog and command-block gates, the token scan and the release checks.</p>
+  <p><strong>CI</strong> is the one gate run in every class with a pull request: the consumer's workflow, from <code>templates/ci.yml</code>, calls <code>actions/gates/action.yml</code>, which reads the binding and runs every gate, or, with its <code>select-by-paths</code> input on, the ones whose paths the diff touches; <code>actions/docs-freshness/action.yml</code> runs the docs gate. The driver watches those runs and merges at the head they gated. A gate whose <code>ci</code> only prints a notice is another workflow's run and stays with the checks; one whose <code>ci</code> prints a text starting with skip is the driver's to run locally.</p>
+  <p><strong>Hooks</strong> are Claude Code PreToolUse guards registered by <code>hooks/hooks.json</code> on Bash and PowerShell calls: the private-token check (<code>bin/forbidden-tokens.py</code>), <code>hooks/guard-delete.py</code>, <code>hooks/guard-stash-kill.py</code>, <code>hooks/guard-discard.py</code> and <code>hooks/guard-commit.py</code>, each with its own fixture suite under <code>tests/hooks/</code>. They refuse a call whose shape breaks a rule a session could otherwise execute; <a href="../hooks/README.md">hooks/README.md</a> is the table. A harness with no hook layer runs without them, which is why nothing in the protocol depends on one.</p>
+
+  <h2 id="modules">The driver's modules</h2>
+  <div class="wrap">
+  <table>
+    <thead><tr><th>File</th><th>Owns</th></tr></thead>
+    <tbody>
+      <tr><td><code>bin/ouro</code>, <code>bin/ouro/__main__.py</code></td><td>The entry points: <code>python3 bin/ouro &lt;command&gt;</code> from the repository root.</td></tr>
+      <tr><td><code>bin/ouro/cli.py</code></td><td>The argument parser; binds first, then dispatches; maps the failure classes to the exit codes.</td></tr>
+      <tr><td><code>bin/ouro/sh.py</code></td><td><code>Env</code>: the binding, the main checkout, the slug and default branch, the git and gh wrappers, the anchor-gate call; <code>run()</code>, through which every subprocess goes; the dry-run seam; <code>DriverError</code>, <code>Refused</code>, <code>Stopped</code>.</td></tr>
+      <tr><td><code>bin/ouro/run.py</code></td><td><code>Run</code>: the sequence above, the direct lane, the review routes, the merge decision and the follow-up step; the pure helpers beside it: <code>may_merge</code>, <code>derive_flow</code>, <code>derive_size</code>, <code>parse_parts</code>, <code>review_records</code>, <code>render_body</code>, <code>read_record</code>, <code>review_line</code>.</td></tr>
+      <tr><td><code>bin/ouro/triage.py</code></td><td><code>triage()</code>: the label and anchor pre-checks, the TRIAGE node, the verdict comment, the label moves, the body lines, the shape gate's re-check.</td></tr>
+      <tr><td><code>bin/ouro/node.py</code></td><td><code>run_node()</code>: the <code>claude -p</code> call, the schemas, the timeouts, the role per node, the read-only tool set, the stub mode, the usage ledger.</td></tr>
+      <tr><td><code>bin/ouro/briefs.py</code></td><td>The templates under <code>bin/ouro/prompts/</code>, the contract sections quoted into them, the anchors' current lines.</td></tr>
+      <tr><td><code>bin/ouro/ops.py</code></td><td><code>weekly</code> and <code>compile</code>: wrappers over <code>bin/loop-outcomes.py</code> and the compile scripts.</td></tr>
+      <tr><td><code>bin/ouro/prompts/</code></td><td><code>triage.md</code>, <code>build.md</code>, <code>review.md</code> with <code>REVIEWER-PROMPT.md</code>, <code>checkpoint.md</code>, <code>followup.md</code>: the one place a node is told what to decide.</td></tr>
+      <tr><td><code>tests/driver/driver.Tests.py</code></td><td>The driver suite: a stub tracker, stub nodes and a stub origin per case; one row per transition, sections run in parallel.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2 id="ideas">Placing an idea</h2>
+  <p>An <code>idea</code> or <code>architecture</code> issue is graded against this map. The questions that decide whether it belongs in the plugin, and where:</p>
+  <ul>
+    <li><strong>Which layer?</strong> A sequence or a transition is driver code with a suite row. A judgment is a sentence in a node's brief. A repository fact, a policy or a path is a binding key, read through the binding reader. A rule a check can read is a gate. A rule with a command shape is a hook. Something that must survive a harness change is protocol: repository state with a writer, a reader and a check.</li>
+    <li><strong>Does it name a repository?</strong> The rule in the repository's CLAUDE.md: nothing under <code>skills/</code> or <code>agents/</code> names a repository, a path in one, a bot id, a workflow file or a script; that belongs in the consumer's binding.</li>
+    <li><strong>What check fails without it?</strong> CLAUDE.md's rule: a rule survives only with a check that fails without it, and a release adds no net lines across <code>skills/</code>, <code>docs/</code>, <code>hooks/</code>, <code>bin/</code> and <code>tests/</code>.</li>
+    <li><strong>Who can observe it?</strong> A reviewer, a gate or a person must be able to see the thing the idea protects, or it is not a mechanism, whatever it looks like.</li>
+    <li><strong>Does it change what a consumer pins?</strong> CLAUDE.md's version-bump rule lists what takes a <code>CHANGELOG.md</code> entry under <code>## [UNRELEASED]</code> and a bump at the tag.</li>
+  </ul>
+</main>
+</body>
+</html>

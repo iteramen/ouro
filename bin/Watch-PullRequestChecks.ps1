@@ -22,8 +22,10 @@
     only run is queued with no jobs, it exits 1 with `no checks reported`.
 
     Every refusal is one `STOP: <why, and what to do>` line and exit 1. With -Pr, no run after a
-    minute is the zero-run case: nothing is known to have built the head,
-    so the stop says to push (or re-push) it and come back. With -Sha, no run after a minute is
+    minute is the zero-run case: a pull request that then reads CONFLICTING has no run because
+    GitHub dispatches none for a head that conflicts with the base, and the stop says to sync the
+    branch; otherwise nothing is known to have built the head, so the stop says to push (or
+    re-push) it and come back. With -Sha, no run after a minute is
     reported and is no failure: a workflow with a `paths:` filter runs for a push only when that
     push's diff touches its list. `-Sha none` watches nothing and exits 0, for a batch in which
     nothing landed. A run that concluded outside success, skipped and neutral is named with its
@@ -92,6 +94,9 @@ function Invoke-WatchPullRequestChecks {
     }
     if (-not $runs.Count) {
         if ($Pr -gt 0) {
+            if ("$((Get-PullRequest $b.Slug $Pr @('mergeable')).mergeable)" -eq 'CONFLICTING') {
+                throw "#$Pr conflicts with $($b.Default) and GitHub runs no pull_request workflow for a conflicting pull request: sync the branch (Sync-Branch.ps1), push it, then come back"
+            }
             throw "no pull_request run for $what after a minute - nothing is known to have built the head: push (or re-push) it so CI runs, then come back"
         }
         Write-Output "no run for any of $what after a minute: no workflow was triggered for them (path filters)"

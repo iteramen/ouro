@@ -6,6 +6,7 @@ schema = 1
 slug = "owner/name"
 default_branch = "main"
 protected_branch_prefixes = []
+# branch_prefix = "feature"
 
 [labels]
 scope = []

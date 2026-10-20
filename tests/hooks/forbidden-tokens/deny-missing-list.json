@@ -1,6 +1,6 @@
 {
   "decision": "deny",
-  "reason": "missing list",
+  "reason": "and the machine has no list",
   "env": { "OURO_FORBIDDEN_TOKENS": null },
   "event": {
     "session_id": "fixture",

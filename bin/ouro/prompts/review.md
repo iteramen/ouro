@@ -11,12 +11,24 @@ Verdict is CLEAN only when no finding has severity H or M. When you verify a fix
 names its range), `scope` is `STANDS` for a finding that block lists and that still stands, `IN-FIX` for a
 new finding in lines the fix changed, and `OUTSIDE` for a new finding in lines it did not; an OUTSIDE finding is filed as a follow-up and starts no fix round. On a first
 review leave it empty.
+A change that does not do what the issue's Deliverable asks, as the comments below amend it, is a
+finding at the severity of what it misses, H when it delivers an option the spec rules out; its
+evidence is the Deliverable line and the comment it contradicts, and its `scope` is IN-FIX in
+every round, the change as a whole being what a fix answers.
 
 ## The change (#<<number>>), head <<head>>: <<title>>
 
 Range: <<range>>
 
 <<diff>>
+
+## The issue
+
+<<body>>
+
+## Comments that amend the spec (the newest trusted triage verdict and the trusted comments after it)
+
+<<comments>>
 
 <<part>>## The record (PR body)
 

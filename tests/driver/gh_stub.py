@@ -6,9 +6,11 @@ STUB_GH_ORIGIN (the bare repository standing for the remote).
 The table maps a call's signature (its arguments, `-R <slug>` removed, joined by spaces) to
 {"Exit": n, "Out": text-or-json} or {"Seq": [rows]} (the Nth call the key names takes the Nth row, the
 last repeats); a key holding `*` is a pattern, and one counter serves every call it matches. A call the table does not name and the stand-in does not
-model exits 1 and names itself. The stand-in models what the driver and the land scripts read and
+model exits 1 and names itself; an `issue create` with a `--label` outside the origin's [labels] sets,
+`needs-triage` and `umbrella` exits 1 as gh refuses an unknown label. The stand-in models what the driver and the land scripts read and
 write: issues, one pull request (create, view, list, ready, edit, comment, merge), the viewer.
-Table keys beginning `_` seed that state: `_viewer`, `_issue_<N>`, `_pr`, `_comments_<N>`, and for the
+Table keys beginning `_` seed that state: `_viewer`, `_issue_<N>`, `_pr`, `_comments_<N>`, `_mergeable` (the
+`mergeable mergeStateStatus` pairs the views that ask for them answer in order, the last repeating), and for the
 GraphQL model `_edits` (the issue body's edit history, pages keyed by cursor, "" for the first),
 `_prs` (what a pull request search answers), `_threads` (the pull request's review threads), `_copilot_bot` (the bot id Copilot answers to),
 `_copilot_polls` (reads before its review shows) and `_copilot_never`. Copilot's review is made on
@@ -20,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 args = sys.argv[1:]
@@ -85,6 +88,10 @@ def pr_view(pr, fields):
     live["headRefOid"] = tip or pr.get("headRefOid", "")
     live["headRefName"] = pr["head"]
     live.setdefault("baseRefName", "master")
+    if "mergeable" in (fields or "").split(",") and table.get("_mergeable"):
+        k = load("mergeable.n", 0)
+        save("mergeable.n", k + 1)
+        live["mergeable"], live["mergeStateStatus"] = table["_mergeable"][min(k, len(table["_mergeable"]) - 1)].split()
     live.setdefault("mergeable", "MERGEABLE")
     live.setdefault("mergeStateStatus", "CLEAN")
     live.setdefault("reviewDecision", "")
@@ -139,6 +146,8 @@ if verb == "issue view" and f"_issue_{n}" in table:
 if verb == "issue list" and "--label" in args:
     out([v for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))
          if flag("--label") in [l["name"] for l in v["labels"]] and v.get("state", "OPEN") == "OPEN"])
+if verb == "issue list" and "--search" in args:
+    out([{k: v[k] for k in ("number", "title", "state")} for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))])
 if verb == "issue comment":
     iss = issue(n)
     iss["comments"].append({"author": {"login": viewer}, "body": body_text(), "createdAt": "2026-06-01T00:00:00Z"})
@@ -163,6 +172,11 @@ if verb == "issue reopen":
     save(f"issue-{n}.json", iss)
     out("")
 if verb == "issue create":
+    sets = tomllib.loads(git("show", "master:.claude/ouro.toml") if origin else "").get("labels", {})
+    known = {"needs-triage", "umbrella", *sets.get("area", []), *sets.get("type", [])}
+    bad = [args[k + 1] for k, a in enumerate(args[:-1]) if a == "--label" and args[k + 1] not in known]
+    if bad:
+        out(f"could not add label: '{bad[0]}' not found", 1)
     out("https://example.test/o/n/issues/99")
 if verb == "pr create":
     pr = {"number": int(table.get("_pr_number", 7)), "head": flag("--head"), "state": "OPEN", "isDraft": "--draft" in args,

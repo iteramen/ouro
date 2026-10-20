@@ -69,6 +69,7 @@ names it under `[authority].local` and the skills cite it rather than restate it
   surface, a consumer-contract part, or any part on full's list or §5's never-trivial list) is a
   checklist,
   `- [ ] 1. **<part title> (Flow: <class>).** <the part>`, one Flow per part and never `direct`;
+  a task-list item of another form, anywhere in the body, is not a part;
   a deliverable with one risk surface is a plain deliverable. Each such part lands in a cycle of
   its own, at its own Flow, on a branch cut from the default branch after the previous part
   merged, its pull request's body opening `Part k/n of #N` and carrying `Fixes #N` only when k
@@ -92,13 +93,23 @@ names it under `[authority].local` and the skills cite it rather than restate it
   fragment** (`file — Symbol — "verbatim text"`); line numbers are advisory, stamped with the
   commit they were read at (`:171 @ <sha>`). **A fragment that no longer greps *is* the
   staleness signal** — the code moved (re-grep) or the item landed (close). Executing an
-  `agent-ready` issue starts by re-verifying every anchor; a dead anchor stops that issue's run.
+  `agent-ready` issue starts by re-verifying every anchor: a dead anchor line under the body's
+  `Anchors` heading whose fragments all grep in exactly one other tracked file of the same suffix
+  is re-pointed at it, the body edited and its `Anchors @` stamp set to the tip; every other dead
+  anchor stops that issue's run. A
+  Deliverable clause naming a file the repository no longer has is stale, not a ruling: triage
+  grades the issue by the clauses that remain, and its comment says the clause is not delivered,
+  which amends the Deliverable (§7).
   **An anchor line is checked against its own file.** On a list item whose first backticked
   span names a tracked file, every double-quoted fragment of 12 to 120 characters is grepped in
   that one file, plain words as much as code, and a miss is dead however the fragment is spelled.
   Anywhere else a fragment is checked only if it looks like code, and then anywhere in the
   repository. A backticked span holding a double quote is a command, not a fragment, and is
-  skipped on either kind of line. A fragment is matched within one line of the file, so a phrase the file wraps
+  skipped on either kind of line. A path span may hold a brace set, which expands and has each
+  expansion checked, and on an anchor line a fragment is grepped in every expansion that
+  resolves and is dead only when none holds it; a comma-less or unbalanced set stays as written
+  and a later one still expands, an expansion with a rooted, home or parent prefix is skipped as its plain span is,
+  and the span whose brace sets take a body past 64 expansions, counted across its distinct spans, is a finding to trim, not checked; a span with no brace set counts none. A fragment is matched within one line of the file, so a phrase the file wraps
   never greps.
   **A citation into another repository is written `<repo>:<path>`, with its fragment in
   backticks instead of — never inside — the double quotes.** The gate verifies only the repo it
@@ -248,12 +259,15 @@ What each class runs:
 - **Gates.** In every class with a pull request the session runs no gate itself: the checks the
   pull request runs are the gate run, and the record names the selected gates they run. A gate
   the pull request's checks do not run at all, or run only to print a skip, runs locally,
-  selected by its paths. The draft PR opens at the first push under standard and full, and at
+  selected by its paths: a `ci` whose printed text starts with `skip` prints a skip; a `ci`
+  that only prints anything else is a notice that another workflow runs the gate in CI, which
+  the checks cover and neither the session nor the builder runs. The draft PR opens at the first push under standard and full, and at
   convergence under express, the point where the driver has the diff converged. The brief
   names the change's own acceptance run (its red-then-green test, or the command the issue
   names, even when that command is a gate the checks also run), the selected gates the checks
-  do not run at all or run only to print a skip, and each selected gate with paths, which the
-  builder runs when its own uncommitted changes, new files included, touch them; that run is
+  do not run at all or run only to print a skip, and each selected gate with paths the checks
+  run, a notice gate excepted, which the builder runs when its own uncommitted changes, new files
+  included, touch them; that run is
   the builder's and §7's second re-run, and a list that comes out empty is the builder's run.
 - **Review**, where the table names a session review: express takes light mode,
   for code too; standard the **sized review**; full the **probe
@@ -369,17 +383,28 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
   one thing that runs away.
 - **Bounded iterations.** Fix rounds per change: **three**. A fourth failure is a STOP, not
   another attempt: it posts a `**Stop:** review cap` comment on the issue (§4) and swaps it to
-  `needs-ruling`. Three because a round-one fix introduces a defect of its own often enough that
+  `needs-ruling`. That stop is a hand-off: it names the branch and the pull request, which stay
+  with their review record (the branch alone, in its worktree, when the cap comes before the
+  draft opens); a fix commit pushed to the branch, `agent-ready` back in place of
+  `needs-ruling`, and a new run verify that commit as any fix round, a finding at it being the
+  cap again. Three because a round-one fix introduces a defect of its own often enough that
   the round which finds nothing is the only evidence a change is done; measured across a batch
   where three of four issues had round two find a defect round one had introduced. A round is
   one fix and the verification of that fix's commit, and the count is of what a fix introduced:
   a change takes one full review, and what a later pass finds in lines no fix touched is filed
-  as a follow-up.
+  as a follow-up, except a finding that the change does not deliver the issue's Deliverable as
+  the trusted comments amend it, which opens a fix round at any pass; one raised again after an
+  approver's ruling needs a new ruling, as any finding at a later head does.
   A finding from a reviewer on the pull request that arrives after the REVIEW node has verified
   the change gets **one fix round of its own**, outside the three, its fix commit verified as
   the REVIEW node verifies any. A further valid finding from such a reviewer after that
   round is not fixed in this change: it is answered on its thread and goes where the severity
   floor (§3) sends it.
+  An approver's `**Ruling**` comment on the pull request (first line, trimmed) ends the fix
+  rounds for the findings of the review record it follows, the newest one posted before it, and
+  no later record (the bot's own `**Ruling**` is not one); the next verification is not handed
+  that record's findings; the decision comment names it in a `Ruled:` line, and the landing counts as
+  assisted (§10).
   A **prose round** — one whose every remaining finding is about comments, docstrings,
   documentation wording or skill text, so that nothing executed changes — does not count toward
   the three. Its fix commit is shown comment-only: by the token comparison, the executable tokens

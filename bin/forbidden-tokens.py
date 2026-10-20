@@ -11,7 +11,9 @@ The list is one UTF-8 file (a byte-order mark is accepted) that the environment 
 OURO_FORBIDDEN_TOKENS names. Each line that is not blank and does not start with `#` is one entry,
 a regular expression compiled case-insensitive and searched in each line of the text; where an
 entry is a common word, its author writes the word boundaries into it. Whitespace around an entry
-is dropped. Entries are numbered from 1 in file order, comments and blank lines not counted.
+is dropped. Entries are numbered from 1 in file order, comments and blank lines not counted. A
+comment line `# protects: <owner/repo> ...` names the repositories the list protects, for the hook
+below; the list may hold several, and one with none protects every repository.
 
 A list is missing when the variable is unset or empty, the file cannot be read, is not UTF-8 or
 holds a NUL character, holds no entry, or an entry does not compile; the message names the cause
@@ -37,8 +39,8 @@ scan    Reads every file `git ls-files -z` lists under the top-level skills/, ag
         then it prints one line starting `SKIP:` that names the missing list, and exits 0. A CI
         runner has no list, so this scan checks nothing there; the check runs on the machines
         that hold the list.
-hook    An example Claude Code PreToolUse hook, registered by the owner in their own settings.json
-        (README.md, `The private token list`). It reads the event's JSON on standard input and
+hook    A Claude Code PreToolUse hook, registered by `hooks/hooks.json`, which the plugin manifest
+        names (README.md, `The private token list`). It reads the event's JSON on standard input and
         acts on a Bash or PowerShell call whose `tool_input.command` holds `gh issue create`
         (or `new`), `comment`, `edit`, `close` or `reopen`, `gh pr create` (or `new`), `edit`,
         `comment`, `review`, `merge`, `close`, `reopen` or `revert`, or `git commit`. `gh` and
@@ -60,8 +62,9 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         Exit 2 blocks it, and Claude Code shows stderr to the session as the reason: a hit
         (`command text line <l>: entry <n>`, `command text: entry <n>, across a line break`,
         `the file <flag> names, line <l>: entry <n>`, or `the file <flag> names: entry <n>,
-        across a line break`), a missing list where the working directory's repository may not
-        publish without one (below), a body file it cannot read, a body it cannot see,
+        across a line break`), a missing list where a repository the command lands in (the working
+        directory's or a target's, below) may not publish without one (below),
+        the reason named, a body file it cannot read, a body it cannot see,
         a payload it cannot parse, or any error of its own. Any other nonzero exit would let the
         call run, so this mode has none. It does not see `gh api`, nor a value expanded at run
         time. A body file is read from the session's working directory before the command runs,
@@ -70,19 +73,33 @@ hook    An example Claude Code PreToolUse hook, registered by the owner in their
         a file name and blocks. A hook whose `python3` cannot be found exits 127, and one that
         exceeds Claude Code's hook timeout does not block either: Claude Code treats both as
         non-blocking, so a missing interpreter or a stall disables the hook.
-        The hook follows `ship.forbidden_check` on the binding at the event's `cwd`, read
+        The hook follows `ship.forbidden_check` on the binding at each directory the call lands
+        in (the event's `cwd`, each `cd`, `chdir`, `pushd` or `Set-Location` target, with any
+        options before it and anything after it, at the start of a segment, a brace group, a shell
+        keyword or the string a `bash -c` or `pwsh -Command` takes, each `git … commit`'s (and an
+        `env -C` or `env --chdir` before it) `-C`, `--git-dir` and `--work-tree` target and each
+        GIT_DIR or GIT_WORK_TREE assignment, a `.git` directory read as its clone, chained in order;
+        a `cd` inside quotes, after a heredoc opens, piped, sent to the background, or in a command
+        whose quotes do not balance, keeps the directories before it; every one must pass), read
         through the ouro-binding.py beside this script: a binding that passes `check` and declares
-        `ship.forbidden_check = "off"` passes the call, a hit on the list included; with no list,
+        `ship.forbidden_check = "off"` passes the call, a hit on the list included. With a list
+        that names the repositories it protects, a hit also passes at a directory whose binding
+        passes `check` and declares no key (or that has no binding) when neither its repository
+        (the binding's `repo.slug`, else `git remote get-url origin`) nor any repository the
+        command names (a `-R`, its value attached included, `--repo` or `GH_REPO` value, or an
+        issue or pull request URL) is one of them; a repository that cannot be resolved is
+        scanned. With no list,
         the call also passes when the binding passes `check` and declares no key (or there is no
-        binding) and `gh repo view` of the binding's `repo.slug`, else the working directory's
+        binding) and `gh repo view` of the binding's `repo.slug`, else that directory's
         repository, reports PRIVATE or INTERNAL. A binding that fails `check`, `"required"`, PUBLIC,
         no `gh` on PATH, and a read that fails or runs past the reads' shared budget of READ_BUDGET
-        (6) seconds, inside the hook's own 10-second timeout, block; the binding is read only when
-        a hit or a missing list would. `"off"` counts only when the command names no other
-        repository with `-R` or `--repo`, since the key is honoured only for the repository
-        the run posts to: a call naming another is read as if the key were absent, and with no list
-        the visibility read is that repository's. For this read every `-R` or `--repo` in the
-        command text counts, one inside a quoted body included: it fails closed.
+        (6) seconds, inside the hook's own 10-second timeout, block; the binding and origin are
+        read only when a hit or a missing list would. `"off"` counts only when the command names
+        no other repository, since the key is honoured only for the repository the run posts to: a
+        call naming another is read as if the key were absent, and with no list the visibility read
+        is that repository's. For these reads every `-R` or `--repo` in the command text counts,
+        one inside a quoted body included, and with a `# protects:` line every repository the
+        command names as above: it fails closed.
 --selftest  Runs each mode against a temporary list and repository.
 
 A hit is reported by path, line number and entry number, never by the matched text or the entry,
@@ -110,6 +127,8 @@ class MissingList(Exception):
 
 
 def load_list(environ=None):
+    """(entries, protects): the compiled entries, and the repositories `# protects:` lines name,
+    as slug() spells them; an empty set when the list has no such line."""
     environ = os.environ if environ is None else environ
     path = environ.get(VAR, "")
     if not path:
@@ -123,9 +142,11 @@ def load_list(environ=None):
         raise MissingList(f"{VAR} names a file that cannot be read ({e.strerror or type(e).__name__})")
     except UnicodeDecodeError:
         raise MissingList(f"the file {VAR} names is not UTF-8")
-    entries = []
+    entries, protects = [], set()
     for lineno, raw in enumerate(text.split("\n"), 1):
         line = raw.strip()
+        if line.startswith("# protects:"):
+            protects.update(slug(s) for s in line[len("# protects:"):].split())
         if not line or line.startswith("#"):
             continue
         try:
@@ -134,7 +155,7 @@ def load_list(environ=None):
             raise MissingList(f"line {lineno} of the file {VAR} names holds an entry that does not compile")
     if not entries:
         raise MissingList(f"the file {VAR} names holds no entry")
-    return entries
+    return entries, protects
 
 
 def hits(text, entries):
@@ -162,7 +183,7 @@ def out(line):
 
 def cmd_check():
     try:
-        entries = load_list()
+        entries, _ = load_list()
     except MissingList as e:
         print(f"forbidden-tokens: missing list: {e}", file=sys.stderr)
         return 2
@@ -237,12 +258,12 @@ class Block(Exception):
 READ_BUDGET = 6  # seconds for every binding and visibility read of one event together: the registered hook's own timeout is 10
 
 
-def reader(cwd):
+def reader(cwd, deadline=None):
     """A bounded reader of child output for one event: every read shares READ_BUDGET from the
     first call; output goes to files, not pipes (a stalled read is killed at the deadline, and a
     pipe a grandchild still holds would make the wait outlive the kill); a read past the deadline,
     timed out or failing to start answers (None, "")."""
-    deadline = time.monotonic() + READ_BUDGET
+    deadline = deadline or time.monotonic() + READ_BUDGET
 
     def read(args):
         left = deadline - time.monotonic()
@@ -261,36 +282,48 @@ def reader(cwd):
 
 def policy(read):
     """The binding's say on the check, read through the ouro-binding.py beside this script:
-    ("off", []) for a binding that passes `check` and declares
-    `ship.forbidden_check = "off"` and ("absent", [slug]) for one that passes and declares no key,
-    the slug being the binding's repo.slug; ("absent", []) with no binding; ("required", []) for
-    every other case: `"required"`, a binding that fails `check`, a read that fails or runs past
-    the budget."""
+    ("off", [], "") for a binding that passes `check` and declares
+    `ship.forbidden_check = "off"` and ("absent", [slug], "") for one that passes and declares no
+    key, the slug being the binding's repo.slug; ("absent", [], "") with no binding; ("required",
+    [], why) for every other case, why naming it: the binding's own key, a binding that fails
+    `check` (the check's first line), a read that fails or runs past the budget."""
     binding = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ouro-binding.py")
     tool = [sys.executable, binding]
     code, text = read(tool + ["check"])
     if code is None:
-        return "required", []
+        return "required", [], "the binding could not be read within the hook's budget"
     if code != 0:
         if text.startswith(("error: no binding at", "error: not inside a git work tree")):
-            return "absent", []
-        return "required", []
+            return "absent", [], ""
+        return "required", [], "binding fails check: " + (text.strip().splitlines() or ["(no output)"])[0]
     code, text = read(tool + ["get", "ship.forbidden_check"])
     if code == 0:
         if text.rstrip("\r\n") != "off":
-            return "required", []
+            return "required", [], "the binding requires the check (ship.forbidden_check)"
         kind = "off"
     elif code is None or not text.startswith("error: no such key: ship.forbidden_check"):
-        return "required", []
+        return "required", [], "the binding's ship.forbidden_check could not be read"
     else:
         kind = "absent"
     code, text = read(tool + ["get", "repo.slug"])
     if code != 0 or not text.strip():
-        return "required", []
-    return kind, [text.rstrip("\r\n")]
+        return "required", [], "the binding's repo.slug could not be read"
+    return kind, [text.rstrip("\r\n")], ""
 
 
 TARGET = re.compile(r"(?:^|\s)(?:-R|--repo)(?:\s+|=)(?:\"([^\"]+)\"|'([^']+)'|(\S+))")
+# TARGET with the value attached to -R too: read only for repositories, never blanked from the scan
+REPO_FLAG = re.compile(r"(?:^|\s)(?:-R(?:\s+|=)?|--repo(?:\s+|=))(?:\"([^\"]+)\"|'([^']+)'|(\S+))")
+GH_REPO = re.compile(r"(?<![\w-])GH_REPO\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|\"'<>]+))")
+ISSUE_URL = re.compile(r"https?://[^\s/\"']+/([^\s/\"']+)/([^\s/\"']+)/(?:issues|pull)/\d", re.I)
+# an origin that resolves: a scheme and host, or an scp host, before owner/repo; a local path or a bare name does not
+HOSTED = re.compile(r"(?:\w[\w+.-]*://[^/\s]+/|[^/:\s]{2,}:)[^/\s]+/[^/\s]+/?$")
+
+
+def slug(name):
+    """owner/repo in lower case from a slug, a URL or a remote's scp spelling: a host prefix and a
+    trailing `.git` or slash dropped."""
+    return "/".join(re.sub(r"(?:\.git)?/*$", "", name.replace(":", "/")).split("/")[-2:]).lower()
 
 
 def named_repos(command):
@@ -298,6 +331,14 @@ def named_repos(command):
     (a host prefix dropped), a quoted body's mention included, so the binding and visibility reads
     fail closed."""
     return ["/".join((m[1] or m[2] or m[3]).strip("/").split("/")[-2:]).lower() for m in TARGET.finditer(command)]
+
+
+def addressed(command):
+    """Every repository the command names for a `# protects:` list, as slug() spells it: a -R (its
+    value attached included), --repo or GH_REPO value, or an issue or pull request URL, anywhere on
+    the command, a quoted body's mention included, so the read fails closed."""
+    return ([slug(next(g for g in m.groups() if g)) for r in (REPO_FLAG, GH_REPO) for m in r.finditer(command)]
+            + ["/".join(m).lower() for m in ISSUE_URL.findall(command)])
 
 
 def quoted_spans(command):
@@ -339,40 +380,170 @@ def other_repo(command, slug):
     return next((t for t in named_repos(command) if t != slug.lower()), None)
 
 
-def check_off(cwd, command):
-    """True when the binding at cwd turns the check off for the repository the command posts to: a
-    hit passes."""
-    kind, slug = policy(reader(cwd))
-    return kind == "off" and other_repo(command, slug[0]) is None
+def check_off(cwd, command, protects, deadline=None):
+    """True when a hit passes at cwd: the binding there turns the check off for the repository the
+    command posts to, or, with the list's `# protects:` set non-empty and the binding's say absent,
+    neither cwd's repository (repo.slug, else origin) nor any repository the command names
+    (addressed) is in it. A repository that cannot be resolved is scanned. With the set empty, the
+    names `"off"` weighs are named_repos'. A hit passes when every directory the call lands in says
+    so."""
+    read = reader(cwd, deadline)
+    kind, slugs, _ = policy(read)
+    targets = addressed(command) if protects else named_repos(command)
+    if kind == "off" and all(t == slugs[0].lower() for t in targets):
+        return True
+    if kind == "required" or not protects or any(t in protects for t in targets):
+        return False
+    if not slugs:
+        code, text = read(["git", "remote", "get-url", "origin"])
+        slugs = [text.strip()] if code == 0 and HOSTED.match(text.strip()) else []
+    return bool(slugs) and slug(slugs[0]) not in protects
 
 
-def publishes_unchecked(cwd, command):
-    """True when a publishing call from cwd may run with no list: the binding there turns the check
-    off for the repository the command posts to, or the key is absent (no binding, no key, or
-    `"off"` for another repository than the command names) and `gh repo view` reports the
-    repository (the one named on the command, else the binding's repo.slug, else the working
-    directory's) PRIVATE or INTERNAL. `"required"`, a binding that fails
-    `check`, a read that fails or runs past the shared READ_BUDGET, no `gh` on PATH, and any other
-    visibility are False."""
-    read = reader(cwd)
-    kind, slug = policy(read)
+SEGMENT = re.compile(r"&&|\|\||;|\n|\(|\)")
+CD = re.compile(r"(?:\s|[{&!]|(?:builtin|command|exec|if|elif|then|else|do|while|until|time)(?=\s))*"
+                r"(?P<verb>cd|chdir|pushd|sl|Set-Location|Push-Location)(?:\s+(?:-[^\s\"':]*|/d))*(?:\s+-[a-z]+:|\s+)"
+                r"(?P<dir>(?:\"[^\"]*\"|\$?'[^']*'|[^\s\"';&|<>])+)(?P<tail>.*)$", re.I)
+# a cd verb with nothing readable after it: the segment was cut at a `(` (a command substitution or a
+# PowerShell expression), or only a quote or a `$` follows; it lands somewhere the hook cannot name
+CD_BARE = re.compile(CD.pattern.split("(?P<dir>")[0] + r"\s*[\"']?\$?\s*$", re.I)
+# a pipe or a background & after the directory (not a redirect's, as in 2>&1 or &>)
+FORKED = re.compile(r"\||(?<![<>&])&(?![>&])")
+# the string (or bare word) a child shell runs: `bash -c`, `bash -lc`, `pwsh -Command`, `cmd /c`, `eval`, `iex`, `Invoke-Expression`
+SHELL_STRING = re.compile(r"(?<!\S)(?:[-/](?:[a-z]*c|c[a-z]*)|eval|iex|Invoke-Expression)\s+[\"']?", re.I)
+GIT_SPAN = re.compile(r"(?<![\w-])(?:env\s+(?:[^\s;&|]+\s+)*?)?[\"']?(?i:git(?:\.exe)?)[\"']?\s+(?:[^\s;&|]+\s+)*?commit(?![\w.-])")
+GIT_OPT = re.compile(r"(?<!\S)(-C|--chdir|--git-dir|--work-tree)(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|\"']+))")
+GIT_ENV = re.compile(r"(?<![\w-])GIT_(?:DIR|WORK_TREE)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|\"'<>]+))", re.I)
+MAX_BASES = 32
+
+
+def join_dir(base, rel):
+    """rel against base; an MSYS drive spelling (/c/…) is read as C:/ on Windows."""
+    if os.name == "nt":
+        rel = re.sub(r"^/([A-Za-z])/", lambda m: m.group(1).upper() + ":/", rel)
+    return os.path.normpath(os.path.join(base, rel))
+
+
+def work_tree(d):
+    """A path naming a .git directory, read as the clone it belongs to."""
+    return os.path.dirname(d) if os.path.basename(d) == ".git" else d
+
+
+def segments(command):
+    """(offset, text) of the command's segments between &&, ||, ;, newlines and parentheses, quotes
+    disregarded: a split inside a quoted span can only add a directory to judge, never remove one."""
+    out, last = [], 0
+    for m in SEGMENT.finditer(command):
+        out.append((last, command[last:m.start()]))
+        last = m.end()
+    out.append((last, command[last:]))
+    return out
+
+
+def target_dirs(command, cwd):
+    """The directories a publishing command lands in, after cwd: a `cd`, `chdir`, `pushd` or
+    `Set-Location` command moves the base where it opens a segment or the string a child shell
+    runs (`bash -c`, `bash -lc`, `pwsh -Command`, `cmd /c`, `eval`, `iex`, `Invoke-Expression`,
+    quoted or a bare word, an escaped quote inside it read as text), after a `{`, `&`, `!`,
+    `builtin`, `command` or a shell keyword, and the -C options of each `git … commit` (an
+    `env -C` or `env --chdir` before it included, the git inside a child's string too) chain from
+    it; its --git-dir and --work-tree,
+    and a GIT_DIR or GIT_WORK_TREE assignment, name one more (a .git directory read as its
+    clone). A `cd` inside quotes, after a heredoc opens, piped, sent to
+    the background, in a child's string or bare word, or in a command whose quotes do not balance,
+    adds a base and keeps the ones before it, since it may be prose, a child shell's, or
+    PowerShell's, whose pipe moves it. A `cd` whose directory reads empty (spliced quotes) or is
+    cut away (a command substitution, a parenthesised expression) is refused as unreadable, or
+    read as a directory that does not exist and refused for that: it lands somewhere unknown. A
+    bare `cd` with nothing after it lands in the home directory and is not judged.
+    Every one is judged, and the call passes only when all pass, so a mention in a quoted body
+    cannot redirect the judgement away from where the call lands."""
+    spans = quoted_spans(command)
+    heredoc = command.find("<<")
+    bases, out = [cwd], []
+    for at, seg in segments(command):
+        for e in GIT_ENV.finditer(seg):
+            out += [work_tree(join_dir(b, next(g for g in e.groups() if g))) for b in bases]
+        for pos in [0] + [s.end() for s in SHELL_STRING.finditer(seg)]:
+            m = CD.match(seg, pos)
+            if not m:
+                b = CD_BARE.match(seg, pos)
+                if b:
+                    raise Block(f"a {b.group('verb')} whose directory cannot be read, so the directory the call lands in is unknown")
+                continue
+            word = m.group("dir")
+            if pos:  # the word ends where the child's string does: an escaped quote inside it is not that end
+                word = word.replace("\\" + seg[pos - 1], "\0").split(seg[pos - 1])[0].replace("\0", seg[pos - 1])
+            word = re.sub(r"\"([^\"]*)\"|\$?'([^']*)'", lambda q: q.group(1) or q.group(2) or "", word)
+            if not word:  # a spliced or empty directory: it lands somewhere, and the hook cannot say where
+                raise Block(f"a {m.group('verb')} whose directory cannot be read, so the directory the call lands in is unknown")
+            moved = [join_dir(b, word) for b in bases]
+            keeps = (pos > 0 or spans is None or -1 < heredoc < at or FORKED.search(m.group("tail"))
+                     or any(a <= at + m.start("verb") < b for a, b in spans))
+            bases = list(dict.fromkeys(bases + moved if keeps else moved))
+            if len(bases) > MAX_BASES:
+                raise Block(f"the command moves through more than {MAX_BASES} directories inside quotes, too many to judge")
+            out += moved
+        if "commit" not in seg.lower():
+            continue
+        for span in GIT_SPAN.finditer(seg):
+            for d in bases:
+                named = []  # git resolves --git-dir and --work-tree after every -C
+                for o in GIT_OPT.finditer(span.group(0)):
+                    v = next(g for g in o.groups()[1:] if g)
+                    if o.group(1) in ("-C", "--chdir"):
+                        d = join_dir(d, v)
+                    else:
+                        named.append(v)
+                out += [d] + [work_tree(join_dir(d, v)) for v in named]
+    return [d for d in dict.fromkeys(out) if d != cwd]
+
+
+def refusal(why, where, e):
+    """The no-list refusal: a binding that fails its check is the one reason; a binding that requires
+    the check is the missing list; any other reason names the list the machine lacks beside it."""
+    if why.startswith("binding fails check"):
+        return f"{why} (at {where})"
+    if why.startswith("the binding requires the check"):
+        return f"missing list: {e} ({why}, at {where})"
+    return f"{why}, and the machine has no list ({e})"
+
+
+def publishes_unchecked(cwd, command, deadline=None):
+    """(True, "") when a publishing call judged at cwd may run with no list: the binding there
+    turns the check off for the repository the command posts to, or the key is absent (no binding,
+    no key, or `"off"` for another repository than the command names) and `gh repo view` reports
+    the repository (the one named on the command, else the binding's repo.slug, else cwd's)
+    PRIVATE or INTERNAL. Otherwise (False, why), why naming the reason: the binding's say
+    (`"required"`, a binding that fails `check`, a read that fails or runs past the shared
+    READ_BUDGET), no `gh` on PATH, a visibility read that failed, or the visibility it reported."""
+    read = reader(cwd, deadline)
+    kind, slug, why = policy(read)
     target = other_repo(command, slug[0]) if slug else next(iter(named_repos(command)), None)
     if kind == "off":
         if target is None:
-            return True
+            return True, ""
         kind = "absent"
     if kind != "absent":
-        return False
+        return False, why
     if target is not None:
         slug = [target]
     gh = shutil.which("gh")
     if gh is None:
-        return False
+        return False, "no gh on PATH to read the repository's visibility"
     code, text = read([gh, "repo", "view", *slug, "--json", "visibility"])
+    name = slug[0] if slug else "the repository at " + cwd
+    if code is None:
+        return False, f"gh repo view of {name} did not answer within the hook's budget"
+    if code != 0:
+        return False, f"gh repo view of {name} failed"
     try:
-        return code == 0 and json.loads(text)["visibility"] in ("PRIVATE", "INTERNAL")
+        vis = json.loads(text)["visibility"]
     except (ValueError, KeyError, TypeError):
-        return False
+        return False, f"gh repo view of {name} gave no visibility"
+    if vis in ("PRIVATE", "INTERNAL"):
+        return True, ""
+    return False, f"{name} is {vis}, not private"
 
 
 def hook_check(payload):
@@ -387,12 +558,20 @@ def hook_check(payload):
         raise Block("the event holds no tool_input.command text")
     if not PUBLISH.search(command):
         return []
+    # A call is judged at every directory it lands in: the working directory and each `cd` or
+    # `git -C` target. A directory that is not there is a refusal, not a guess.
+    cwd = payload.get("cwd") or os.getcwd()
+    deadline = time.monotonic() + READ_BUDGET  # one budget for every read of the event, however many directories
     try:
-        entries = load_list()
+        entries, protects = load_list()
     except MissingList as e:
-        if publishes_unchecked(payload.get("cwd") or os.getcwd(), command):
-            return []
-        raise Block(f"missing list: {e}")
+        for where in [cwd] + target_dirs(command, cwd):
+            if not os.path.isdir(where):
+                raise Block(f"the directory {where} does not exist, so the repository the call lands in cannot be judged, and the machine has no list ({e})")
+            ok, why = publishes_unchecked(where, command, deadline)
+            if not ok:
+                raise Block(refusal(why, where, e))
+        return []
     reasons = []
     scanned = without_targets(command)
     found = hits(scanned, entries)
@@ -419,7 +598,7 @@ def hook_check(payload):
             reasons.append(f"the file {flag} names, line {lineno}: entry {n}")
         for n in wrapped(text, entries, found):
             reasons.append(f"the file {flag} names: entry {n}, across a line break")
-    if reasons and check_off(payload.get("cwd") or os.getcwd(), command):
+    if reasons and all(check_off(d, command, protects, deadline) for d in [cwd] + target_dirs(command, cwd)):
         return []
     return reasons
 
@@ -457,7 +636,7 @@ def tracked_files():
 
 def cmd_scan():
     try:
-        entries = load_list()
+        entries, _ = load_list()
     except MissingList as e:
         if os.environ.get("CI") == "true":
             out(f"SKIP: forbidden-tokens scan: missing list: {e}; CI holds no list")
@@ -859,11 +1038,14 @@ def selftest():
         stubs = os.path.join(tmp, "stubs")
         os.makedirs(stubs)
         with open(os.path.join(stubs, "gh"), "w", encoding="utf-8", newline="\n") as f:
-            f.write('#!/bin/sh\n[ "$STUB_VIS" = slow ] && sleep 20\n[ "$STUB_VIS" = fail ] && exit 1\n'
+            f.write('#!/bin/sh\ncase "$3$PWD" in */pub*) printf \'{"visibility":"PUBLIC"}\'; exit 0;; *norepo*) exit 1;; esac\n'
+                    '[ "$STUB_VIS" = slow ] && sleep 20\n[ "$STUB_VIS" = slow4 ] && { sleep 4; printf \'{"visibility":"PRIVATE"}\'; exit 0; }\n[ "$STUB_VIS" = fail ] && exit 1\n[ "$STUB_VIS" = novis ] && { printf "{}"; exit 0; }\n'
                     'printf \'{"visibility":"%s"}\' "$STUB_VIS"\n')
         os.chmod(os.path.join(stubs, "gh"), 0o755)
         with open(os.path.join(stubs, "gh.cmd"), "w", encoding="utf-8", newline="\r\n") as f:
-            f.write('@echo off\nif "%STUB_VIS%"=="slow" ping -n 21 127.0.0.1 >nul\nif "%STUB_VIS%"=="fail" exit /b 1\n'
+            f.write('@echo off\necho %3%CD% | findstr /i /l /c:"/pub" /c:"\\pub" >nul && (echo {"visibility":"PUBLIC"} & exit /b 0)\n'
+                    'echo %CD% | findstr /i /l /c:"norepo" >nul && exit /b 1\n'
+                    'if "%STUB_VIS%"=="slow" ping -n 21 127.0.0.1 >nul\nif "%STUB_VIS%"=="slow4" (ping -n 5 127.0.0.1 >nul & echo {"visibility":"PRIVATE"} & exit /b 0)\nif "%STUB_VIS%"=="fail" exit /b 1\nif "%STUB_VIS%"=="novis" (echo {} & exit /b 0)\n'
                     'echo {"visibility":"%STUB_VIS%"}\n')
 
         def vis(value, env=None):
@@ -872,16 +1054,16 @@ def selftest():
         for env, cause in (({}, VAR + " is not set"), ({VAR: os.path.join(tmp, "nope.txt")}, "cannot be read"),
                            (bad, "line 3 of the file"), (empty, "holds no entry")):
             blocked("gh pr merge 1 --body fine", cause, env=vis("fail", env))
-            blocked("gh pr merge 1 --body fine", "blocked: missing list: ", env=vis("fail", env))
-            blocked("git commit -m fine", "missing list: ", env=vis("fail", env), tool="PowerShell")
-        for value in ("PUBLIC", "nonsense", "fail"):
-            blocked("gh pr merge 1 --body fine", "missing list", env=vis(value))
+            blocked("gh pr merge 1 --body fine", "gh repo view of the repository at", env=vis("fail", env))
+            blocked("git commit -m fine", "failed, and the machine has no list (", env=vis("fail", env), tool="PowerShell")
+        for value, reason in (("PUBLIC", "is PUBLIC, not private, and the machine has no list ("), ("nonsense", "is nonsense, not private, and"), ("fail", " failed, and"), ("novis", "gave no visibility, and")):
+            blocked("gh pr merge 1 --body fine", reason, env=vis(value))
         for value in ("PRIVATE", "INTERNAL"):
             allowed("gh pr merge 1 --body fine", env=vis(value))
             allowed("git commit -m fine", env=vis(value), tool="PowerShell")
         nogh = os.path.join(tmp, "nogh")
         os.makedirs(nogh)
-        blocked("gh pr merge 1 --body fine", "missing list", env={**vis("PRIVATE"), "PATH": nogh})  # no gh resolves
+        blocked("gh pr merge 1 --body fine", "no gh on PATH to read the repository's visibility, and the machine has no list (", env={**vis("PRIVATE"), "PATH": nogh})  # no gh resolves
         # the binding at cwd decides first: required blocks a private repository, off passes a failed read
         toml = ('schema = 1\n\n[repo]\nslug = "o/r"\ndefault_branch = "master"\n\n[ship]\npolicy = "stop-at-pr"\n'
                 'review = "none"\n\n[owner]\nruling_approvers = ["o"]\n')
@@ -895,7 +1077,134 @@ def selftest():
         # a binding that fails check blocks as required does, whatever gh says
         bound = mkrepo("bound-broken", {".claude/ouro.toml": toml.replace('review = "none"', 'review = "bogus"').encode()})
         code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev("gh pr merge 1 --body fine", cwd=bound))
-        assert code == 2 and "missing list" in e, (code, o, e)
+        assert code == 2 and "binding fails check:" in e and "missing list" not in e, (code, o, e)
+        required = mkrepo("bound-required", {".claude/ouro.toml": toml.replace('policy = "stop-at-pr"\n', 'policy = "stop-at-pr"\nforbidden_check = "required"\n').encode()})
+        code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev("gh pr merge 1 --body fine", cwd=required))
+        assert code == 2 and e.startswith("forbidden-tokens: blocked: missing list: ") and "the binding requires the check" in e, (code, o, e)
+        # the refusal names its reason: the visibility read's answer, or no gh to ask
+        code, o, e = run(["hook"], vis("PUBLIC"), stdin=ev("gh pr merge 1 --body fine", cwd=mkrepo("bound-absent2", {".claude/ouro.toml": toml.encode()})))
+        assert code == 2 and "o/r is PUBLIC, not private, and the machine has no list (" in e, (code, o, e)
+        code, o, e = run(["hook"], {**vis("PRIVATE"), "PATH": nogh}, stdin=ev("git commit -m fine", cwd=mkrepo("bound-absent3", {".claude/ouro.toml": toml.encode()})))
+        assert code == 2 and "no gh on PATH" in e, (code, o, e)
+        # a call is judged at every directory it lands in: the working directory, each cd target and
+        # each git -C target, chained; all must pass. The stub answers PUBLIC for a slug or a path
+        # component starting with "pub", and fails in a directory holding "norepo", so a public clone
+        # and a plain directory are told from the private working directory.
+        home = mkrepo("bound-home", {".claude/ouro.toml": toml.encode()})
+        pubclone = mkrepo("pubclone", {".claude/ouro.toml": toml.replace('slug = "o/r"', 'slug = "o/pub"').encode()})
+        privclone = mkrepo("privclone", {".claude/ouro.toml": toml.replace('slug = "o/r"', 'slug = "o/r2"').encode()})
+        pubplain = mkrepo("pubplain", {"x.txt": b"x\n"})
+        norepo = os.path.join(tmp, "norepo")
+        os.makedirs(norepo)
+        rows = [(f'git -C "{pubclone}" commit -m fine', 2, "o/pub is PUBLIC, not private, and the machine has no list ("),
+                (f"git -C '{privclone}' commit -m fine", 0, ""),
+                (f'git -c user.name=x -C "{pubclone}" commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"cd '{privclone}'; git commit -m fine", 0, ""),
+                (f'git -C "{pubplain}" commit -m fine', 2, "is PUBLIC, not private"),
+                (f'git -C "{norepo}" commit -m fine', 2, "gh repo view of the repository at"),
+                (f'git -C "{os.path.join(tmp, "nowhere")}" commit -m fine', 2, "the directory"),
+                ("git commit -m fine", 0, ""),
+                ("git commit -C HEAD -m fine", 0, ""),
+                (f'git -C "{privclone}" commit -m a && git -C "{pubclone}" commit -m b', 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}"\ngit commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'true && cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'(cd "{pubclone}" && git commit -m fine)', 2, "o/pub is PUBLIC"),
+                (f'pushd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}" || exit 1; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}" && git -C . commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "{privclone}" && git -C "{pubclone}" commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'Set-Location "{pubclone}"; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'git commit -m "see git -C {pubclone} commit"', 2, "o/pub is PUBLIC"),  # a mention adds a directory: it can block, never pass
+                (f'bash -c "git -C {pubclone} commit -m fine"', 2, "o/pub is PUBLIC"),
+                (f'git -C "{pubclone}" commit>log', 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}" # go\ngit commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"cat > m.txt <<'EOF'\nit's\nEOF\ncd \"{pubclone}\" && git commit -F m.txt # don't push", 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}" && git commit -F - <<\'EOF\'\nfix: don\'t break\nEOF', 2, "o/pub is PUBLIC"),
+                (f'Set-Location "{pubclone}"; git commit -m @\'\nit\'s done\n\'@', 2, "o/pub is PUBLIC"),
+                (f'git -c commit.gpgsign=false -C "{pubclone}" commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'Set-Location -Path "{pubclone}"; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'Push-Location "{pubclone}"; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd -P "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}" \\\n&& git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'pushd "{pubclone}" >/dev/null && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "{pubclone}" 2>/dev/null && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd {pubclone}>/dev/null 2>&1 && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'Set-Location -Path "{pubclone}" -PassThru; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'git --git-dir="{pubclone}/.git" --work-tree="{pubclone}" commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'git --git-dir "{pubclone}/.git" commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'GIT_DIR="{pubclone}/.git" git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'$env:GIT_DIR = "{pubclone}/.git"; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'bash -c "cd {pubclone} && git commit -m x"', 2, "o/pub is PUBLIC"),
+                (f"sh -c 'cd \"{pubclone}\"; git commit -m x'", 2, "o/pub is PUBLIC"),
+                (f'pwsh -NoProfile -Command "Set-Location {pubclone}; git commit -m x"', 2, "o/pub is PUBLIC"),
+                (f'cd "{privclone}" >/dev/null && git commit -m fine', 0, ""),
+                (f'git --git-dir="{privclone}/.git" commit -m fine', 0, ""),
+                (f'bash -c "cd {privclone} && git commit -m x"', 0, ""),
+                (f'bash --norc -o pipefail -c "cd {pubclone} && git commit -m x"', 2, "o/pub is PUBLIC"),
+                (f'env bash -c "cd {pubclone} && git commit -m x"', 2, "o/pub is PUBLIC"),
+                (f'pwsh -NoProfile -ExecutionPolicy Bypass -Command "& {{ Set-Location {pubclone}; git commit -m x }}"', 2, "o/pub is PUBLIC"),
+                (f'{{ cd "{pubclone}" && git commit -m fine; }}', 2, "o/pub is PUBLIC"),
+                (f'builtin cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'if cd "{pubclone}"; then git commit -m fine; fi', 2, "o/pub is PUBLIC"),
+                (f'cd -- "{privclone}" >/dev/null && git commit -m fine', 0, ""),
+                (f'pushd -n "{privclone}" && git commit -m fine', 0, ""),
+                (f'Set-Location "{pubclone}" | Out-Null; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'pwsh -Command "Push-Location {pubclone} | Out-Null; git commit -m x"', 2, "o/pub is PUBLIC"),
+                (f'cd "{tmp}" && cd "{privclone}" | cat; git -C pubclone commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "{tmp}"/pubclone && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'Set-Location -Path:"{pubclone}"; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"cd $'{pubclone}' && git commit -m fine", 2, "o/pub is PUBLIC"),
+                (f'env -C "{pubclone}" git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'chdir "{pubclone}"; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'bash -c "cd \\"{pubclone}\\" && git commit -m fine"', 2, "o/pub is PUBLIC"),
+                (f"bash -c 'cd '\"{pubclone}\"' && git commit -m fine'", 2, "directory cannot be read"),
+                (f'env -C "{pubclone}" bash -c "git commit -m fine"', 2, "o/pub is PUBLIC"),
+                (f'cmd /c "cd /d {pubclone} && git commit -m fine"', 2, "o/pub is PUBLIC"),
+                (f'eval cd "{pubclone}"; git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'iex "cd {pubclone}; git commit -m fine"', 2, "o/pub is PUBLIC"),
+                (f'Invoke-Expression "cd {pubclone}; git commit -m fine"', 2, "o/pub is PUBLIC"),
+                (f'echo x | xargs sh -c cd {pubclone} && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'cd "$(dirname {pubclone}/x)" && git commit -m fine', 2, "directory cannot be read"),
+                (f'Set-Location (Resolve-Path {pubclone}); gh pr create -t x', 2, "directory cannot be read"),
+                (f'env --chdir="{pubclone}" git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'env --chdir="{tmp}" git -C pubclone commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'bash -lc "cd {pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                ('git commit -m "fix the \'cd nowhere\' hint"', 0, ""),
+                ('git commit -m "cd into the dir to build"', 0, "")]
+        if os.name == "nt":
+            msys = re.sub(r"^([A-Za-z]):", lambda m: "/" + m.group(1).lower(), privclone).replace("\\", "/")
+            rows += [(f"git -C {msys} commit -m fine", 0, ""), (f"cd {msys} && git commit -m fine", 0, "")]
+        for command, want, text in rows:
+            code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev(command, cwd=home))
+            assert code == want and text in e and "Traceback" not in e, (command, code, o, e)
+        for command in ("git commit -m fine", f'git commit -m "see git -C {privclone} commit"', f'git -C "{privclone}" commit -m fine'):
+            code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev(command, cwd=pubclone))
+            assert code == 2 and "o/pub is PUBLIC" in e, (command, code, o, e)
+        code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev("git -C pubclone commit -m fine", cwd=tmp))
+        assert code == 2 and "o/pub is PUBLIC" in e, (code, o, e)
+        # a cd inside quotes, or with quotes that do not balance, adds a base and loses none
+        for command in ('git commit -m "x\ncd /elsewhere now" && git -C a/b commit -m y',
+                        "cd a && git -C b commit -F - <<'EOF'\ndon't\nEOF",
+                        "cd a && git commit -F - <<EOF\ncd into the repo\nEOF\ngit -C b commit -m y"):
+            assert join_dir(tmp, "a/b") in target_dirs(command, tmp), command
+        try:
+            target_dirs('git commit -m "x\n' + "\n".join(f"cd d{i}" for i in range(6)) + '"', tmp)
+            raise AssertionError("six relative cds inside quotes")
+        except Block as b:
+            assert "too many to judge" in str(b), b
+        # a long quoted body that mentions git -C many times is scanned in linear time: the hook
+        # stays far inside its registered timeout with a list and a hit
+        big = "secretword\n" + "\n".join("- run git -C ../repo-a status --short, then git -C ../repo-b log -1 and git -C ../repo-c diff --stat" for _ in range(170))
+        t = time.monotonic()
+        blocked(f"gh pr comment 1 --body '{big}'", "entry 1")
+        took = time.monotonic() - t
+        assert took < 5, took
+        # one read budget for the whole event: a gh that answers after 4 s is cut off on the second
+        # directory, and the hook refuses inside its own timeout
+        t = time.monotonic()
+        code, o, e = run(["hook"], vis("slow4"), stdin=ev(f'cd "{privclone}" && git commit -m a && cd "{pubclone}" && git commit -m b', cwd=home), timeout=30)
+        assert code == 2 and "did not answer within the hook's budget" in e and time.monotonic() - t < 9, (code, e, time.monotonic() - t)
         # with a list, the binding's "off" passes a hit; no key and
         # "required" keep it, and no key reads no visibility (no gh on PATH changes nothing)
         for key, want in (("off", 0), ("required", 2)):
@@ -918,7 +1227,7 @@ def selftest():
                         'gh pr merge 1 --repo "github.com/other/repo" --body secretword'):
             code, o, e = run(["hook"], vis("fail", hl), stdin=ev(command, cwd=bound))
             assert code == 2 and "entry 1" in e, (command, code, o, e)
-            blocked(command, "missing list", env=vis("PUBLIC"), cwd=bound)
+            blocked(command, "not private, and the machine has no list (", env=vis("PUBLIC"), cwd=bound)
             allowed(command, env=vis("PRIVATE"), cwd=bound)
         for command in ("gh -R O/R pr merge 1 --body secretword", "gh pr merge 1 --repo=https://github.com/o/r/ --body secretword"):
             allowed(command, env=vis("fail", hl), cwd=bound)
@@ -927,7 +1236,7 @@ def selftest():
         command = "gh pr create --body '-R o/r' --repo other/repo --title secretword"
         code, o, e = run(["hook"], vis("fail", hl), stdin=ev(command, cwd=bound))
         assert code == 2 and "entry 1" in e, (code, o, e)
-        blocked(command, "missing list", env=vis("PUBLIC"), cwd=bound)
+        blocked(command, "not private, and the machine has no list (", env=vis("PUBLIC"), cwd=bound)
         # a -R or --repo value is the call's address, not scanned content; quoted text still is
         for command in ("gh issue comment 5 -R o/secretword --body-file clean.md",
                         "gh issue comment 5 --repo=o/secretword --body-file clean.md",
@@ -936,11 +1245,64 @@ def selftest():
         blocked("gh issue comment 5 -R o/secretword --body-file hit.md", "the file --body-file names, line 2: entry 1")
         blocked("gh issue comment 5 --body 'see -R o/secretword'", "command text line 1: entry 1")
         blocked("gh issue comment 5 -R o/secretword --body \"fine", "command text line 1: entry 1")
+        # a list whose `# protects:` line names repositories scans a call only into one of them: a
+        # directory's repo.slug, else its origin, one that cannot be resolved, or a -R or --repo;
+        # "required" scans and "off" passes whatever the header names; no header scans every call
+        prot = lst("prot.txt", b"# protects: O/Prot https://github.com/o/mirror.git\nsecretword\n")
+
+        def slugged(name, value, key=None):
+            t = toml.replace('slug = "o/r"', f'slug = "{value}"')
+            if key:
+                t = t.replace('review = "none"\n', f'review = "none"\nforbidden_check = "{key}"\n')
+            return mkrepo(name, {".claude/ouro.toml": t.encode()})
+
+        def origined(name, url):
+            d = mkrepo(name, {"x.txt": b"x\n"})
+            subprocess.run(["git", "remote", "add", "origin", url], cwd=d, check=True)
+            return d
+        protected, mirror, other = slugged("p-prot", "o/prot"), slugged("p-mirror", "o/mirror"), slugged("p-other", "o/other")
+        rows = [(prot, "gh pr merge 1 --body secretword", protected, 2),
+                (prot, "gh pr merge 1 --body secretword", mirror, 2),
+                (prot, "gh pr merge 1 --body secretword", other, 0),
+                (prot, "gh -R o/prot pr merge 1 --body secretword", other, 2),
+                (prot, "gh pr merge 1 --repo https://github.com/O/Mirror --body secretword", other, 2),
+                (prot, "gh -R o/else pr merge 1 --body secretword", other, 0),
+                (prot, "gh issue comment https://github.com/o/prot/issues/5 --body secretword", other, 2),
+                (prot, "gh pr merge https://github.com/O/Mirror/pull/7 --body secretword", other, 2),
+                (prot, "gh issue comment https://github.com/o/else/issues/5 --body secretword", other, 0),
+                (prot, "GH_REPO=o/prot gh issue comment 5 --body secretword", other, 2),
+                (prot, "gh issue comment 5 -Ro/prot --body secretword", other, 2),
+                (prot, "gh pr merge 1 --repo https://github.com/o/else --body secretword", other, 0),
+                (prot, "GH_REPO=o/else gh issue comment 5 --body secretword", other, 0),
+                (prot, "gh issue comment 5 -Ro/else --body secretword", other, 0),
+                (prot, "gh issue comment https://github.com/o/prot/issues/5 --body secretword",
+                 slugged("p-off-other", "o/other", "off"), 2),
+                (prot, f'cd "{protected}" && git commit -m secretword', other, 2),
+                (prot, "git commit -m secretword", origined("p-origin-else", "git@github.com:o/else.git"), 0),
+                (prot, "git commit -m secretword", origined("p-origin-prot", "git@github.com:O/Prot.git"), 2),
+                (prot, "git commit -m secretword", mkrepo("p-no-origin", {"x.txt": b"x\n"}), 2),
+                (prot, "git commit -m secretword", origined("p-origin-bare", "foo"), 2),
+                (prot, "git commit -m secretword", origined("p-origin-path", "/srv/mirrors/prot-copy"), 2),
+                (prot, "git commit -m secretword", origined("p-origin-drive", "C:/mirrors/prot-copy"), 2),
+                (prot, "git commit -m secretword", origined("p-origin-else-ssh", "ssh://git@github.com:22/o/else.git"), 0),
+                (prot, "git commit -m secretword", norepo, 2),
+                (prot, "git commit -m secretword", slugged("p-required", "o/other", "required"), 2),
+                (prot, "git commit -m secretword", slugged("p-off", "o/prot", "off"), 0),
+                (prot, "gh issue comment HTTPS://GITHUB.COM/o/prot/issues/5 --body secretword", other, 2),
+                (prot, "git commit -m fix -m -Rsecretword", protected, 2),
+                (hl, "gh pr merge 1 --body secretword", other, 2),
+                (hl, "gh -R o/else pr merge 1 --body secretword", other, 2),
+                (hl, "git commit -m fix -m -Rsecretword", other, 2),
+                (hl, "gh issue comment 5 --body -Rsecretword", other, 2),
+                (hl, "GH_REPO=o/else gh issue comment 5 --body secretword", slugged("p-off-hl", "o/other", "off"), 0)]
+        for env, command, where, want in rows:
+            code, o, e = run(["hook"], vis("fail", env), stdin=ev(command, cwd=where))
+            assert code == want and "Traceback" not in e and (want == 0 or "entry 1" in e), (command, where, code, o, e)
         # a read that stalls blocks inside the hook's own timeout
         started = time.monotonic()
         # from the temp root, which outlives the orphaned stand-in that holds its directory
         code, o, e = run(["hook"], vis("slow"), stdin=ev("gh pr merge 1 --body fine", cwd=tempfile.gettempdir()), timeout=30)
-        assert code == 2 and "missing list" in e and time.monotonic() - started < 9, (code, e, time.monotonic() - started)
+        assert code == 2 and "did not answer within the hook's budget, and the machine has no list (" in e and time.monotonic() - started < 9, (code, e, time.monotonic() - started)
         # a payload the hook cannot parse
         for raw in (b"", b"not json", b"[]", b"null", b"{}", b'{"tool_name": 5}', b"\xff\xfe",
                     b'{"tool_name": "Bash"}', b'{"tool_name": "Bash", "tool_input": []}',

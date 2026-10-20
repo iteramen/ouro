@@ -139,6 +139,92 @@ try {
     Assert-Case ("See ${bt}src/*.ps1${bt} here.") 0 1 0 `
         'a root-relative glob resolves through the Test-Path fallback' | Out-Null
 
+    # --- a brace set expands before the reads; each expansion is a path of its own ----------
+    Assert-Case ("See ${bt}src/{fixture,other}.ps1${bt} here.") 0 2 0 `
+        'a brace span whose expansions all exist gives no finding' | Out-Null
+    $braceMiss = Assert-Case ("See ${bt}src/{fixture,gone}.ps1${bt} here.") 1 2 0 `
+        'a brace span with a missing expansion gives one finding'
+    Assert-Match "'src/gone\.ps1'" ($braceMiss.Findings -join "`n") 'and it names the missing expansion'
+    Assert-Case ("See ${bt}src/{{fixture,other},fixture}.ps1${bt} here.") 0 2 0 `
+        'a nested set expands the same way' | Out-Null
+    Assert-Case ("See ${bt}src/{fixture,{other,gone}}.ps1${bt} here.") 1 3 0 `
+        'a missing expansion inside a nested set is one finding' | Out-Null
+    Assert-Case ("See ${bt}src/{fixture,other.ps1${bt} here.") 1 1 0 `
+        'an unbalanced brace is reported as the literal span' | Out-Null
+    Assert-Case ("See ${bt}{../outside,~/x,/abs,src/fixture}.ps1${bt} here.") 0 1 0 `
+        'an expansion with a rooted, home or parent prefix is skipped as its plain span is' | Out-Null
+    $braceCap = Assert-Case ("See ${bt}src/" + ('{a,b}' * 7) + ".ps1${bt} here.") 1 0 0 `
+        'a span past 64 expansions is one finding, not a path check'
+    Assert-Match 'past 64 paths in this body - trim the sets' ($braceCap.Findings -join "`n") 'and the finding says to trim the sets'
+    $braceSkip = Assert-Case ("See ${bt}{src}/{fixture,gone}.ps1${bt} here.") 2 2 0 `
+        'a comma-less set does not stop a later set expanding'
+    Assert-Match "'\{src\}/gone\.ps1'" ($braceSkip.Findings -join "`n") 'and the later set was expanded'
+    Assert-Case ("See ${bt}{src/{fixture,other}.ps1${bt} here.") 2 2 0 `
+        'an unbalanced set does not stop a later set expanding' | Out-Null
+    # The path probe answers absent rather than throwing on a name no filesystem can hold.
+    Assert-Case ("See ${bt}" + ('{' * 4000) + "src/fixture.ps1${bt} here.") 1 1 0 `
+        'a span of 4000 unbalanced braces is one literal finding' | Out-Null
+    # A span of 500 sets in a row is past the cap by its set count alone, before any expansion:
+    # the walk nests one call per set, and an unbounded run of sets overflowed the stack.
+    $swMany = [Diagnostics.Stopwatch]::StartNew()
+    $manySets = Get-AnchorFindings -Text ("See ${bt}src/" + ('{a,b}' * 500) + ".ps1${bt} here.")
+    $swMany.Stop()
+    Assert-Match 'findings=1 within-2s=True' `
+        "findings=$($manySets.Findings.Count) within-2s=$($swMany.ElapsedMilliseconds -lt 2000) at $($swMany.ElapsedMilliseconds)ms" `
+        'a span of 500 sets in a row is one cap finding, decided before any expansion'
+    Assert-Match 'past 64 paths in this body - trim the sets' ($manySets.Findings -join "`n") 'and the finding names the cap'
+    # The budget is the body's, not each span's: forty distinct small spans of two leaves each
+    # (a line suffix makes them distinct) cross 64 at the thirty-third, which is the cap finding,
+    # after 32 spans resolved their two paths.
+    $forty = Assert-Case ((1..40 | ForEach-Object { "See ${bt}src/{fixture,other}.ps1:$_${bt} here." }) -join ' ') 1 2 0 `
+        'forty distinct small brace spans share one budget of 64 expansions per body: the span that crosses it is the cap finding'
+    Assert-Match 'past 64 paths in this body - trim the sets' ($forty.Findings -join "`n") 'and the finding names the cap'
+    # A span with no brace set spends none of the budget, however many a body cites.
+    Assert-Case (("See ${bt}src/fixture.ps1${bt} here. " * 70)) 0 1 0 `
+        'seventy plain citations in one body spend no expansion budget' | Out-Null
+    # The anchor-line pass asks for the same spans again and spends nothing: every dead
+    # fragment on forty anchor lines is a finding, none dropped by a budget spent twice.
+    $fortyAnchors = (1..40 | ForEach-Object { '- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "plain words ' + 'nowhere at all here ' + $_ + '"' }) -join "`n"
+    Assert-Case $fortyAnchors 40 1 40 `
+        'forty anchor lines spend the budget once: each of their dead fragments is a finding' | Out-Null
+    # An anchor line whose span expands to several files checks its fragment in each that resolves.
+    $braceFrag = Assert-Case ('- ' + $bt + 'src/{fixture,other}.ps1' + $bt + ' -- "plain words ' + 'in neither file"') 1 2 1 `
+        'a brace-set anchor line with a fragment no expansion holds is a finding'
+    Assert-Match "in 'src/fixture\.ps1', 'src/other\.ps1'" ($braceFrag.Findings -join "`n") 'and it names every expansion'
+    Assert-Case ('- ' + $bt + 'src/{other,fixture}.ps1' + $bt + ' -- "plain words that live in the fixture"') 0 2 1 `
+        'a brace-set anchor line with a fragment one expansion holds passes' | Out-Null
+    Assert-Case ('- ' + $bt + 'src/{fixture,gone}.ps1' + $bt + ' -- "plain words that live in the fixture"') 1 2 1 `
+        'an expansion that does not resolve is a path finding and adds no fragment finding' | Out-Null
+    # Four shapes with six real sets and a run of 16000 unbalanced braces, with and without a
+    # close brace after the run: 64 expansions each, and the expander's one pass makes the
+    # close-brace variants cost what the plain ones cost. The 64 path reads of a 16 KB path are
+    # the gate's own cost and the same on every shape; a rescan per alternative took 17 and 29 s
+    # on the close-brace shapes at this size, and the bound below is a factor of two plus half a
+    # second for the noise of a small machine.
+    $shapes = @(
+        ('src/' + ('{a,b}' * 6) + ('{' * 16000) + '.ps1'),
+        ('src/' + ('{a,b}' * 6) + ('{' * 16000) + '}.ps1'),
+        ('src/{a,b}' + ('{{a,b}' * 5) + ('{' * 16000) + '.ps1'),
+        ('src/{a,b}' + ('{{a,b}' * 5) + ('{' * 16000) + '}.ps1'))
+    $times = @(); $counts = @()
+    foreach ($shape in $shapes) {
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $r = Get-AnchorFindings -Text ("See ${bt}${shape}${bt} here.")
+        $sw.Stop()
+        $times += $sw.ElapsedMilliseconds; $counts += $r.Findings.Count
+    }
+    # Each close-brace variant is compared with its own plain shape: the two shapes expand to
+    # different paths, and on the Linux runner the open-brace ones take about three times as
+    # long as the plain ones, whatever the cause.
+    # No ceiling on the clock: a loaded runner took 12 s on one shape with the pairs within 2x.
+    # The pairs pin the close-brace shapes' cost against their plain twins and nothing more; a
+    # slowdown of the scan itself shows in the 500-set row's clock, and the resolution of 64
+    # paths is the runner's own.
+    $pairs = ($times[1] -lt 2 * $times[0] + 500) -and ($times[3] -lt 2 * $times[2] + 500)
+    Assert-Match 'findings=64,64,64,64 pairs-under-2x=True' `
+        "findings=$($counts -join ',') pairs-under-2x=$pairs at $($times -join '/')ms" `
+        'six sets before 16000 unbalanced braces expand to 64 paths at one pass, with or without a close brace after the run'
+
     # --- Paths: each candidate as the tracked file it names, else as written ----------
     # An exact entry, a unique suffix (resolved to the file), an unresolvable path (kept as
     # written, ./ and backslashes normalized), the same file cited twice, and a case variant of

@@ -25,7 +25,9 @@ description: >
      merge or when the checks finish.
    - `2` refused before a branch was made; the stop comment is on the issue.
    - `3` stopped on a ruling, the fix-round cap or a gate nothing can run; the `**Stop:**`
-     comment is on the issue, and the owner answers it.
+     comment is on the issue, and the owner answers it. A `review cap` stop is a hand-off: the
+     comment names the branch and, once opened, the pull request, which stay for a person's fix round; pushed
+     to the branch, with `agent-ready` back in place of `needs-ruling`, a new run verifies it.
    - `1` a driver error; quote the message, which names the transition and the command. Do not
      retry it silently.
 

@@ -117,12 +117,12 @@ OURO_TOKEN = "<ouro>"
 # table -> {key: expected type}. Lists are checked for element type str; a dict-typed key is a
 # free-key sub-table whose keys are data (not schema) and whose values must be strings.
 SCHEMA = {
-    "repo": {"slug": str, "default_branch": str, "protected_branch_prefixes": list, "checkout": str},
+    "repo": {"slug": str, "default_branch": str, "protected_branch_prefixes": list, "branch_prefix": str, "checkout": str},
     "labels": {"scope": list, "area": list, "type": list},
     "gate": {"areas": list, "run": str, "ci": str, "paths": list},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
-             "test_first_for_bugs": bool, "forbidden_check": str, "direct": list,
+             "external_effort": str, "test_first_for_bugs": bool, "forbidden_check": str, "direct": list,
              "unattended_classes": list},
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
@@ -253,6 +253,14 @@ def validate(data):
                 errors.append(f"{dotted}: required and non-empty")
         except (KeyError, IndexError):
             errors.append(f"{dotted}: required")
+    repo = data.get("repo") if isinstance(data.get("repo"), dict) else {}
+    bp = repo.get("branch_prefix")
+    if isinstance(bp, str):
+        protected = [p for p in repo.get("protected_branch_prefixes", []) if isinstance(p, str) and p]
+        if not bp or re.search(r"\s|/|\.\.", bp):
+            errors.append(f"repo.branch_prefix: {bp!r} must be non-empty and hold no slash, whitespace or '..'")
+        elif any(bp.startswith(p) or f"{bp}/".startswith(p) for p in protected):
+            errors.append(f"repo.branch_prefix: {bp!r} equals or starts with a repo.protected_branch_prefixes entry, so the driver would cut branches an agent never pushes to")
     labels = data.get("labels") if isinstance(data.get("labels"), dict) else {}
     # GitHub label names are case-insensitive, and the shape gate matches them with -contains,
     # which ignores case too: both rules compare lowered names.
@@ -302,6 +310,8 @@ def validate(data):
         errors.append(f"ship.external_cli: must be one of {', '.join(EXTERNAL_CLIS)}")
     if isinstance(ship.get("external_model"), str) and not ship["external_model"]:
         errors.append("ship.external_model: must be a non-empty string")
+    if isinstance(ship.get("external_effort"), str) and not ship["external_effort"]:
+        errors.append("ship.external_effort: must be a non-empty string")
     if "forbidden_check" in ship and ship["forbidden_check"] not in FORBIDDEN_CHECKS:
         errors.append(f"ship.forbidden_check: must be one of {', '.join(FORBIDDEN_CHECKS)}")
     if isinstance(ship.get("direct"), list):
@@ -565,6 +575,12 @@ ruling_approvers = ["someone"]
 
     valid = tomllib.loads(base + "\n[overlays]\nimplement = []\nland = []\n")
     assert validate(valid) == [], validate(valid)
+    with_prefix = lambda line: tomllib.loads(base.replace('default_branch = "main"\n', f'default_branch = "main"\n{line}\n'))
+    assert validate(with_prefix('branch_prefix = "feature"')) == []
+    for line in ('branch_prefix = ""', 'branch_prefix = "a/b"', 'branch_prefix = "a b"', 'branch_prefix = "a..b"',
+                 'branch_prefix = "release"\nprotected_branch_prefixes = ["release/"]',
+                 'branch_prefix = "release-x"\nprotected_branch_prefixes = ["release"]'):
+        assert any(e.startswith("repo.branch_prefix: ") for e in validate(with_prefix(line))), line
     for table, key in (("models", "verifier"), ("rolling_issues", "drift_audit"), ("overlays", "drift")):
         errs = validate(tomllib.loads(base + f'\n[{table}]\n{key} = "x"\n'))
         assert any(f"unknown key: {table}.{key}" in e for e in errs), (table, key, errs)
@@ -884,6 +900,12 @@ report_only = ["S9"]
     empty_model = tomllib.loads(base.replace('review = "adversarial-review"',
         'review = "external-audit"\nexternal_cli = "grok"\nexternal_model = ""'))
     assert validate(empty_model) == ["ship.external_model: must be a non-empty string"], validate(empty_model)
+    with_effort = tomllib.loads(base.replace('review = "adversarial-review"',
+        'review = "external-audit"\nexternal_cli = "grok"\nexternal_effort = "max"'))
+    assert validate(with_effort) == [], validate(with_effort)
+    empty_effort = tomllib.loads(base.replace('review = "adversarial-review"',
+        'review = "external-audit"\nexternal_cli = "grok"\nexternal_effort = ""'))
+    assert validate(empty_effort) == ["ship.external_effort: must be a non-empty string"], validate(empty_effort)
 
     # forbidden_check is optional; the two values are written out here, not read from the tuple.
     for value in ("required", "off"):

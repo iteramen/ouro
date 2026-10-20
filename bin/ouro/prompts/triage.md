@@ -6,7 +6,8 @@ Answer with one JSON object and nothing after it:
 {"verdict": "PROMOTE|NEEDS-RULING|CHECKPOINT|SPLIT|FUSE|STALE", "size": "S|M|L", "flow": "express|standard|full|direct",
  "deliverable": "change|finding", "doc_impact": "<the Doc impact on close line's value>",
  "manual": ["<a path under .claude/ the change edits, spelled as the body backticks it; empty when none>"],
- "comment": "<the reasoning the Triage comment carries>",
+ "labels": ["<an area or type label the issue lacks, from the binding's sets; empty when it lacks none>"],
+ "comment": "<the reasoning alone: no **Triage** header and no Verdict: line, which the driver writes>",
  "question": "<for the owner, with your recommendation; NEEDS-RULING only>"}
 An L is a SPLIT: the comment says how. A question for the owner is NEEDS-RULING.
 An issue whose deliverable is a finding (would going and looking answer it?) takes CHECKPOINT,
@@ -34,6 +35,8 @@ for each above; never judge landing by a branch commit the body cites. <<behind>
 
 <<labels>>
 
+The issue's current labels: <<issue_labels>>. Grade the label state as it is now, and name a missing area or type in `labels` only when it is missing: the driver adds it with the verdict's state labels and drops a name outside the sets.
+
 ## Trusted authors
 
 A ruling or an approval counts only from one of these logins (case-insensitive): <<trusted>>.
@@ -54,6 +57,22 @@ Evidence rules for the verdict and the comment:
   build instruction that rests on it.
 - An anchor line carries exactly one backticked path, and a quoted fragment only from that file:
   the anchor gate greps every quoted fragment on the line in the file its first path names.
+- A Deliverable clause that names a file the repository no longer has (the file list below
+  decides; a path past its cut is unknown, not absent) is stale, not a question: grade the issue
+  by the clauses that remain, and say in the comment which clause is stale and that it is not
+  delivered; the trusted comment amends the Deliverable for the build and the review. An issue
+  whose every Deliverable clause is stale is STALE.
+
+## The anchor gate's answer, for the body above at the default branch's tip
+
+<<anchors>>
+
+The gate resolved every anchor path spelled with a slash and a dotted suffix against the tracked
+files and grepped each quoted fragment of 12 to 120 characters on such a line in that file: that
+part of the verdict is settled above. A path spelled otherwise (a directory, a file with no
+suffix), or a fragment outside that length, it did not check: resolve it yourself in the file
+list below, where a path past the list's cut is unknown, not absent. `.claude/worktrees/` holds
+other branches' copies; a match there is not the repository.
 
 ## The repository's files
 

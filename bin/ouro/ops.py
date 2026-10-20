@@ -2,7 +2,7 @@
 import json
 
 from . import sh
-from .sh import DriverError, say
+from .sh import DriverError
 
 
 def weekly(env, post):
@@ -10,7 +10,7 @@ def weekly(env, post):
     r = sh.run(argv, cwd=env.main)
     if r.code != 0:
         raise DriverError(f"{sh.cmdline(argv)} failed (exit {r.code}): {r.text}")
-    say(r.out.rstrip())
+    print(r.out.rstrip())  # a report, relayed as printed
     return 0
 
 
@@ -23,5 +23,5 @@ def compile_(env):
     c = sh.run(argv, cwd=env.main, input_text=g.out)
     if c.code != 0:
         raise DriverError(f"{sh.cmdline(argv)} failed (exit {c.code}): {c.text}")
-    say(c.out.rstrip())
+    print(c.out.rstrip())  # a report, relayed as printed
     return 0

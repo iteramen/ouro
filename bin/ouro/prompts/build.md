@@ -2,7 +2,7 @@ You are the BUILD node of the ouro driver. Build the change the issue below spec
 worktree you run in. Edit files; never commit, push, merge or write to the tracker: the driver
 commits what you leave in the tree. Run only the commands listed under "Commands you may run"
 below: the commands the issue's acceptance, test or verification section names, the gates the pull request's checks do not run (or run only
-to print a skip), and each gate with paths when your change touches them: run those before you
+to print a skip), and each gate with paths the checks run when your change touches them (a gate another workflow runs in CI is not listed): run those before you
 answer, and list each run under `gates_run`. The pull request's checks run the rest. Run each listed command exactly as written, as the whole
 command line: with a `cd`, a redirection, a pipe or a `;` it is refused. Beyond them, explore with Read, Grep and Glob, delete or move
 a file with `git rm` or `git mv`, and run `git status`, `git diff`, `git log` and `git ls-files`.
@@ -11,7 +11,9 @@ If the spec cannot be met as written (an open decision, a dead premise), change 
 with `stop`; an edit the harness refuses under `.claude/` is no reason to stop: build the rest and
 answer that edit under `manual`. On a fix round, your `body`, `door`, `blast_radius`, `residue` and
 `manual` describe the whole branch as it stands after your fix, not the round alone: read `git log`
-and `git diff` first, and keep in `residue` only what is still undone.
+and `git diff` first, and keep in `residue` only what is still undone. The REVIEW node reads their
+sentences as claims against the head: one about a thing the fix removed is a false record sentence,
+and it counts against the change.
 
 Answer with one JSON object and nothing after it:
 {"subject": "<type(scope): summary, no issue number>", "body": "<what and why, branch-wide>",
@@ -40,6 +42,10 @@ driver posts it in the thread.
 <<anchors>>
 
 ## Documents to read first
+
+The repository's checklists for every change, from its binding's `overlays.implement`: hazards to
+respect, not the rule set. The rules under `.claude/rules` reach you by path as you read and are
+not repeated here.
 
 <<implement_docs>>
 

@@ -15,6 +15,141 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.4.1] - 2026-10-20
+
+- `docs/architecture.html` names this repository's own rules file instead of linking to it: the
+  public tree does not hold that file, so the link was dead there.
+
+## [v1.4.0] - 2026-10-20
+
+- `bin/forbidden-tokens.py hook` reads a `# protects: <owner/repo> ...` line in the token list:
+  with one, a hit blocks only a call that lands in a named repository (the directory's
+  `repo.slug`, else its `origin`; one it cannot resolve counts as named) or names one with a `-R`,
+  `--repo` or `GH_REPO` value or an issue or pull request URL, and `ship.forbidden_check` stays the
+  override, `"required"` scanning and `"off"` passing whatever the line names; with the line,
+  `"off"` passes a hit only when no such name is another repository's. **Consumer contract:** old form, with a list set an absent
+  `ship.forbidden_check` scans every publishing call in every repository; new form, it follows the
+  list's `# protects:` line, and a list without one scans every call as before. Migration: add
+  the line to the list naming the repositories it guards, then drop the `forbidden_check = "off"`
+  a binding carried only to opt out.
+- `bin/forbidden-tokens.py` judges a commit at the directory a `cd` behind an escaped inner quote,
+  a `cmd /c`, `eval`, `iex` or `Invoke-Expression` string, an unquoted `-c` word, or an `env -C`
+  before a `bash -c` moves to, and refuses a `cd` whose directory reads empty (spliced quotes) or
+  is cut away (a command substitution, a parenthesised expression) instead of skipping it.
+- A follow-up write that fails after an earlier one succeeded leaves the unfiled items in the
+  `**Follow-ups filed**` comment, and a resumed run files exactly those, once each, then posts
+  the comment with everything filed. Only a comment from the bot or an approver counts, both for
+  the items to file and for ending the step; another account's comment is data.
+- The `Review:` line no longer counts a verification's OUTSIDE finding, as the contract's
+  Review-line rule says; the FOLLOWUP brief still carries it.
+- `bin/forbidden-tokens.py` reads `chdir`, pwsh's alias of `Set-Location`, as a cd verb wherever
+  `cd` is one; its selftest pins `chdir`, `env --chdir=` and a `--chdir` a `-C` chains from.
+- `bin/external-audit.py` creates its artifact tree (the per-user parent, the session directory
+  and the round folder) owner-only for every adapter, on POSIX re-setting each level to 0700 and
+  refusing one another account owns, before anything is written; `prompt.txt`, which holds the
+  diff, is written 0600.
+- The FOLLOWUP brief lists an OUTSIDE finding once when a later round reports it again with other
+  evidence or another severity, as the latest round reported it: the identity is the file, the
+  line and the claim, the one the `Review:` line counts by, less the severity.
+
+## [v1.3.0] - 2026-10-20
+
+- The build brief frames the `overlays.implement` documents as the repository's unconditional
+  hazards, not its rule set, and the binding doc says the overlay is inlined whole into every
+  BUILD brief with no path condition, so a path-scoped rule stays under `.claude/rules`.
+- A run re-points a dead anchor line under the body's `Anchors` heading whose fragments all grep in
+  exactly one other tracked file of the same suffix, edits the body and re-stamps it, and stops
+  on every other dead anchor; the
+  TRIAGE brief reads a Deliverable clause naming a deleted file as stale, not a ruling; the
+  `review cap` stop names the branch and the pull request as a hand-off; the checks watcher names
+  a CONFLICTING pull request, for which GitHub dispatches no run, and the driver syncs the branch
+  once per head when the watcher or the merge reports the conflict.
+- A `.claude/worktrees` that is a symlink to another directory in the repository works end to end:
+  the driver checks a worktree's ignore rule at its resolved path (before, every run stopped with
+  `git check-ignore` exit 128; the target directory must be ignored, and the stop names it), and
+  `bin/Remove-LandedBranch.ps1` and `bin/Invoke-BranchSweep.ps1` take the link's target as the
+  worktrees root, so a landed run's cleanup and the sweep remove those worktrees. A link that
+  leaves the repository stops the run before a branch.
+- `bin/forbidden-tokens.py` judges a publishing call at every directory it lands in: the working
+  directory, each `cd`, `pushd`, `sl`, `Set-Location` or `Push-Location` target (anything after
+  it, or a `bash -c` or `pwsh -Command` string around it, included), each `git … commit`'s (and an
+  `env -C` before it) `-C`, `--git-dir` and `--work-tree` target and each `GIT_DIR` or `GIT_WORK_TREE`
+  assignment, chained in order (a `cd` inside quotes keeps the ones before it), all of which must pass under
+  one read budget, so a commit into a public clone from a private checkout is refused when there
+  is no list; a refusal names its reason (a binding that fails its check, a binding that requires
+  the check as the missing list, no `gh` on PATH, the visibility read's answer, or a named
+  directory that does not exist).
+- A follow-up the driver files carries the area and type labels the FOLLOWUP node names, filtered to
+  the binding's `[labels]` sets, the run's own area labels when it names no area, and `needs-triage`;
+  the brief carries the sets. The TRIAGE answer's `labels` names an area or type label the issue
+  lacks, in any case; the driver counts it in its label pre-check and writes it, in the binding's
+  spelling, with the verdict's state labels, so a missing label is graded, not ruled; a named type
+  is dropped where the issue has one.
+- **Consumer contract:** a `[[gate]]` whose `ci` only prints is a notice that another workflow runs
+  the gate in CI: on a pull request neither the driver nor the BUILD node runs it, and the record
+  names the gate among the checks by its `ci` text. A `ci` whose printed text starts with `skip`
+  keeps its reading, a gate the checks cannot run, which the driver runs itself, as it runs the
+  token scan by name; the direct lane runs every selected gate locally as before. Every message
+  the driver logs starts with the clock, `HH:MM:SS` UTC, on its first line; the weekly and compile
+  reports print as they are.
+- The anchor gate's brace expansion follows the contract: the brace sets of a body expanding past
+  64 paths, counted across its distinct spans, are a finding on the span that crosses, which says to
+  trim the sets, not a literal path check; a comma-less or unbalanced set no longer
+  stops a later set expanding; and `docs/contract.md` states that an expansion with a rooted, home
+  or parent prefix is skipped.
+- `bin/external-audit.py` runs the grok CLI bare: it points the home variables at an empty
+  directory and `GROK_HOME` at a per-session directory under the artifact folder, seeded with
+  copies of `auth.json`, `config.toml` and `models_cache.json` from the user's grok home, so the
+  reader no longer loads the working directory's CLAUDE.md files, skills, MCP servers and hooks.
+  The copied `auth.json` is removed when the driver exits, and a user grok home with no
+  `auth.json` fails the round.
+- **Consumer contract:** `[repo].branch_prefix`, an optional binding key, names the prefix of
+  every task branch the driver cuts, in place of the first area label, first type label or `ouro`
+  it derives otherwise; `ouro-binding.py check` refuses it empty, holding a slash, whitespace or
+  `..`, or equal to or starting with a `[repo].protected_branch_prefixes` entry.
+- **Consumer contract:** `ship.external_effort`, an optional binding key, sets the external
+  reader's reasoning effort, and `bin/external-audit.py` takes `--effort` (default `default`, the
+  adapter's own effort) beside `--model`: grok and copilot `--reasoning-effort`, claude
+  `--effort`, codex `-c model_reasoning_effort=`. `ouro-binding.py check` refuses the key empty,
+  and the driver exits 1 when an adapter with no effort route is given a non-default value.
+  Grok now runs at `--reasoning-effort medium` when no effort is set, where it ran at the CLI's
+  default, high; set `external_effort = "high"` to keep that.
+- `bin/external-audit.py` reads an empty `--effort` as `default`, the adapter's own effort, where it
+  passed no flag and let grok run at the CLI's high; `docs/binding.md` states the validator's rule for
+  `ship.external_effort` and the README's key table carries its row.
+
+## [v1.2.0] - 2026-10-19
+
+- **Consumer contract:** the REVIEW brief carries the issue body and the comments that amend the
+  spec, as the BUILD brief does, and says a change that does not deliver the issue's Deliverable,
+  as those comments amend it, is a finding at the severity of what it misses, IN-FIX in every
+  round (contract section 7 states the exception: a reviewer that raises it again after an
+  approver's ruling needs a new ruling, as any finding at a later head does); the external
+  reader's goal carries the Deliverable section and those comments, the newest kept when cut, in
+  place of the What section. A resumed run checks the body's edit history as a fresh run does, so
+  an untrusted edit after the triage verdict stops it before any node reads the body. Migration:
+  none.
+- `triage` checks the issue's area and type labels before it posts, as the shape gate reads them
+  (at least one area entry, exactly one type entry, compared without regard to case, a kind with
+  no declared set skipped): a PROMOTE or CHECKPOINT the counts refuse is posted as NEEDS-RULING
+  naming the kind and the binding's set, and no shape-gate demotion follows; a CHECKPOINT at L is
+  a SPLIT, as a PROMOTE at L is. The `**Triage**` comment of a PROMOTE carries a `Parts:` line,
+  the parts the driver will read.
+- **Consumer contract:** a checklist part is a task-list item of the contract's form alone,
+  `- [ ] k. **<title> (Flow: <class>).**`. Before, any `- [ ] k.` item anywhere in the body was a
+  part, so a numbered task list made the issue a checklist and its landing ticked part 1 and
+  left the issue open; now such an item is not a part and is not ticked. Migration: a body whose
+  parts lack the bold title or the Flow class is a plain deliverable until it carries them.
+- The TRIAGE brief carries the anchor gate's answer for the body at the default branch's tip, a
+  body with no parseable anchor reported as the shape gate reads it, and says which path shapes
+  the gate did not check; its file list says when it is cut, and it names `.claude/worktrees/`
+  as not the repository.
+- **Consumer contract:** the driver reads the owner's ruling on the pull request. Before, a reply
+  that a review finding needs no change was ignored and every run opened a fix round; now a
+  comment from a `[owner].ruling_approvers` login whose first line starts
+  `**Ruling**` ends the fix rounds for the newest review record before it, and the decision
+  comment gains a `Ruled:` line. Migration: none; post the ruling after the review record.
+
 ## [v1.1.0] - 2026-10-19
 
 - The driver runs no gate the pull request's checks run, under full as under the other classes:

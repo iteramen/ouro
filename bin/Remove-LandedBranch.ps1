@@ -92,7 +92,7 @@ function Invoke-RemoveLandedBranch {
     # Every precondition before the first deletion, so a refusal leaves everything as it was.
     $worktrees = @(Get-Worktrees)
     $main = $worktrees[0]
-    $wtRoot = Get-FullPath (Join-Path $main.Path '.claude/worktrees')
+    $wtRoot = Get-WorktreeRoot $main.Path
     $wt = @($worktrees | Select-Object -Skip 1 | Where-Object { $_.Branch -ceq $Branch }) | Select-Object -First 1
     if ($wt) {
         if (-not (Test-Within $wt.Path $wtRoot)) {

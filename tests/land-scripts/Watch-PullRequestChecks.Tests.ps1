@@ -12,8 +12,8 @@
     watches is watched too, and the loop ends when a list brings nothing new; the last list is the
     verdict, each run by its own conclusion: success, skipped and neutral pass, a failure stops
     with the run and its conclusion, and a run still in progress stops. No run after six lists,
-    fifty seconds apart in all, stops with -Pr (nothing built the head) and is reported with -Sha
-    (path filters); `-Sha none` watches nothing. With -Sha the runs of every commit are listed on
+    fifty seconds apart in all, stops with -Pr (a CONFLICTING pull request named as such, else
+    nothing built the head) and is reported with -Sha (path filters); `-Sha none` watches nothing. With -Sha the runs of every commit are listed on
     the default branch and the newest per workflow and event is taken across them all. Neither
     parameter, or both, stops before any call; a list that fails stops; a tree with no binding
     stops before any call. The child rows pin the entry point: exit 0 and the verdict lines on
@@ -65,12 +65,19 @@ try {
     Assert-Line $r.Lines 'run 14 (wf3/pull_request): success' 'the late run is judged'
 
     Write-Host 'no run after a minute stops with -Pr: nothing built the head'
-    Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H }; "run list --commit $H" = Answer @() }
+    Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'MERGEABLE' }; "run list --commit $H" = Answer @() }
     $script:polls = 0
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
     Assert-Match "^no pull_request run for #7's head $H after a minute - nothing is known to have built the head: push \(or re-push\) it" $r.Stop 'the stop names the zero-run case and what to do'
     Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'the list is read six times'
     Assert-Equal 50 $script:polls 'five pauses of ten seconds between them'
+    Assert-Equal 'pr view 7 -R o/n --json mergeable' @($r.Gh)[-1] 'the mergeable state is read once, after the last list'
+
+    Write-Host 'no run and a CONFLICTING pull request stops naming the conflict and the sync'
+    Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'CONFLICTING' }; "run list --commit $H" = Answer @() }
+    $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
+    Assert-Match '^#7 conflicts with master and GitHub runs no pull_request workflow for a conflicting pull request: sync the branch \(Sync-Branch.ps1\)' $r.Stop 'the stop names the conflict and what to do'
+    Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'after the same six lists'
 
     Write-Host 'a failed conclusion stops, naming the run; a run still in progress stops'
     Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H }

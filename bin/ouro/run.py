@@ -24,7 +24,7 @@ STOP_REASONS = ("review cap", "open decision", "dead anchor", "gate uncovered")
 FULL_PREFIXES = (".github/workflows/", ".github/actions/", "actions/", "hooks/", "release/", ".claude/ouro")
 EXEC_EXT = (".ps1", ".py", ".sh", ".yml", ".yaml", ".json", ".toml", ".js", ".ts", ".cs", ".cmd", ".bat")
 REVIEW_MARK = re.compile(r"\*\*Review\*\* round ([0-9]+): (CLEAN|FINDINGS) @ ([0-9a-f]{40})")
-PART_ITEM = re.compile(r"(?m)^- \[([ xX])\] ([0-9]+)\. (.*)$")
+PART_ITEM = re.compile(r"(?m)^- \[([ xX])\] ([0-9]+)\. (\*\*.+?\(Flow: \w+\)\.\*\*.*)$")  # the contract's part form alone: a plain task list is no checklist
 RECORD = re.compile(r"<!-- ouro-record: (.*?) -->", re.DOTALL)
 BAD_RUN = re.compile(r"(\d+):(failure|cancelled|timed_out|action_required|startup_failure|stale)")
 SEVERITY = {"blocker": "H", "major": "M", "minor": "L"}
@@ -105,9 +105,9 @@ def stands(f):
 
 
 def needs_fix(rec):
-    """An H or M finding a fix must answer; a first review has no fix, so its scope is ignored."""
+    """An H or M finding a fix must answer, unless an approver ruled the record; a first review has no fix, so its scope is ignored."""
     verifying = rec.get("round", 1) > 1
-    return any(sev(f) in ("H", "M") and not (verifying and outside(f)) for f in rec["findings"])
+    return not rec.get("ruled") and any(sev(f) in ("H", "M") and not (verifying and outside(f)) for f in rec["findings"])
 
 
 def parse_review_comment(c, trusted):
@@ -130,14 +130,43 @@ def parse_review_comment(c, trusted):
             "findings": ans.get("findings") or [], "false": ans.get("false_record_sentences"), "reader": ans.get("reader")}
 
 
-def review_records(comments, trusted):
-    seen, out = set(), []
+def review_records(comments, trusted, approvers=()):
+    """The records in order of round; an approver's `**Ruling**` comment marks the newest record posted before it as ruled."""
+    seen, out, last = {}, [], None
     for c in comments:
         r = parse_review_comment(c, trusted)
-        if r and (r["round"], r["sha"]) not in seen:
-            seen.add((r["round"], r["sha"]))
-            out.append(r)
+        if r:
+            key = (r["round"], r["sha"])
+            if key not in seen:
+                seen[key] = r
+                out.append(r)
+            last = seen[key]
+            continue
+        who = str((c.get("author") or {}).get("login") or "")
+        if last and who.lower() in approvers and str(c.get("body") or "").split("\n", 1)[0].strip().startswith("**Ruling**"):
+            last["ruled"] = who
     return sorted(out, key=lambda r: r["round"])
+
+
+PENDING_MARK = "<!-- ouro-pending: "
+
+
+def pending_json(items):
+    """The unfiled follow-up items as one-line JSON an HTML comment can hold: no `>` reaches the comment's closer, and
+    non-ASCII text stays itself (escaped, it grows six-fold against the comment's size limit)."""
+    return json.dumps(items, ensure_ascii=False).replace(">", "\\u003e")
+
+
+def pending_follow_ups(body):
+    """The items a `**Follow-ups filed**` comment carries as unfiled, or none."""
+    m = re.search(re.escape(PENDING_MARK) + r"(.*?) -->", body, re.S)
+    return json.loads(m.group(1)) if m else []
+
+
+def filed_follow_ups(body):
+    """The entries a `**Follow-ups filed**` comment lists as filed: its bullets before any `Not filed` line."""
+    head = body.split("\nNot filed", 1)[0]
+    return [l[2:] for l in head.splitlines() if l.startswith("- ")]
 
 
 def review_line(records, reviewer_on):
@@ -148,9 +177,12 @@ def review_line(records, reviewer_on):
     for r in records:
         for f in r["findings"]:
             key = (sev(f), str(f.get("file")), str(f.get("line")), " ".join(str(f.get("claim") or "").split()))
-            if sev(f) in counts and not (stands(f) and r.get("round", 1) > 1) and key not in seen:  # counted once, in the round that first reported it
+            # counted once, in the round that first reported it; a verification's OUTSIDE finding is a follow-up, not a
+            # finding of the change, and a later round's restatement of it is the same finding
+            if sev(f) in counts and key not in seen:
                 seen.add(key)
-                counts[sev(f)] += 1
+                if not ((stands(f) or outside(f)) and r.get("round", 1) > 1):
+                    counts[sev(f)] += 1
     falses = [r["false"] for r in records if isinstance(r["false"], int) and not isinstance(r["false"], bool)]
     return (f"Review: rounds:{fixes} findings:H{counts['H']}/M{counts['M']}/L{counts['L']} "
             f"false-sentences:{sum(falses) if falses else 'unread'}")
@@ -284,7 +316,46 @@ def reader_findings(verdict):
     return out
 
 
+def restamped(e, body, findings):
+    """The body with each anchor line under its `Anchors` heading that the findings name re-pointed at the one tracked file of the same
+    suffix at the default branch's tip that holds every fragment on it, and the `Anchors @ <sha>` stamp set to that tip; the body as it is
+    when no line can be re-pointed. A Deliverable clause is never re-pointed: one naming a deleted file is stale (contract section 3)."""
+    ref = f"origin/{e.default}"
+    dead = set()
+    for f in findings:
+        m = re.match(r"path does not resolve: '(.+)'$", f) or re.match(r"fragment no longer greps in '(.+?)': ", f)
+        if m:
+            dead.add(m.group(1))
+    out, moved, anchors, fenced = [], 0, False, False
+    for line in body.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if line.startswith("#") and not fenced:
+            anchors = bool(re.match(r"#+\s*Anchors\b", line))
+        m = re.match(r"^(\s*(?:[-*+]|\d+[.)])\s[^`\r\n]*`)([^`\r\n]+)(`.*)$", line) if anchors else None
+        span = m.group(2) if m else ""
+        base = re.split(r"[:#]", span, 1)[0]  # the gate cuts a span at its first : or # (`path:171`, `path#L171`)
+        if span and any(d == base or d.endswith("/" + base) for d in dead):
+            files = None
+            for frag in re.findall(r'"((?:[^"\\]|\\.)*)"', line):
+                frag = frag.replace('\\"', '"')
+                if 12 <= len(frag) <= 120:
+                    hits = {l[len(ref) + 1:] for l in e.git("grep", "-F", "-l", "-z", "-e", frag.strip("`"), ref, check=False).out.split("\0") if l.startswith(ref + ":")}
+                    files = hits if files is None else files & hits
+            if files and len(files) == 1 and (new := next(iter(files))) != base and Path(new).suffix == Path(base).suffix:
+                line, moved = m.group(1) + new + span[len(base):] + m.group(3), moved + 1
+        out.append(line)
+    if not moved:
+        return body
+    sha = e.git("rev-parse", "--short=7", ref).out.strip()
+    return re.sub(r"(Anchors\s*@\s*)[0-9a-f]{7,40}", lambda m: m.group(1) + sha, "\n".join(out) + ("\n" if body.endswith("\n") else ""))
+
+
 # ---- the run ----------------------------------------------------------------------------------
+
+PRINTS = re.compile(r"\s*(?:echo|pwsh -NoProfile -Command [\"']Write-Host)\b", re.I)
+SKIPS = re.compile(r"\s*(?:echo|pwsh -NoProfile -Command [\"']Write-Host)\s+(?:-\w+\s+\S+\s+)*[\"']?skip", re.I)
+
 
 class Run:
     def __init__(self, env, n, part_arg):
@@ -293,6 +364,7 @@ class Run:
         self.committed_here = set()
         self.pending = []  # review comments held until the express draft opens
         self.sync_tried = False
+        self.synced = set()
         self.fresh = False
         self.notes = []  # sentences the record carries: a tightening, a reader that was unavailable
         self.in_lane = False
@@ -331,8 +403,9 @@ class Run:
         suffix = f"-p{self.k}" if self.k else ""
         areas = self.env.lookup("labels.area", []) or []
         types = self.env.lookup("labels.type", []) or []
-        self.areas = [l for l in self.labels if l in areas]
-        prefix = (self.areas + [l for l in self.labels if l in types] + ["ouro"])[0]
+        low = {str(a).lower(): str(a) for a in areas}
+        self.areas = [low[l.lower()] for l in self.labels if l.lower() in low]  # the issue's order, the binding's spelling: the branch prefix depends on it
+        prefix = self.env.lookup("repo.branch_prefix") or (self.areas + [l for l in self.labels if l in types] + ["ouro"])[0]
         self.dirname = f"{self.n}-{slugify(self.title)}{suffix}"
         self.branch = f"{prefix}/{self.dirname}"
         self.worktree = self.env.main / ".claude" / "worktrees" / self.dirname
@@ -432,7 +505,7 @@ class Run:
         return self.env.gh_json("pr", "view", str(pr["number"]), "--json", "comments")["comments"]
 
     def records(self, pr):
-        recs = review_records(self.pr_comments(pr), self.env.trusted()) if pr else []
+        recs = review_records(self.pr_comments(pr), self.env.trusted(), self.env.approvers()) if pr else []
         return recs + [r for r in self.pending]
 
     # ---- failures
@@ -480,6 +553,7 @@ class Run:
                 if why:
                     say(f"stopped: {why}")
                     raise Stopped(3)
+                self.check_spec_trust()  # the body the nodes read on this pass, not the one the fresh run checked
         if lane_pr:
             return self.lane_resume(lane_pr)
         if pr and pr["state"] == "MERGED":
@@ -556,7 +630,12 @@ class Run:
             raise DriverError(f"the anchor gate failed: {sh.cmdline(r.argv)}: {r.text}")
         found = self.anchor_findings(r.out)
         if found:
-            self.stop_issue("dead anchor", "\n".join(f"- {f}" for f in found), 2)
+            body = restamped(e, self.body, found)
+            if body == self.body or e.dead_anchors(body, f"origin/{e.default}"):
+                self.stop_issue("dead anchor", "\n".join(f"- {f}" for f in found), 2)
+            e.write("re-stamp the moved anchors", argv_for("gh", "issue", "edit", str(self.n), "-R", e.slug, "--body-file", e.body_file("issue-body.md", body)))
+            self.body = body
+            say("[2] verify: anchors re-pointed at the file their fragments moved to, the body re-stamped")
         say("[2] verify: agent-ready, shape green, anchors resolve")
         miss = [a for a in self.areas if not any("*" in g.get("areas", []) or a in g.get("areas", []) for g in e.data.get("gate", []))]
         if miss and not checkpoint:
@@ -599,12 +678,16 @@ class Run:
         if (self.worktree / ".git").exists():
             say(f"[3] worktree: {self.worktree} exists")
             return
-        rel = self.worktree.relative_to(e.main).as_posix()
+        # git check-ignore refuses a path beyond a symlink, so a symlinked .claude/worktrees is checked at its target
+        real = self.worktree.resolve()
+        if not real.is_relative_to(e.main.resolve()):
+            raise DriverError(f"{self.worktree} resolves to {real}, outside the repository: point .claude/worktrees at a directory inside it")
+        rel = real.relative_to(e.main.resolve()).as_posix()
         self.worktree.mkdir(parents=True, exist_ok=True)
         r = e.git("check-ignore", "-q", "--no-index", rel, check=False)
         if r.code != 0:
             shutil.rmtree(self.worktree, ignore_errors=True)
-            raise DriverError(f"{rel} is not ignored (git check-ignore exit {r.code}): add .claude/worktrees/ to the repo's .gitignore")
+            raise DriverError(f"{rel} is not ignored (git check-ignore exit {r.code}): add {rel.rsplit('/', 1)[0]}/ to the repo's .gitignore")
         local = e.git("rev-parse", "--verify", "--quiet", f"refs/heads/{self.branch}", check=False).code == 0
         remote = bool(e.git("ls-remote", "--heads", "origin", f"refs/heads/{self.branch}", check=False).out.strip())
         if local:
@@ -685,7 +768,11 @@ class Run:
                 return 0
             if state == "fix":
                 continue
-            return self.decide(pr, head, records)
+            if state != "conflict":
+                state = self.decide(pr, head, records)
+            if state != "conflict":
+                return state
+            self.sync_and_push(records)
         raise DriverError("the run did not converge in 40 passes")
 
     def fresh_review_needed(self, records, head):
@@ -702,7 +789,7 @@ class Run:
         lines = [f"- `{c}` (acceptance)" for c in runnable]
         for run, g in self.area_gates():
             paths = g.get("paths")
-            if not (self.locally_run(run, g) or paths):
+            if self.notice(g) or not (self.locally_run(run, g) or paths):
                 continue
             when = f" (run it when the change touches: {', '.join(paths)})" if paths and not self.locally_run(run, g) else ""
             lines.append(f"- `{run}`{when}")
@@ -777,7 +864,11 @@ class Run:
         """A fix is a commit past the first build's, so the rounds already taken are read from the branch."""
         done = max(0, int(self.wt_git("rev-list", "--count", "--no-merges", f"origin/{self.env.default}..HEAD").out.strip() or 0) - 1)
         if done >= FIX_CAP:
-            self.stop_issue("review cap", "Three fix rounds are spent and the change is not clean.\n\n" + findings, 3)
+            pr = self.find_pr()
+            where = (f"the branch `{self.branch}` and pull request #{pr['number']} stay as they are, with the review record. A fix commit pushed to the branch"
+                     if pr else f"the branch `{self.branch}` stays in its worktree. A fix commit on the branch")
+            self.stop_issue("review cap", "Three fix rounds are spent and the change is not clean.\n\n" + findings +
+                            f"\n\nThe hand-off: {where}, `agent-ready` back in place of `needs-ruling`, and `ouro run {self.n}` verify it as any fix round.", 3)
         self.build(findings=findings, record_ok=record_ok)
 
     # ---- gates
@@ -802,8 +893,17 @@ class Run:
 
     @staticmethod
     def locally_run(run, g):
-        """A gate the pull request's checks run only to print a skip: it runs here in every class."""
-        return "forbidden-tokens.py" in run or bool(g.get("ci") and re.match(r"\s*(echo|pwsh -NoProfile -Command \"Write-Host)", g["ci"]))
+        """A gate the pull request's checks cannot run, so it runs here in every class: the token scan (CI has no list and prints
+        a skip), or a `ci` whose printed text starts with skip. A `ci` that only prints anything else is a notice that another
+        workflow runs the gate in CI: the checks cover it, and neither the driver nor the builder runs it."""
+        return "forbidden-tokens.py" in run or bool(SKIPS.match(str(g.get("ci") or "")))
+
+    @staticmethod
+    def notice(g):
+        """A `ci` that only prints and does not print a skip: another workflow runs the gate in CI. One that prints and then runs
+        a command is the checks' own run."""
+        ci = str(g.get("ci") or "")
+        return bool(PRINTS.match(ci)) and not SKIPS.match(ci) and not re.search(r"&&|;|\|", ci)
 
     def runs_here(self, run, g, flow):
         """Whether the driver runs a selected gate itself: one the checks only skip, or every one in the direct lane, which has no pull request."""
@@ -966,10 +1066,16 @@ class Run:
         if not records:
             return ""
         since, prior = records[-1]["sha"], records[-1]["body"]
+        ruled = records[-1].get("ruled")  # an approver ruled those findings: the brief shows the range, not the findings
         r = self.wt_git("diff", f"{since}..{head}", check=False)
         if r.code != 0 or len(r.out) > 60000:
+            if ruled:
+                return f"The diff `{since}..{head}` cannot be shown whole, so leave `scope` empty on every finding."
             return (f"This verifies a fix against the findings it answers. Its diff `{since}..{head}` cannot be shown whole, "
                     f"so leave `scope` empty on every finding. The findings it answers:\n\n{prior}")
+        if ruled:
+            return (f"A fix `{since}..{head}` follows. A finding in a line this diff changed is IN-FIX and one in any other "
+                    f"line is OUTSIDE. Its diff:\n\n```diff\n{r.out}\n```")
         return (f"This verifies a fix against the findings it answers. The fix is `{since}..{head}`. A finding below that "
                 f"still stands is STANDS wherever its lines are; a new finding is IN-FIX in a line this diff changed and "
                 f"OUTSIDE in any other. Its diff:\n\n```diff\n{r.out}\n```\n\nThe findings it answers:\n\n{prior}")
@@ -983,7 +1089,7 @@ class Run:
         record = (e.gh_json("pr", "view", str(pr["number"]), "--json", "body")["body"] if pr else "(no pull request yet)")
         prior = self.verification(records, head)
         prompt = briefs.render("review", mode=MODE.get(self.flow, "sized"), number=self.n, head=head, title=self.title, part=self.part_scope("review"),
-                               range=f"origin/{e.default}...{head}", diff=diff, record=record,
+                               range=f"origin/{e.default}...{head}", diff=diff, body=self.body, comments=self.spec_comments(), record=record,
                                verification=prior,
                                reviewer_prompt=rp.read_text(encoding="utf-8") if rp.is_file() else "(REVIEWER-PROMPT.md is not in this tree)",
                                contract=briefs.contract_sections(e, (7,)))
@@ -1013,6 +1119,8 @@ class Run:
         args = ["--cli", cli, "--range", f"origin/{e.default}...{head}", "--goal", self.reader_goal()]
         if e.lookup("ship.external_model"):
             args += ["--model", e.lookup("ship.external_model")]
+        if e.lookup("ship.external_effort"):
+            args += ["--effort", e.lookup("ship.external_effort")]
         if spent:
             fix_sha, fix_subject = self.wt_git("log", "-1", "--no-merges", "--format=%H%n%s", head).out.strip().split("\n", 1)
             digest = "\n\n".join(f"{f.get('claim')}\n  the fix commit {fix_sha[:7]}: {fix_subject}" for f in spent[-1]["findings"]) or "no findings"
@@ -1033,8 +1141,11 @@ class Run:
                 "files_read": found.get("files_read") or [], "reader": {"cli": cli, "session": sess.group(1), "round": len(spent) + 1}}
 
     def reader_goal(self):
-        what = re.search(r"(?ms)^## What\s*\n(.*?)(?=^## |\Z)", self.body)
-        return f"{self.title}. {what.group(1).strip() if what else ''}"[:2000]
+        """What the change must do, for the external reader: the title, the Deliverable section and the newest comments that amend it, each cut on its own so a long one cannot push the others out."""
+        want = re.search(r"(?ms)^## Deliverable\s*\n(.*?)(?=^## |\Z)", self.body)
+        comments = self.spec_comments()
+        cut = " (earlier ones cut)" if len(comments) > 3000 else ""
+        return f"{self.title}. {(want.group(1).strip() if want else '')[:3000]}\n\nComments that amend it, the newest last{cut}: {comments[-3000:]}"
 
     # ---- Copilot
     def graphql(self, query, **variables):
@@ -1144,6 +1255,8 @@ class Run:
             return "green"
         if re.search(r"is still \w+, with no conclusion yet", r.text):
             return "running"
+        if "conflicts with" in r.text:
+            return self.conflicted(head, 8, "the checks")
         bad = re.findall(r"(\d+):(failure|cancelled|timed_out|action_required|startup_failure|stale)", r.text)
         if not bad:
             raise DriverError(f"{sh.cmdline(r.argv)} failed (exit {r.code}): {r.text}")
@@ -1165,6 +1278,14 @@ class Run:
         self.fix_round(f"check run {bad[0][0]} failed; the tail of its log:\n" + "\n".join(log.splitlines()[-60:]), self.records(pr))
         return "fix"
 
+    def conflicted(self, head, step, where):
+        """The branch conflicts with the base at `head`, says `where`: synced once, as a person would; the same head again is an error."""
+        if head in self.synced:
+            raise DriverError(f"#{self.n}'s branch conflicts with {self.env.default} at {head[:7]} and the sync changed nothing ({where})")
+        self.synced.add(head)
+        say(f"[{step}] the branch conflicts with {self.env.default} ({where}): synced, then the pass repeats")
+        return "conflict"
+
     # ---- merge decision
     def decide(self, pr, head, records):
         e = self.env
@@ -1177,6 +1298,8 @@ class Run:
         n_green = len([c for c in e.gh_json("pr", "checks", str(n), "--json", "name,bucket") if c.get("bucket") == "pass"])
         line = review_line(records, bool(self.primary))
         facts = f"Head: {head}\nChecks: {n_green} green\n{line}\nClass: {self.flow}\nPolicy: {policy}"
+        if last and last[-1].get("ruled"):
+            facts += f"\nRuled: {last[-1]['ruled']}, round {last[-1]['round']}"
         if view.get("reviewDecision") == "CHANGES_REQUESTED":
             say(f"waiting: a review on #{n} requests changes")
             return 0
@@ -1196,14 +1319,19 @@ class Run:
         tail = f"Fixes #{self.n}" if self.fixes else f"Part {self.k}/{self.parts_n} of #{self.n}"
         bf = e.body_file("merge-body.md", (rec.get("summary", "") + "\n\n" + "\n".join(f"- {c}" for c in rec.get("changes", [])) + f"\n\n{tail}\n"))
         sha = self.merge_pr(n, subject, bf, self.worktree)
-        e.comment_pr(n, f"**Landed unattended** by ouro run at {sha}: checks {n_green} green, {line}, class {self.flow}\n")
+        if sha is None:
+            return self.conflicted(head, 9, "the merge")
+        e.comment_pr(n, f"**Landed unattended** by ouro run at {sha}: checks {n_green} green, {line}, class {self.flow}" + (f"\n{facts.splitlines()[-1]}" if "\nRuled: " in facts else "") + "\n")
         say(f"[9] merged #{n} as {sha}")
         return self.after_merge(self.find_pr())
 
     @staticmethod
     def merge_pr(n, subject, body_file, cwd):
+        """The merge commit; None when the script refuses a CONFLICTING pull request, which the caller syncs."""
         r = sh.run(script("Merge-PullRequest.ps1", "-Pr", str(n), "-Subject", subject, "-BodyFile", body_file, "-Linear", "no"), cwd=cwd)
         if r.code != 0:
+            if "'CONFLICTING " in r.text:
+                return None
             raise DriverError(f"{sh.cmdline(r.argv)} failed (exit {r.code}): {r.text}")
         m = re.search(r"merged as ([0-9a-f]{7,40})", r.out)
         return m.group(1) if m else "unknown"
@@ -1245,50 +1373,93 @@ class Run:
         e = self.env
         n = pr["number"]
         rec = read_record(pr.get("body") or "")
-        recs = review_records(self.pr_comments(pr), e.trusted())
-        line = lambda f: f"{f.get('file')}:{f.get('line')} {f.get('claim')}"
-        left = [line(f) for f in (recs[-1]["findings"] if recs else []) if sev(f) == "L"]
-        left += list(dict.fromkeys(line(f) for r in recs if r["round"] > 1 for f in r["findings"] if outside(f) and line(f) not in left))
-        residue = [x for x in rec.get("residue", []) if not re.search(r"(?i)\b(filed|tracked|see|opened)\b.*#\d+", str(x))] + left  # filed already
-        if not residue:
+        recs = review_records(self.pr_comments(pr), e.trusted(), e.approvers())
+        line = lambda f: f"{sev(f)} {f.get('file')}:{f.get('line')} {f.get('claim')} (evidence: {f.get('evidence')})"
+        key = lambda f: (str(f.get("file")), str(f.get("line")), " ".join(str(f.get("claim") or "").split()))  # review_line's identity, less the severity
+        picked = {}  # one bullet per defect, as the latest round reported it: the newest record's L findings and the later rounds' OUTSIDE ones
+        for r in recs:
+            for f in r["findings"]:
+                if (r is recs[-1] and sev(f) == "L") or (r["round"] > 1 and outside(f)):
+                    picked[key(f)] = f
+        found = [line(f) for f in picked.values()]
+        residue = [x for x in rec.get("residue", []) if not re.search(r"(?i)\b(filed|tracked|see|opened)\b.*#\d+", str(x))]  # filed already
+        if not residue and not found:
             return
-        if any(str(c.get("body", "")).startswith("**Follow-ups filed**") for c in self.pr_comments(pr)):
-            say("[11] follow-ups already filed")
-            return
-        prompt = briefs.render("followup", merge=sha, residue="\n".join(f"- {x}" for x in residue), contract=briefs.contract_sections(e, (3,)))
-        say("[11] FOLLOWUP node")
-        ans = node.run_node("FOLLOWUP", prompt, e.lookup("models.builder", "sonnet"), list(node.READ_TOOLS), str(e.main), node.TIMEOUTS["FOLLOWUP"])
-        filed = []
-        for it in ans.get("issues") or []:
-            title, body = str(it.get("title") or "").strip(), str(it.get("body") or "")
-            if not title:
-                continue
-            if self.dead_anchors(body, sha):
-                say(f"  dropped follow-up {title!r}: an anchor does not resolve at {sha[:7]}")
-                continue
-            f = e.body_file("followup.md", body)
-            argv = argv_for("gh", "issue", "create", "-R", e.slug, "--title", title, "--body-file", f, "--label", "needs-triage")
-            r = e.write(f"file follow-up {title!r}", argv)
-            filed.append(r.out.strip().splitlines()[-1] if r.out.strip() else title)
-        e.comment_pr(n, "**Follow-ups filed**\n\n" + ("\n".join(f"- {x}" for x in filed) or "none passed the anchor check") + "\n")
+        areas, types = e.lookup("labels.area", []) or [], e.lookup("labels.type", []) or []
+        trusted = e.trusted()  # a comment any other account posts is data, never a list of issues to file
+        posted = [str(c.get("body", "")) for c in self.pr_comments(pr) if str(c.get("body", "")).startswith("**Follow-ups filed**")
+                  and str((c.get("author") or {}).get("login") or "").lower() in trusted]
+        if posted:  # the newest comment records what a failed late write left unfiled, with the items themselves
+            items, filed = pending_follow_ups(posted[-1]), filed_follow_ups(posted[-1])
+            if not items:
+                say("[11] follow-ups already filed")
+                return
+            say(f"[11] filing the {len(items)} follow-up(s) a failed write left unfiled")
+        else:
+            bullets = lambda xs: "\n".join(f"- {x}" for x in xs) or "(none)"
+            prompt = briefs.render("followup", merge=sha, residue=bullets(residue), findings=bullets(found), contract=briefs.contract_sections(e, (3,)),
+                                   labels=json.dumps({"area": areas, "type": types}))
+            say("[11] FOLLOWUP node")
+            ans = node.run_node("FOLLOWUP", prompt, e.lookup("models.builder", "sonnet"), list(node.READ_TOOLS), str(e.main), node.TIMEOUTS["FOLLOWUP"])
+            items, filed = [it for it in ans.get("issues") or [] if str(it.get("title") or "").strip()], []
+        dropped = False
+        for i, it in enumerate(items):
+            try:
+                entry = self.file_follow_up(it, sha, areas, types)
+            except DriverError as x:  # the comment names what was filed and carries what was not, for the resume that files it
+                if filed:
+                    rest = "\n".join(f"- {str(t['title']).strip()}" for t in items[i:])
+                    e.comment_pr(n, "**Follow-ups filed**\n\n" + "\n".join(f"- {f}" for f in filed)
+                                 + f"\n\nNot filed, a resume files them: {x}\n\n{rest}\n\n{PENDING_MARK}{pending_json(items[i:])} -->\n")
+                raise
+            if entry:
+                filed.append(entry)
+            dropped = dropped or not entry
+        e.comment_pr(n, "**Follow-ups filed**\n\n" + ("\n".join(f"- {x}" for x in filed) or ("none passed the anchor check" if dropped else "none")) + "\n")
 
-    def dead_anchors(self, body, sha):
+    def file_follow_up(self, it, sha, areas, types):
+        """Files one of the node's issues and returns its comment entry, or None when the anchor check drops it."""
         e = self.env
-        bf = e.body_file("anchor-body.md", body)
-        ps = e.scratch / "anchors.ps1"
-        sh.write_bytes(ps, f". '{(sh.BIN / 'Get-AnchorFindings.ps1').as_posix()}'\n$t = [IO.File]::ReadAllText('{Path(bf).as_posix()}')\n"
-                           f"$r = Get-AnchorFindings -Text $t -Ref '{sha}'\n$r.Findings | ForEach-Object {{ Write-Output \"FINDING: $_\" }}\n")
-        r = sh.run([sh.which("pwsh"), "-NoProfile", "-File", str(ps)], cwd=e.main)
-        if r.code != 0:
-            raise DriverError(f"the anchor check failed: {r.text}")
-        return [l for l in r.out.splitlines() if l.startswith("FINDING:")]
+        title, body = str(it.get("title") or "").strip(), str(it.get("body") or "")
+        body = re.sub(r"(?m)^(?:Size|Flow|Doc impact on close):[^\n]*\n?", "", body)  # triage stamps these lines
+        if self.env.dead_anchors(body, sha):
+            say(f"  dropped follow-up {title!r}: an anchor does not resolve at {sha[:7]}")
+            return None
+        f = e.body_file("followup.md", body)
+        ledger = title == "Cleanup" or title.startswith("Cleanup: ")
+        labels = ["needs-triage"]
+        if not ledger:  # the node's area and type labels in the binding's spelling, one type at most; the run's areas when it names no area
+            low, typed, kept = {str(x).lower(): str(x) for x in areas + types}, {str(x).lower() for x in types}, []
+            for l in dict.fromkeys(str(x).lower() for x in it.get("labels") or []):
+                if l in low and not (l in typed and any(k.lower() in typed for k in kept)):
+                    kept.append(low[l])
+            labels += kept + ([] if any(l.lower() not in typed for l in kept) else self.areas)
+        if ledger:
+            hits = [h for h in e.gh_json("issue", "list", "--search", f"{title} in:title", "--state", "all", "--limit", "200", "--json", "number,title,state")
+                    if str(h.get("title")).lower() == title.lower()]
+            hit = next((h for h in hits if h.get("state") != "CLOSED"), hits[0] if hits else None)
+            if hit:
+                num, how = str(hit["number"]), "appended"
+                if hit.get("state") == "CLOSED":
+                    how = "reopened"
+                    e.write(f"reopen ledger #{num}", argv_for("gh", "issue", "reopen", num, "-R", e.slug, "--comment", body))
+                else:
+                    e.write(f"append to ledger #{num}", argv_for("gh", "issue", "comment", num, "-R", e.slug, "--body-file", f))
+                return f"#{num} {hit['title']} ({how})"
+            area = title[len("Cleanup: "):] if title != "Cleanup" else ""
+            known = next((str(x) for x in areas if str(x).lower() == area.lower()), None) if area else None
+            labels += ["umbrella"] + ([known] if known else [])
+        argv = argv_for("gh", "issue", "create", "-R", e.slug, "--title", title, "--body-file", f, *[a for l in labels for a in ("--label", l)])
+        r = e.write(f"file follow-up {title!r}", argv)
+        unlabelled = f", without the label {area!r}, which [labels].area does not declare" if ledger and area and not known else ""
+        return (r.out.strip().splitlines()[-1] if r.out.strip() else title) + (f" (ledger filed{unlabelled})" if ledger else "")
 
     def tick_part(self):
         if not self.k:
             return
         e = self.env
         body = e.gh_json("issue", "view", str(self.n), "--json", "body")["body"] or ""
-        new = re.sub(rf"(?m)^- \[ \] ({self.k}\. )", r"- [x] \1", body)
+        new = re.sub(rf"(?m)^- \[ \] ({self.k}\. \*\*.+?\(Flow: \w+\)\.\*\*)", r"- [x] \1", body)
         if new != body:
             e.write(f"tick part {self.k}", argv_for("gh", "issue", "edit", str(self.n), "-R", e.slug, "--body-file", e.body_file("issue-body.md", new)))
 
@@ -1431,6 +1602,8 @@ class Run:
         if w.code != 0:
             raise DriverError(f"the checks on #{n} are not green: {w.text}")
         sha = self.merge_pr(n, f"{subject} (#{n})", body, e.main)
+        if sha is None:
+            raise DriverError(f"#{n} conflicts with {e.default}: sync the direct/{self.n} branch by hand, then invoke `run {self.n}` again")
         e.git("fetch", "origin", check=False)
         if e.git("rev-parse", "--abbrev-ref", "HEAD").out.strip() == e.default:
             e.git("merge", "-q", "--ff-only", f"origin/{e.default}", check=False)

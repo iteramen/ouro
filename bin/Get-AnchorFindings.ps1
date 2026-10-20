@@ -41,9 +41,10 @@
     span passes rule 1's filters and names one tracked file, matched literally -- spelled as the
     index spells it, or by a unique literal suffix match, and never as a pattern. On it, every
     double-quoted fragment in the length bounds is grepped in that one file, whatever its
-    characters, and a miss is a finding naming the file. On every other line a fragment is
-    grepped only if it looks like code, repo-wide, and a miss holding a backtick is skipped as a
-    prose-code composite. A continuation line under an item is judged by itself.
+    characters, and a miss is a finding naming the file. A span whose brace set expands to
+    several tracked files cites each, and a fragment is a miss only when none holds it. On every
+    other line a fragment is grepped only if it looks like code, repo-wide, and a miss holding a
+    backtick is skipped as a prose-code composite. A continuation line under an item is judged by itself.
 #>
 
 function Get-AnchorFindings {
@@ -65,7 +66,14 @@ function Get-AnchorFindings {
     # or prose) is not a path anchor. A dead path cited inside a command line is deliberately
     # out of scope: a token that does not resolve there is as often a to-be-created
     # deliverable as a stale path.
+    # A span's result is kept for the body, keyed by its exact text: the anchor-line pass below
+    # asks for the same spans, and a span cited twice costs no second expansion, as its paths
+    # are resolved once.
     function Get-PathCandidate([string]$Span) {
+        if (-not $script:spanPaths.ContainsKey($Span)) { $script:spanPaths[$Span] = @(Get-PathCandidateOnce $Span) }
+        $script:spanPaths[$Span]
+    }
+    function Get-PathCandidateOnce([string]$Span) {
         $c = $Span.Trim()
         if ($c -match '\s') { return }
         if (-not ($c -match '[/\\]' -and $c -match '\.[A-Za-z0-9]{1,7}(\z|[:#])')) { return }
@@ -79,8 +87,73 @@ function Get-AnchorFindings {
         # / and \, so a colon after the first separator (the src/x.ps1:20 line-anchor form)
         # never matches; a colon inside the first segment is read as a scheme. Only a
         # leading .. is caught -- an interior escape (src/../../x) still reaches Test-Path.
-        if ($c -match '^(\$|%|<|~[\\/]|\.\.[\\/]|[\\/]|[A-Za-z][A-Za-z0-9+.-]*:)') { return }
-        ($c -split '[:#]')[0].Trim() | Where-Object { $_ }
+        $skip = '^(\$|%|<|~[\\/]|\.\.[\\/]|[\\/]|[A-Za-z][A-Za-z0-9+.-]*:)'
+        if ($c -match $skip) { return }
+        # An alternative is a path of its own, so it meets the same prefix rule.
+        $path = ($c -split '[:#]')[0].Trim()
+        try { $paths = @(Expand-BraceSet $path) } catch [System.OverflowException] { $script:cappedSpans += $path; return }
+        $paths | Where-Object { $_ -and $_ -notmatch $skip }
+    }
+    # A brace set with a top-level comma expands to one path per alternative, nested sets too,
+    # each then checked as a path of its own. An unbalanced or comma-less set stays literal and
+    # the scan goes on to the next one. The expansions of a body's brace sets past 64 are a
+    # finding on the span that crosses, not a check: each one costs a git read. A span with no
+    # set counts none.
+    function Expand-BraceSet([string]$Path) {
+        # One pass pairs each '{' with its '}' and keeps the commas at each set's own depth; a
+        # '{' with no close, and a set with no comma of its own, stay literal characters. The
+        # expansion then walks the sets this pass found and rescans nothing, so an unbalanced
+        # span costs one pass however many braces it holds.
+        $stack = [System.Collections.Generic.Stack[int]]::new()
+        $commaAt = @{}
+        $sets = @{}
+        for ($i = 0; $i -lt $Path.Length; $i++) {
+            switch ($Path[$i]) {
+                '{' { $stack.Push($i) }
+                '}' {
+                    if ($stack.Count) {
+                        $o = $stack.Pop()
+                        if ($commaAt.ContainsKey($o)) { $sets[$o] = @{ close = $i; commas = @($commaAt[$o]) } }
+                    }
+                }
+                ',' {
+                    if ($stack.Count) {
+                        $top = $stack.Peek()
+                        if (-not $commaAt.ContainsKey($top)) { $commaAt[$top] = [System.Collections.Generic.List[int]]::new() }
+                        $commaAt[$top].Add($i)
+                    }
+                }
+            }
+        }
+        # A set with a comma adds at least one leaf, so 64 of them are past the cap before any
+        # expansion; the walk below nests one call per set, and that bound keeps it shallow.
+        if ($sets.Count -gt 63) { throw [System.OverflowException]::new('brace expansion cap') }
+        # The leaves stream out one at a time, so the cap stops the work at the 65th and not after
+        # every combination has been built.
+        $keys = @($sets.Keys | Sort-Object)
+        Expand-Range $Path $sets $keys 0 $Path.Length | ForEach-Object {
+            if ($sets.Count -gt 0 -and ++$script:braceLeaves -gt 64) { throw [System.OverflowException]::new('brace expansion cap') }
+            $_
+        }
+    }
+    # The expansions of Path[From, To): the leftmost set in the range, each alternative expanded,
+    # and the rest of the range after the set expanded once per alternative. Keys is the sets'
+    # open indices in order, so a range holds its leftmost set after a walk over the sets, not
+    # over the characters.
+    function Expand-Range([string]$Path, $Sets, $Keys, [int]$From, [int]$To) {
+        $open = -1
+        foreach ($k in $Keys) { if ($k -ge $From) { if ($k -lt $To) { $open = $k }; break } }
+        if ($open -lt 0) { return $Path.Substring($From, $To - $From) }
+        $set = $Sets[$open]
+        $prefix = $Path.Substring($From, $open - $From)
+        $starts = @($open) + $set.commas
+        $ends = $set.commas + @($set.close)
+        for ($k = 0; $k -lt $starts.Count; $k++) {
+            Expand-Range $Path $Sets $Keys ($starts[$k] + 1) $ends[$k] | ForEach-Object {
+                $alt = $_
+                Expand-Range $Path $Sets $Keys ($set.close + 1) $To | ForEach-Object { $prefix + $alt + $_ }
+            }
+        }
     }
     # Backslash-to-slash, leading-./ stripped: the form the index and both literal reads below
     # compare against.
@@ -125,7 +198,16 @@ function Get-AnchorFindings {
         $hits = @(Get-LiteralSuffixHits $p)
         if ($hits.Count -eq 1) { $hits[0] }
     }
+    # One expansion budget per body, spent by brace sets alone: the cap bounds the path reads a
+    # body's sets cost, so the span that takes the body past 64 expansions is the finding,
+    # however small each span is.
+    $script:cappedSpans = @()
+    $script:braceLeaves = 0
+    $script:spanPaths = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     $candidates = @([regex]::Matches($Text, '`([^`\r\n]+)`') | ForEach-Object { Get-PathCandidate $_.Groups[1].Value })
+    foreach ($span in ($script:cappedSpans | Select-Object -Unique)) {
+        $findings += "brace sets expand past 64 paths in this body - trim the sets: '$span'"
+    }
     $pathMatches = $candidates | Sort-Object -Unique
     # Each candidate as the tracked file it names, else as written: the set a footprint reads.
     # Distinct and ordinal-sorted, since a path is compared case-sensitively.
@@ -140,7 +222,16 @@ function Get-AnchorFindings {
         # Test-Path is a wildcard read, kept as the fallback so a root-relative glob span
         # (src/*.ps1) still resolves. Only when both the exact entry and Test-Path miss does the
         # literal suffix read below run.
-        $present = if ($Ref) { [bool]@($trackedFiles | Where-Object { $_ -like $normalized -or $_ -like "$normalized/*" }) } else { Test-Path $p }
+        # A name Test-Path cannot probe, a component past the filesystem's length limit or an
+        # unclosed wildcard bracket with a match in the directory, is an error on some hosts;
+        # absent is the answer here, and the suffix read below still decides a tracked file.
+        # The answer is assigned inside the try: on Linux the cmdlet writes False and then
+        # throws, and a try block's output joined with the catch's would be a two-element array.
+        if ($Ref) {
+            $present = [bool]@($trackedFiles | Where-Object { $_ -like $normalized -or $_ -like "$normalized/*" })
+        } else {
+            try { $present = [bool](Test-Path $p) } catch { $present = $false }
+        }
         if (-not $present) {
             # Bodies often write paths relative to a subtree (Sub/Dir/README.md
             # for Top/Sub/Dir/README.md). A unique literal tracked-file suffix match
@@ -180,17 +271,19 @@ function Get-AnchorFindings {
     # has nothing to verify, so it is not resolved, and each candidate is resolved once.
     $anchorFrags = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
     $resolved = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    # A span that expands to several candidates cites each one that resolves, and a fragment on
+    # its line is dead only when none of them holds it.
     $otherLines = foreach ($line in $Text -split '\r?\n') {
-        $file = $null
+        $files = @()
         if ($line.Contains('"') -and $line -match '^\s*(?:[-*+]|\d+[.)])\s' -and $line -match '`([^`\r\n]+)`') {
-            $candidate = Get-PathCandidate $Matches[1]
-            if ($candidate) {
+            foreach ($candidate in Get-PathCandidate $Matches[1]) {
                 if (-not $resolved.ContainsKey($candidate)) { $resolved[$candidate] = Resolve-AnchorPath $candidate }
-                $file = $resolved[$candidate]
+                if ($resolved[$candidate]) { $files += $resolved[$candidate] }
             }
+            $files = @($files | Select-Object -Unique)
         }
-        if (-not $file) { $line; continue }
-        foreach ($frag in Get-QuotedFragments $line) { $anchorFrags["$file`n$frag"] = @($file, $frag) }
+        if (-not $files) { $line; continue }
+        foreach ($frag in Get-QuotedFragments $line) { $anchorFrags["$($files -join "`n")`n$frag"] = @(, $files) + $frag }
     }
     $fragMatches = Get-QuotedFragments ($otherLines -join "`n") |
         Where-Object {
@@ -200,12 +293,13 @@ function Get-AnchorFindings {
         } | Sort-Object -Unique
     $checkedFrags = 0
     foreach ($pair in $anchorFrags.Values) {
-        $file, $frag = $pair
-        $hit = if ($Ref) { git grep -F -e "$frag" $Ref -- ":(literal)$file" 2>$null | Select-Object -First 1 }
-               else { git grep -F -e "$frag" -- ":(literal)$file" 2>$null | Select-Object -First 1 }
+        $files, $frag = $pair
+        $specs = @($files | ForEach-Object { ":(literal)$_" })
+        $hit = if ($Ref) { git grep -F -e "$frag" $Ref -- @specs 2>$null | Select-Object -First 1 }
+               else { git grep -F -e "$frag" -- @specs 2>$null | Select-Object -First 1 }
         $checkedFrags++
         if (-not $hit) {
-            $findings += "fragment no longer greps in '$file': `"$frag`""
+            $findings += "fragment no longer greps in '$($files -join "', '")': `"$frag`""
         }
     }
     foreach ($frag in $fragMatches) {

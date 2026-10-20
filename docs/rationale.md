@@ -6,16 +6,36 @@ reasoning; `contract.md` is the rule; `binding.md` is what a repo declares.
 ## The loop
 
 ```
-file  →  triage  →  (rule if needed)  →  execute  →  PR review  →  land
+file  →  triage  →  (rule if needed)  →  run: build, gates, review, checks, merge
               ↘
                 (checkpoint)  →  findings + a recommendation  →  back to triage
 ```
 
-Humans do exactly two things: answer ruling questions and review PRs. The lower branch exists
-because those two jobs are not equally cheap: reviewing a PR is bounded; answering a ruling can
-mean an open-ended investigation before the question even makes sense. A checkpoint run does
-that investigation read-only and hands back a recommendation, so the ruling costs a review
-rather than a study.
+A person does two things: answers a ruling, and merges what `ship.policy` or a manual step
+keeps for a person.
+The lower branch exists because those two jobs are not equally cheap: reviewing a pull request
+is bounded; answering a ruling can mean an open-ended investigation before the question even
+makes sense. A checkpoint run does that investigation read-only and hands back a
+recommendation, so the ruling costs a review rather than a study.
+
+## A driver, not a runbook
+
+The loop's control flow is code, `bin/ouro`, and the model is asked only at the judgment nodes.
+A Claude Code plugin's own units are skills,
+agents and hooks, none of them a program, and control flow written as prose for the model to
+execute fails in a way of its own: a step with no check behind it is the step a session skips,
+and each rule then lives three times — in the prose, in a hook that catches the model when it
+deviates, and in a copy for the next harness. A transition the driver owns cannot be skipped,
+so the gates check the repository rather than police the model, and a hook catches a rule with
+a command shape. The protocol — the labels, the comment shapes, the anchors, the Flow class,
+the record on the pull request — is repository state, so any harness can read and write it.
+
+Outside the direct lane, who merges a pull request is the binding's `ship.policy`, a manual
+step aside: autonomy is a value a repository sets, and the driver's unattended merge is logged
+on the pull request. The driver's own watch, merge at the head SHA and branch removal need no
+branch protection; protection is a guard against hand pushes, not the merge gate.
+Repo-agnostic means a multi-project repository and a one-project private repository both bind,
+which the binding's areas and gates already carry.
 
 ## Four kinds of context
 
@@ -23,11 +43,10 @@ Agent context separates into four kinds, and nearly every failure a loop has had
 leaking into another's job.
 
 **1. Stable instruction — how to work.** The per-session briefing (`CLAUDE.md`), path-scoped
-rules that load only when the touched files match, the plugin's skills (each a drill with its
-gotchas baked in; a lesson a run teaches lands the same day at the lowest layer that can hold
-it, a hook, a gate, a line in a skill, or nowhere), the per-repo binding, and the
-repo's deterministic gates. The skills are a runbook for one harness; the contract is the spec
-they run. *Why:* an always-loaded instruction file grows until it is a
+rules that load only when the touched files match, the node briefs the driver builds from the
+issue, the binding and the contract, and the repo's deterministic gates. A lesson a run teaches
+lands at the lowest layer that can hold it: a hook for a rule with a command shape, a gate for a
+rule a check can read, or nowhere. *Why:* an always-loaded instruction file grows until it is a
 graveyard of stale rules and adherence quietly drops. Stable instruction has to earn its place
 per line, and detail has to load on demand.
 
@@ -48,12 +67,8 @@ index. The map is **audited, not trusted**: a deterministic freshness gate on ev
 anchor and shape gates on the agent-ready queue. *Why:* every restatement is
 a copy that can rot — and did, in both directions: docs found stale, and docs found right while
 the supposed authority was stale. Hence "verify against the artifact, fix whichever is wrong,
-same pass" rather than a fixed precedence.
-
-An audit is not trusted either. Its report is current state too, and it ages from the moment it
-was read — the commit, and any live state its verifiers probed: re-verifying 195 findings from a
-ten-day-old report, before acting on any of them, found 13 already resolved, in exactly the docs
-someone had cleaned in between, and two wrong when written. So consuming a report is a
+same pass" rather than a fixed precedence. An audit is not trusted either: its report is
+current state too, and it ages from the moment it was read, so consuming a report is a
 verification pass, not a work list.
 
 **4. History — what happened, kept out of the way.** Docs are current state, git is history:
@@ -62,15 +77,10 @@ superseded docs are deleted, not archived; frozen session artifacts are quaranti
 reading. *Why:* stale artifacts leak dead paths into long-lived material, and progress-log
 sections rot into misinformation. History is safe exactly once it cannot outrank current state.
 
-## The bottleneck the design creates
+## The bottleneck
 
-The loop converges the backlog to a state where every open issue is mechanically executable,
-explicitly waiting on a named decision, or a curated umbrella. That moves the constraint:
-throughput becomes **ruling velocity**, not agent capacity. When the `agent-ready` menu is empty
-and the `needs-ruling` queue is long, the fix is upstream — more work shaped into answerable
-questions (checkpoints, decision tickets) — not more autonomy downstream. The first question
-to ask of anything in the rulings queue is whether it belongs there: a ruling that would begin
-with the owner reading the code is a checkpoint wearing the wrong label.
+Throughput is ruling velocity, not agent capacity; `contract.md` §10 holds the rule and what
+the loop measures.
 
 ## Gate lifecycle
 

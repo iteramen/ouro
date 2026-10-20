@@ -28,6 +28,7 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `repo.slug` | `"owner/name"` | required | the GitHub repository every `gh` call names; never embedded in a skill |
 | `repo.default_branch` | a branch name | required | the branch runs cut from, land on and watch |
 | `repo.protected_branch_prefixes` | branch-name prefixes | `[]` | branches an agent never squash-lands, pushes to, branches from or sweeps; list a long-lived branch a merged PR once had as its head, which the sweep otherwise reads as finished, and read the sweep's report mode before any `-Delete` |
+| `repo.branch_prefix` | text | none | the prefix of every task branch the driver cuts (`<prefix>/<N>-<slug>`), where the repository's branch policy requires one; absent, it is the first area label, then the first type label, then `ouro`; `check` refuses it empty, holding a slash, whitespace or `..`, or equal to or starting with a `protected_branch_prefixes` entry |
 | `repo.checkout` | an absolute path | none | the canonical local checkout, which no ouro script reads (the driver finds the main checkout through git); per-machine, so it belongs in the overlay below, and `check` warns when the committed binding carries it |
 | `labels.scope` | label names | `[]` | scope or effort labels that may ride on any state |
 | `labels.area` | label names | `[]` | the area labels a gate's `areas` selects on; the shape gate requires at least one on every agent-ready issue, an empty or undeclared set skipping that check, and an issue with several runs every gate any of them selects |
@@ -42,11 +43,12 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's |
 | `ship.external_cli` | `grok`, `claude`, `codex`, `copilot` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
 | `ship.external_model` | a model name | the CLI's own default | the reader's model; one the CLI refuses counts as a round-1 failure |
+| `ship.external_effort` | an effort level, as the CLI names it | the adapter's own (grok `medium`, none passed on the others) | the reader's reasoning effort, passed as written; `default` or an empty value on the reader's command line is the adapter's own; one the CLI refuses counts as a round-1 failure |
 | `ship.landing` | `merge-squash`, `rebase-squash`, `rebase-merge`, `merge-merge` | `merge-squash` | the sync and merge answers in one word: The landing policy below |
 | `ship.sync` | `merge`, `rebase` | `merge` | how a branch is brought up to date before its pull request |
 | `ship.merge` | `squash`, `merge` | `squash` | how a pull request lands |
 | `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing: Rules the skills apply below |
-| `ship.forbidden_check` | `required`, `off` | follows the target repository's visibility | whether the hook checks what a session posts against the private token list: The forbidden-token check below |
+| `ship.forbidden_check` | `required`, `off` | follows the list's `# protects:` line, or with no list the target repository's visibility | whether the hook checks what a session posts against the private token list: The forbidden-token check below |
 | `ship.direct` | globs | none, the lane off | the files the direct lane may push |
 | `models.builder` | `opus`, `sonnet`, `haiku`, `fable` | `sonnet` | the model of the BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes |
 | `models.builder_trivial` | the same | `sonnet` | the BUILD node's model on a `trivial` issue |
@@ -66,11 +68,11 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `docs.report_only` | signal ids | the gate's | signals that never block |
 | `docs.banned` | substring = reason | none | known-dead substrings, each with the reason the block names; the keys are data, so a typo in one is not caught |
 | `authority.local` | paths | `[]` | repository documents that bind beyond the contract: cited, never restated |
-| `overlays.implement` | paths | `[]` | checklists the builder reads before acting: a gate only CI runs, a write that corrupts state |
+| `overlays.implement` | paths | `[]` | checklists the builder reads before acting, inlined whole into every BUILD brief on every build and fix round with no path or area condition: a few unconditional hazards (a gate only CI runs, a write that corrupts state), never a standard or a path-scoped rule, which belongs under `.claude/rules` with a `paths:` header and reaches every `claude -p` node on its own |
 | `overlays.review` | paths | `[]` | design and style standards for a reviewer; the driver's REVIEW brief does not carry them |
 | `overlays.land` | paths | `[]` | landing checklists and tail-append hazards; no ouro script reads it |
 | `owner.role` | text | none | the role the contract calls the owner |
-| `owner.ruling_approvers` | logins | required | whose comment closes a needs-ruling and converts an architecture issue; every trust decision reads this set beside the job token's bot: the rolling-issue ledgers, the shape gate's `**Triage**` provenance, the body edits that stop a run, a checkpoint finding's author, and the `**Stop:**`, `**Triage**` and `**Checkpoint finding**` comments `bin/loop-outcomes.py` counts (its Assisted count reads the set without the bot), so list every login that edits an agent-ready body or runs triage or run |
+| `owner.ruling_approvers` | logins | required | whose comment closes a needs-ruling and converts an architecture issue; every trust decision but two reads this set beside the job token's bot (the driver's `**Ruling**` and `bin/loop-outcomes.py`'s Assisted count read the set alone): the rolling-issue ledgers, the shape gate's `**Triage**` provenance, the body edits that stop a run, a checkpoint finding's author, and the `**Stop:**`, `**Triage**` and `**Checkpoint finding**` comments `bin/loop-outcomes.py` counts, so list every login that edits an agent-ready body or runs triage or run |
 
 The eight states and two modifiers are the contract's and are not declared under `[labels]`;
 `check` refuses a declared label that names one, or one both `area` and `type` hold, ignoring
@@ -120,7 +122,7 @@ requires it to name a second; the REVIEW node every `M` takes is the loop's own.
 
 ### The landing policy
 
-`ship.landing` names the pair below it in one word: how `land` brings a branch up to date before
+`ship.landing` names the pair below it in one word: how the driver brings a branch up to date before
 the PR, and how the PR lands. It is what `/ouro:init` asks at onboarding, and what the installer
 writes into a new binding. The driver's landing scripts read `sync` and `merge` through the two
 dotted reads below, and land the way they answer. A range with more than one author lands by
@@ -155,17 +157,21 @@ node, the adversarial pass an M always takes whatever `ship.review` names.
 ### The forbidden-token check
 
 `bin/forbidden-tokens.py hook` matches the text of each publishing `gh` or `git` call a session
-makes against the private token list (README, "The private token list") and blocks on a hit, and on
-a missing list except where the key and the repository's visibility say below that it does not.
+makes against the private token list (README, "The private token list") and blocks on a hit and on
+a missing list, except where the key, the list or the repository's visibility say below that it
+does not.
 `ship.forbidden_check = "off"` turns that check off for this repository: the hook passes the call,
 a hit on the list included. It is for a private repository whose own issues legitimately carry the
 values a list would hold, where the check blocks every call on a host with no list and nothing
-useful can go on one. `"required"` runs the check whatever the repository's visibility, and a
-missing list blocks.
+useful can go on one. `"required"` runs the check whatever the list protects and the repository's
+visibility, and a missing list blocks.
 
-Absent, the check follows the visibility of the repository the call posts to. When a list is set
-(`OURO_FORBIDDEN_TOKENS` set and non-empty) the check runs and a hit blocks, whatever the
-visibility. When none is set, the hook reads the visibility with one `gh repo view` call:
+Absent, the check follows the list. A list (`OURO_FORBIDDEN_TOKENS` set and non-empty) names the
+repositories it protects on a comment line `# protects: <owner/repo> ...`, and then a hit blocks
+only a call that lands in one of them, by the directory's `repo.slug` or else its `origin`, or that
+names one with a `-R`, `--repo` or `GH_REPO` value or an issue or pull request URL; a directory whose repository cannot be resolved counts as
+protected. A list with no such line protects every repository, whatever the visibility. So a
+consumer repository the list does not name needs no key. When no list is set, the hook reads the visibility with one `gh repo view` call:
 `PRIVATE` or `INTERNAL` passes the call, while `PUBLIC`, a read that fails or runs past its time
 bound, or any other value blocks as a missing list does. A private repository that wants the block
 declares `"required"`.
@@ -237,11 +243,13 @@ sees as a directory. The overlay entry is unchecked.
   briefed repository reader, where `ship.review = "copilot"` names the Copilot PR-review bot,
   which takes no brief and runs only on an open PR. `ship.external_model` is optional and, when
   present, must be non-empty — absent, or `"default"`, means the CLI's own default model.
+  `ship.external_effort` is optional and, when present, must be non-empty; absent means the
+  adapter's own effort, which `"default"` and an empty value on the reader's command line name too.
 - Every `[models]` key is optional, and each must be one of `opus`, `sonnet`, `haiku`, `fable` —
   see "Model tiers".
 - `ship.forbidden_check` is optional and, when present, must be `"required"` or `"off"`; any
-  other value or type is refused. Absent follows the target repository's visibility, as "The
-  forbidden-token check" says. Like every key but `repo.checkout`, the overlay may not set it.
+  other value or type is refused. Absent follows the list's `# protects:` line, or with no list
+  the target repository's visibility, as "The forbidden-token check" says. Like every key but `repo.checkout`, the overlay may not set it.
 - `ship.landing` must name one of the four pairs above, and an explicit `ship.sync` or
   `ship.merge` beside it must agree with the pair it names — the error names both keys. All three
   are optional; absent means today's behaviour, which is what `merge-squash` names.
@@ -265,7 +273,7 @@ sees as a directory. The overlay entry is unchecked.
   printed any, 0 when every path matches, 2 with a message on stderr when the key is empty or
   absent; `Push-Direct.ps1` asks it. Like every key but `repo.checkout`, the overlay may not set it.
 - Every `[[gate]]` needs a non-empty `areas` and `run`. An issue carrying an area label that matches
-  no gate, with no `"*"` gate, is not executable; `execute` stops and says so. A `run` may contain
+  no gate, with no `"*"` gate, is not executable; the driver stops and says so. A `run` may contain
   `<ouro>`, the plugin root, replaced before the command runs — that is how a gate the plugin ships
   is named, since its path differs per machine and per version. The root is inserted as it is, so
   where it may hold a space, quote the token in the `run` string. A copy of the binding tool that
@@ -275,31 +283,36 @@ sees as a directory. The overlay entry is unchecked.
   holding a line break is refused, since `gates` prints one run per line.
 - A `[[gate]]` may also declare `ci`, optional: the command the CI gate loop runs, as a pwsh
   command line, in place of `run` when a gate declares one — `run` stays what a local session,
-  `execute`, `land`, `land-batch` and `gates` read. It is checked the same way as `run`: non-empty,
+  the driver and `gates` read. It is checked the same way as `run`: non-empty,
   one command line, and `<ouro>` refused where the copy has no plugin root. Declare it for a gate
   whose `run` wraps the real command for the dev box, like `wsl … bash -lc`, which a CI runner
   cannot run as written, or for a gate that another workflow already runs in CI, with a `ci` that
-  only prints a notice saying so.
+  only prints a notice saying so. The driver reads a `ci` that only prints as that notice: on a
+  pull request neither it nor the builder runs the gate, and the record names it, by its `ci`
+  text, among the gates the checks run; a `ci` whose printed text starts with `skip` is the other
+  case, a gate the checks cannot run, which the driver runs itself, as it runs the token scan by
+  name; in the direct lane the driver runs every selected gate.
 - A `[[gate]]` may also declare `paths`, optional: a non-empty list of non-empty strings. `check`
   refuses a value that is not a list, an empty list and an empty or non-string entry, naming the
   gate. Each entry is a git pathspec, matched against the repository-relative paths a pull request
   or a push changes, the way `git diff --name-only` matches its pathspec arguments when run from the
   repository root: git sees each entry as written, magic such as `:(glob)` included. Without magic,
-  a wildcard such as `*.md` matches at every level. A gate with no `paths` always runs. A gate
+  a wildcard such as `*.md` matches at every level. A gate with no `paths` is selected whenever its
+  areas match: the checks run it, or the driver does where the `ci` bullet says so. A gate
   with `paths` runs only when the pull request changes a path that one of its entries matches, and
   is skipped otherwise. A changed path that no gate's `paths` claims selects no path-scoped gate:
   with only such paths changed, only the gates without `paths` run. The gates Action reads
-  `paths` when its selection input is on, and `execute`, `land` and `fuse` always read them, to
-  narrow their area-selected set with the same fallbacks; `gates` and `land-batch` never read
-  them. With selection on, a pull request's diff is read against its base and a push's against
+  `paths` when its selection input is on, and the driver always reads them, to narrow its
+  area-selected set, a gate whose diff cannot be read running; `gates` never reads them.
+  With selection on, a pull request's diff is read against its base and a push's against
   the tip the branch had before it, and every gate runs in these cases: an event that is neither;
   a push with no previous tip, such as a tag or a new branch; a diff that cannot be read; and a
   change to the gates Action. A gate that reads the binding names `.claude/ouro.toml`
   in its `paths`. A path-scoped gate whose list misses a file it depends on is skipped wrongly
   when only that file changes, so a list names everything its gate reads.
   A gate whose CI leg is path-filtered declares as its `paths` pathspecs that select the same paths
-  as that filter, and every file the gate reads: without them, `execute`, `land` and `fuse` run it
-  locally whenever it is selected and the diff misses the filter.
+  as that filter, and every file the gate reads: without them, the driver runs it locally
+  whenever it is selected, though the diff misses the filter.
 - `owner.ruling_approvers` is non-empty.
 - No `[labels]` set names one of the eight states or the two modifiers — the contract fixes those
   — and `area` and `type` are disjoint. Both are compared case-insensitively, because GitHub label
