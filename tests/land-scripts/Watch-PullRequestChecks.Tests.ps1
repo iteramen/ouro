@@ -64,10 +64,27 @@ try {
     Assert-Equal 3 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'three lists: the first, one after each round of watches'
     Assert-Line $r.Lines 'run 14 (wf3/pull_request): success' 'the late run is judged'
 
-    Write-Host 'no run after a minute stops with -Pr: nothing built the head'
+    Write-Host 'no run and no workflow naming pull_request at origin/master stops naming the missing workflow, a conflict or not'
+    function Add-Workflow([string]$Name, [string]$Text) {
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $w.Main '.github/workflows')
+        [System.IO.File]::WriteAllText((Join-Path $w.Main ".github/workflows/$Name"), $Text, $Utf8)
+        $null = G $w.Main add -A
+        $null = G $w.Main commit -q -m "workflow $Name"
+        $null = G $w.Main push -q origin master
+    }
+    Add-Workflow 'push.yml' "on:`n  push:`n    branches: [master]`n"
+    Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'CONFLICTING' }; "run list --commit $H" = Answer @() }
+    $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
+    Assert-Match "^no workflow at origin/master names pull_request, so nothing builds #7's head $($H): Install-Ouro\.ps1 -CI adds the one that runs the \[\[gate\]\] list" $r.Stop 'the stop names the missing workflow and the installer flag'
+    Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'after the same six lists'
+    Assert-NoMatch 'mergeable' ($r.Gh -join "`n") 'and before the mergeable state is read'
+    Add-Workflow 'ci.yml' "on:`n  pull_request:`n    branches: [master]`n"
+
+    Write-Host 'no run after a minute stops with -Pr: nothing built the head (run from a subdirectory, where the workflow is still found)'
     Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'MERGEABLE' }; "run list --commit $H" = Answer @() }
     $script:polls = 0
-    $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
+    Push-Location -LiteralPath (Join-Path $w.Main '.claude')
+    try { $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 } } finally { Pop-Location }
     Assert-Match "^no pull_request run for #7's head $H after a minute - nothing is known to have built the head: push \(or re-push\) it" $r.Stop 'the stop names the zero-run case and what to do'
     Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'the list is read six times'
     Assert-Equal 50 $script:polls 'five pauses of ten seconds between them'

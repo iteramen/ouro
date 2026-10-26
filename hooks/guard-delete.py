@@ -39,7 +39,7 @@ main checkout and the worktrees are read with `git -C <cwd> rev-parse --show-top
 `git worktree list --porcelain`, only when the command holds a recursive delete, and skipped where
 `cwd` is not in a repository.
 
-Stdlib only; python3 3.11+. The recorded events under tests/hooks/guard-delete/ are its test.
+Stdlib only; python3 3.12+. The recorded events under tests/hooks/guard-delete/ are its test.
 """
 import os
 import re

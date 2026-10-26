@@ -11,7 +11,7 @@ The script is not vendored: in the vendored layout (the scripts flat, Test-DocsF
 them, and no bin/loop-outcomes.py) the suite prints one `skip:` line and exits 0, which is what
 .github/workflows/no-binding.yml runs. In the plugin layout a missing script is red.
 
-stdlib only; needs python3 3.11 or later, and pwsh for the one row that runs the shared resolver.
+stdlib only; needs python3 3.12 or later, and pwsh for the one row that runs the shared resolver.
 Its [[gate]] in .claude/ouro.toml: run = "python3 tests/loop-outcomes/loop-outcomes.Tests.py"
 """
 import atexit, contextlib, importlib.util, io, json, os, pathlib, re, shutil, stat, subprocess, sys, tempfile, traceback
@@ -364,6 +364,13 @@ def landing_rows():
     a1, a2 = of(res, 114)
     check("a part landed in an earlier attempt does not count for the next",
           a1["outcome"] == "refused" and a2["outcome"] == "open" and a2["parts"] is None)
+    check("a refused attempt carries no parts, though a part landed in it", "parts" not in a1)
+    check("a landed attempt carries no parts, though parts landed before its closing pull request", "parts" not in first(analyze([promoted(111)], parts)[0], 111))
+    res, _ = analyze([promoted(115, events=[(d(12), "x")])], [pr(77, "Part 1/3 of #115", merged=d(11), oid=fake(77))])
+    check("a close wins over the part landings before it: abandoned, with no parts", first(res, 115)["outcome"] == "abandoned" and "parts" not in first(res, 115))
+    park = [(d(10, 12), "-", "agent-ready"), (d(10, 12), "+", "blocked")]
+    res, _ = analyze([promoted(116, events=park)], [pr(78, "Part 1/3 of #116", merged=d(10, 6), oid=fake(78))])
+    check("a parked attempt carries no parts, though a part landed in it", first(res, 116)["outcome"] == "parked" and "parts" not in first(res, 116))
 
 
 # ---- reversal -------------------------------------------------------------------------------

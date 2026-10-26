@@ -80,6 +80,10 @@ function Get-PathWithoutPython3 {
     ($keep -join [System.IO.Path]::PathSeparator)
 }
 
+# CI must exercise the declared minimum, rather than hiding failures behind a newer runtime.
+$actionText = Get-Content -LiteralPath $Action -Raw
+Assert-Match "(?m)^\s+python-version: '3\.12'\s*$" $actionText 'gates Action exercises Python 3.12'
+
 # --- (c) both CI templates route a fork's pull_request away from OURO_RUNS_ON, as prose --------
 # Not exercised by any workflow run here, so pinned by reading the runs-on line itself, never a
 # second copy of the clause: a mutation that deletes it from either template must show up as a

@@ -35,12 +35,12 @@ Definitions, all UTC:
    commit); the merge wins. A direct-lane commit lands too: a first-parent commit whose message
    has a line starting `Fixes #N` and whose subject ends in no `(#PR)`, at its committer date, on
    that commit; a pull request's own merge commit is not counted a second time. An attempt's
-   landing is the earliest one from its promotion up to the next promotion. Many attempts may
-   share one landing commit (a fuse region, a batch). A line starting `Part k/n of #N`, with or
-   without a leading backtick and in any case, in a landed pull request's body is a part landing of
-   issue N and lands nothing by itself; the last part's `Fixes` line does. An attempt that reads
-   open carries `parts`: the highest k among the part landings from its promotion up to the next
-   promotion, with that line's n, else None.
+   landing is the earliest one from its promotion up to the next promotion. Many attempts may share
+   one landing commit (several issues landed by one pull request). A line starting
+   `Part k/n of #N`, with or without a leading backtick and in any case, in a landed pull
+   request's body is a part landing of issue N and lands nothing by itself; the last part's
+   `Fixes` line does. An attempt that reads open carries `parts`: the highest k among the part
+   landings from its promotion up to the next promotion, with that line's n, else None.
  * Reversed: within W = 14 days after the landing, a first-parent commit whose message holds
    `This reverts commit <landing sha>` or whose subject is `Revert "<landing subject>"`, or a
    `bug`-labelled issue created in that window whose body cites an anchor (a list item whose first
@@ -101,8 +101,8 @@ import argparse, collections, json, os, re, statistics, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
 # The floor every bin/*.py shares.
-if tuple(sys.version_info[:2]) < (3, 11):
-    sys.stderr.write(f"loop-outcomes.py needs Python 3.11+; this python is {sys.version_info[0]}.{sys.version_info[1]}\n")
+if tuple(sys.version_info[:2]) < (3, 12):
+    sys.stderr.write(f"loop-outcomes.py needs Python 3.12+; this python is {sys.version_info[0]}.{sys.version_info[1]}\n")
     sys.exit(2)
 
 HERE = os.path.dirname(os.path.abspath(__file__))

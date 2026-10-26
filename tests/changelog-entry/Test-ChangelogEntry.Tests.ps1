@@ -298,6 +298,13 @@ try {
     $r = Invoke-Gate @{ Base = $baseSha }
     Assert-Match ("total: 0 finding\(s\) across 0 changed file\(s\)") $r.Text 'on the base commit the diff is empty'
     Assert-Equal 0 $r.Code 'exits 0 on the base commit'
+    Assert-Equal $false ($r.Text -match 'NOTE - ') 'a clean working tree prints no NOTE line'
+    $loose = Join-Path $Repo 'uncommitted.txt'
+    Set-Content -LiteralPath $loose -Value 'not committed'
+    $r = Invoke-Gate @{ Base = $baseSha }
+    Remove-Item -LiteralPath $loose
+    Assert-Match 'NOTE - 1 uncommitted path\(s\) in the working tree are not read' $r.Text 'an uncommitted change is counted as not read'
+    Assert-Equal 0 $r.Code 'the NOTE line leaves the exit code alone'
 
     # --- a base ref this clone does not have ----------------------------------------------------
     $r = Invoke-Gate @{ Base = 'origin/absent' }
@@ -496,7 +503,7 @@ try {
         if ($pythonGone) {
             $r = Invoke-Gate
             Assert-Match '(?m)^threw: ' $r.Text 'a declared binding with no python3 on PATH stops the run'
-            Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.11\+' $r.Text `
+            Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.12\+' $r.Text `
                 'the stop names the binding file and the python3 floor a repo with a binding needs'
 
             # A working `python`, in its own directory rather than python3's, must not let the
@@ -523,7 +530,7 @@ try {
                     if ($pyWorks -and $python3StillGone) {
                         $rPyOnly = Invoke-Gate
                         Assert-Match '(?m)^threw: ' $rPyOnly.Text 'a working python with no python3 still stops the run'
-                        Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.11\+' $rPyOnly.Text `
+                        Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.12\+' $rPyOnly.Text `
                             'the stop names python3, not the python that is actually on PATH'
                     }
                     else { Write-Host '  skip: the python shim is not a usable interpreter on this machine' -ForegroundColor DarkGray }

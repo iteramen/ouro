@@ -11,7 +11,7 @@ disable-model-invocation: true
 
 # Onboard a repo — `/ouro:init`
 
-`<ouro>` is the plugin root: `${CLAUDE_PLUGIN_ROOT}` if set. Run from the repo root.
+`<ouro>` is the plugin root: `${CLAUDE_PLUGIN_ROOT}` in Claude, or the root named by the installed Codex wrapper. Run from the repo root.
 1. **Binding.** `.claude/ouro.toml` absent: a first run, the installer writes the stub. Present:
    `python3 <ouro>/bin/ouro-binding.py check`; a failure is refused with its output (the owner
    fixes a binding by hand). Then `pwsh <ouro>/bin/Install-Ouro.ps1 -DocsFreshness -CI -IssueIntake
@@ -24,7 +24,10 @@ disable-model-invocation: true
 3. **Run** `pwsh <ouro>/bin/Install-Ouro.ps1` with exactly the flags chosen, and relay every line
    it prints: `wrote:`, `skip:`, `REFUSED:`, `WARNING:` (what the owner still fills by hand), an
    indented line belonging to the line above. A non-zero exit is reported with the steps that
-   completed. Leave the files uncommitted.
+   completed. Leave the files uncommitted. With `-CI` declined, run
+   `python3 <ouro>/bin/ouro-binding.py pr-workflows`: when it prints nothing, no workflow checks a
+   pull request, so say that each `ouro run` then runs every selected gate itself and leaves the
+   merge to the owner, and that nothing checks a pull request a person pushes by hand.
 4. **Settings.** Read `python3 <ouro>/bin/ouro-binding.py get repo.slug`; a failure or the
    placeholder slug is a finding and nothing below runs. Then for that slug:
    `gh repo view <slug> --json hasIssuesEnabled --jq .hasIssuesEnabled` (the loop cannot run
@@ -35,3 +38,5 @@ disable-model-invocation: true
 
 Copilot's id on another host: `gh api "repos/<owner/name>/issues/<N>/timeline" --paginate --jq
 '.[] | select(.event=="review_requested") | .requested_reviewer | {login, node_id, type}'`.
+
+Codex developer setup is separate: run `python3 <ouro>/bin/ouro-developer.py install --backend codex` once per developer. It installs user-wide wrappers; the repository installer and existing binding keep their own scope.

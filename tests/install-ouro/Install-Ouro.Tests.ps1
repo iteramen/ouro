@@ -133,6 +133,23 @@ if ($verb -eq 'api --paginate' -and "$($a[2])" -match '^repos/[^/]+/[^/]+/labels
     if ($env:STUB_GH_LABELS) { ($env:STUB_GH_LABELS | ConvertFrom-Json) | ForEach-Object { $_.name } }
     exit 0
 }
+if ($a[0] -eq 'api' -and "$($a[1])" -match '^repos/[^/]+/[^/]+/git/ref/tags/(.+)$') {
+    # STUB_GH_TAGS: the published tags, space-separated, in the API's own listing order; unset plays
+    # a gh that cannot answer at all, and `!403` one that answers as real gh does for a failure that
+    # is not a 404 (`gh: Forbidden (HTTP 403)` on stderr, exit 1). An absent tag answers as real gh
+    # does: the JSON error body on stdout, `gh: Not Found (HTTP 404)` on stderr, exit 1.
+    if (-not $env:STUB_GH_TAGS) { exit 1 }
+    if ($env:STUB_GH_TAGS -eq '!403') { '{"message":"Forbidden","status":"403"}'; Write-Error 'gh: Forbidden (HTTP 403)' -ErrorAction Continue; exit 1 }
+    if (@($env:STUB_GH_TAGS -split ' ') -ccontains $Matches[1]) { '{"ref":"refs/tags/' + $Matches[1] + '"}'; exit 0 }
+    '{"message":"Not Found","status":"404"}'
+    Write-Error 'gh: Not Found (HTTP 404)' -ErrorAction Continue
+    exit 1
+}
+if ($verb -eq 'api --paginate' -and "$($a[2])" -match '^repos/[^/]+/[^/]+/git/matching-refs/tags/v$') {
+    if (-not $env:STUB_GH_TAGS) { exit 1 }
+    foreach ($t in ($env:STUB_GH_TAGS -split ' ')) { "refs/tags/$t" }
+    exit 0
+}
 exit 1
 '@
 [System.IO.File]::WriteAllText((Join-Path $stubDir 'gh.ps1'), $stub, $Utf8)
@@ -333,7 +350,7 @@ try {
     Assert-Equal 1 (@($run.Gh -match '^repo view https://github\.com/o/n\.git --json ').Count) `
         'and the one repo view names origin''s URL, the single remote of this clone'
     Assert-Equal 'ruling_approvers = ["me"]' (Get-Line $toml 'ruling_approvers') 'owner.ruling_approvers comes from gh api user'
-    Assert-Equal 0 (Get-MatchingLineCount $run.Out 'WARNING') 'no placeholder warning when gh resolved every value'
+    Assert-Equal 0 (Get-MatchingLineCount $run.Out 'WARNING: .* keeps the example') 'no placeholder warning when gh resolved every value'
     Assert-Equal 'exit=0 ok' (Test-Binding $repo) 'the filled binding passes check'
     Assert-Equal $Filled (Read-Fixture $repo $WorkflowRel) 'the workflow is the template with the branch from gh and the plugin tag'
     $creates = @($run.Gh -match '^label create ')
@@ -413,6 +430,48 @@ try {
     $before = Get-TreeState $repo
     $run = Invoke-Installer $repo @('-DocsFreshness')
     Assert-Equal $before (Get-TreeState $repo) 'a second run over an existing binding and workflow changes no file'
+
+    # ── the Action tag is checked against the repository the template names ────────
+    foreach ($pair in @(@('-DocsFreshness', $WorkflowRel, 'docs-freshness'), @('-CI', $CIWorkflowRel, 'gates'))) {
+        $flag, $rel, $action = $pair
+        $repo = New-Fixture @{ '.claude/ouro.toml' = $BoundBinding }
+        $run = Invoke-Installer $repo @($flag) -Environment @{ STUB_GH_TAGS = 'v0.1.0 v0.10.0 v0.9.0' }  # v0.9.0 sorts last as text, v0.10.0 as a version
+        Assert-Equal 0 $run.Code "$flag, the tag absent: the run exits 0"
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out "^REFUSED: $([regex]::Escape($rel)) not written - the Action tag $([regex]::Escape($Tag)) is not published on iteramen/ouro \(the newest published is v0\.10\.0\)") "$flag, the tag absent: the refusal names the tag and the newest published tag, in version order"
+        Assert-Equal $false (Test-Path -LiteralPath (Join-Path $repo $rel)) "$flag, the tag absent: no workflow is written"
+        $run = Invoke-Installer $repo @($flag, '-WhatIf') -Environment @{ STUB_GH_TAGS = 'v0.1.0' }
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out "^REFUSED: $([regex]::Escape($rel)) not written - the Action tag") "$flag -WhatIf, the tag absent: the same refusal"
+        $run = Invoke-Installer $repo @($flag) -Environment @{ STUB_GH_TAGS = '!403' }
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out "^wrote: $([regex]::Escape($rel))") "$flag, gh answers a 403: the workflow is written"
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out "^WARNING: the Action tag $([regex]::Escape($Tag)) in $([regex]::Escape($rel)) is unverified - gh api .* failed \(gh: Forbidden \(HTTP 403\)\)") "$flag, gh answers a 403: the warning quotes gh"
+        $repo = New-Fixture @{ '.claude/ouro.toml' = $BoundBinding }
+        $run = Invoke-Installer $repo @($flag, '-WhatIf')
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out '^WARNING: the Action tag .* is unverified') "$flag -WhatIf, gh cannot answer: the dry run says the pin is unverified"
+        Assert-Equal $false (Test-Path -LiteralPath (Join-Path $repo $rel)) "$flag -WhatIf: nothing written"
+        $run = Invoke-Installer $repo @($flag) -Environment @{ STUB_GH_TAGS = "v0.1.0 $Tag" }
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out "^wrote: $([regex]::Escape($rel))") "$flag, the tag present: the workflow is written"
+        Assert-Equal 0 (Get-MatchingLineCount $run.Out '^WARNING: the Action tag') "$flag, the tag present: no warning"
+        Assert-Equal $true ((Read-Fixture $repo $rel) -match "/actions/$action@$([regex]::Escape($Tag))\r?\n") "$flag, the tag present: the pin is the tag"
+        $repo = New-Fixture @{ '.claude/ouro.toml' = $BoundBinding }
+        $run = Invoke-Installer $repo @($flag)
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out "^wrote: $([regex]::Escape($rel))") "$flag, gh cannot answer: the workflow is written"
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out "^WARNING: the Action tag $([regex]::Escape($Tag)) in $([regex]::Escape($rel)) is unverified") "$flag, gh cannot answer: with the warning"
+    }
+
+    # ── the approver is the operator: a warning names the owner when that is someone else ──
+    $byAlice = '{"nameWithOwner":"alice/n","defaultBranchRef":{"name":"trunk"},"owner":{"login":"alice"},"isInOrganization":false}'
+    $repo = New-Fixture
+    $run = Invoke-Installer $repo -Gh @{ Repo = $byAlice; User = 'bob' }
+    Assert-Equal 0 $run.Code 'the owner is another person: the run exits 0'
+    Assert-Equal 'ruling_approvers = ["bob"]' (Get-Line (Read-Fixture $repo '.claude/ouro.toml') 'ruling_approvers') 'the operator is the approver written'
+    Assert-Equal 1 (Get-MatchingLineCount $run.Out '^WARNING: owner\.ruling_approvers names bob alone, while alice owns the repository - add alice to owner\.ruling_approvers in \.claude/ouro\.toml') 'and one WARNING names the owner and the key'
+    # the stand-in prints its JSON whatever fields are asked for, so the asked fields are pinned on the logged call
+    Assert-Equal 1 @(@($run.Gh -match '^repo view \S+ --json \S*\bowner\b') | Where-Object { $_ -match '\bisInOrganization\b' }).Count 'the repository view asks for the owner and whether it is an organisation'
+    $run = Invoke-Installer (New-Fixture) -Gh @{ Repo = $byAlice; User = 'alice' }
+    Assert-Equal 0 (Get-MatchingLineCount $run.Out '^WARNING: owner\.ruling_approvers') 'the owner is the operator: no warning'
+    $byOrg = '{"nameWithOwner":"acme/n","defaultBranchRef":{"name":"trunk"},"owner":{"login":"acme"},"isInOrganization":true}'
+    $run = Invoke-Installer (New-Fixture) -Gh @{ Repo = $byOrg; User = 'bob' }
+    Assert-Equal 0 (Get-MatchingLineCount $run.Out '^WARNING: owner\.ruling_approvers') 'an organisation owns it: no warning'
 
     # ── an existing binding's declared [labels]: created only where missing, never --force ─
     $declaredBinding = $BoundBinding + "`n[labels]`nscope = []`narea = [`"missing-area`", `"existing-area`"]`ntype = []`n"
@@ -757,6 +816,18 @@ try {
     Assert-Equal 2 (Get-MatchingLineCount $run.Out '^skip: .* is already ignored') 'both entries are reported as already ignored'
     Assert-Equal 1 (Get-MatchingLineCount $run.Out '^WARNING: \.claude/ouro\.toml is ignored') 'the run warns that the rule also ignores the new binding'
     Assert-Equal 2 (Get-MatchingLineCount $run.Out '^skip: .* is already ignored \(\.gitignore\)') 'and each skip line names .gitignore as the source'
+
+    # ── gitignore: a rule that excludes the binding's directory names the replacement pair; a rule on the file alone keeps the un-ignore text ──
+    foreach ($dirRule in '.claude/', '.claude', '*') {
+        $repo = New-Fixture @{ '.gitignore' = "$dirRule`n" }
+        $run = Invoke-Installer $repo
+        Assert-Equal 1 (Get-MatchingLineCount $run.Out '^WARNING: \.claude/ouro\.toml is ignored \(\.gitignore:1:.*\t.*\) - the rule excludes its directory, which a negation line for the binding alone cannot undo: replace a rule that names \.claude with the pair \.claude/\* and !\.claude/ouro\.toml, narrow a broader one, or add it with git add -f') `
+            "a rule that excludes the binding's directory ($dirRule): the warning names the pair .claude/* and !.claude/ouro.toml"
+    }
+    $repo = New-Fixture @{ '.gitignore' = "**/ouro.toml`n" }
+    $run = Invoke-Installer $repo
+    Assert-Equal 1 (Get-MatchingLineCount $run.Out '^WARNING: \.claude/ouro\.toml is ignored \(\.gitignore:1:\*\*/ouro\.toml\t.*\) - un-ignore it or add it with git add -f') `
+        'a file rule: the warning keeps the un-ignore text'
 
     # ── gitignore: .git/info/exclude and core.excludesFile reach this clone only ──────────
     Write-Fixture $scratch 'excludes-clone-local' ".claude/ouro.local.toml`n"

@@ -17,17 +17,17 @@ inputs:
     description: >-
       Pin the interpreter the loop reads the binding through. Any value but the string true turns
       the pin off, and true is the default: set it to false on a runner that already carries
-      python3 3.11+, or in a repository whose policy forbids actions/setup-*. Unpinned, the loop
+      python3 3.12+, or in a repository whose policy forbids actions/setup-*. Unpinned, the loop
       reads the binding through the runner's own python3, and fails with ouro-binding.py's floor
-      message under one older than 3.11.
+      message under one older than 3.12.
     required: false
     default: 'true'
 
 runs:
   using: composite
   steps:
-    # Same pin as actions/docs-freshness, for the same reason: reading [[gate]] needs tomllib
-    # (Python 3.11+), and a runner image ships whatever python it ships. update-environment is
+    # Exercise the supported Python 3.12 minimum, shared with actions/docs-freshness.
+    # A runner image ships whatever python it ships. update-environment is
     # off, so the pinned python reaches only the step below, never the caller's later steps; that
     # step sets PATH and, on Linux, LD_LIBRARY_PATH itself.
     - uses: actions/setup-python@v7
@@ -85,7 +85,7 @@ runs:
         # Unguarded, a missing python3 fails the read below and reaches the empty-$gates check
         # next, reporting a binding with no [[gate]] entries rather than the missing interpreter.
         if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) {
-          Write-Host '::error::no python3 on PATH: this Action needs python3 3.11+ to read the binding'
+          Write-Host '::error::no python3 on PATH: this Action needs python3 3.12+ to read the binding'
           exit 1
         }
         $gates = @(python3 $tool get gate | ConvertFrom-Json)

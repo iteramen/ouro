@@ -17,7 +17,12 @@ Usage:
     python3 ouro-binding.py direct <path>... [--binding <path>]
         Read ship.direct and print, one per line, each given path that matches no glob
         (fnmatch.fnmatchcase on the path as given). Exit 1 when any is printed, 0 when all
-        match, 2 with an error on stderr when ship.direct is empty or absent.
+        match, 2 with an error on stderr when ship.direct is empty or absent, when the
+        binding cannot be loaded, or when --binding has no path after it.
+    python3 ouro-binding.py pr-workflows [path]
+        Print, one per line, each workflow file under .github/workflows/ at origin/<default
+        branch> whose top-level `on:` names the pull_request event: what runs a pull request's
+        checks. Nothing printed: a pull request gets no check.
     python3 ouro-binding.py --selftest
         Run the in-memory self-check.
 
@@ -31,7 +36,7 @@ repo.checkout and nothing else.
 The binding and its overlay are read as UTF-8, with a byte-order mark accepted; a file that
 cannot be read is one `error: <path>: <reason>` line.
 
-Stdlib only, Python 3.11+ (tomllib).
+Stdlib only, Python 3.12+ (tomllib).
 """
 import fnmatch
 import json
@@ -41,11 +46,10 @@ import subprocess
 import sys
 import tempfile
 
-# tomllib is why the floor is 3.11, and importing it on an older python dies with a traceback
-# that does not say what to install. Read by index, not .major/.minor, so the selftest can stand
+# Check the shared runtime floor before imports or binding reads, with an installable requirement. Read by index, not .major/.minor, so the selftest can stand
 # a plain tuple in for sys.version_info.
-if tuple(sys.version_info[:2]) < (3, 11):
-    sys.exit(f"ouro-binding.py needs Python 3.11+ (tomllib); this python is {sys.version_info[0]}.{sys.version_info[1]}")
+if tuple(sys.version_info[:2]) < (3, 12):
+    sys.exit(f"ouro-binding.py needs Python 3.12+ (tomllib); this python is {sys.version_info[0]}.{sys.version_info[1]}")
 
 # Both streams: the error lines below name paths, and a caller reads them back the same way it
 # reads the answers. The floor above is printed before this runs, and it is ASCII.
@@ -117,9 +121,9 @@ OURO_TOKEN = "<ouro>"
 # table -> {key: expected type}. Lists are checked for element type str; a dict-typed key is a
 # free-key sub-table whose keys are data (not schema) and whose values must be strings.
 SCHEMA = {
-    "repo": {"slug": str, "default_branch": str, "protected_branch_prefixes": list, "branch_prefix": str, "checkout": str},
+    "repo": {"slug": str, "default_branch": str, "protected_branch_prefixes": list, "branch_prefix": str, "checkout": str, "setup": str},
     "labels": {"scope": list, "area": list, "type": list},
-    "gate": {"areas": list, "run": str, "ci": str, "paths": list},
+    "gate": {"areas": list, "run": str, "ci": str, "paths": list, "cheap": bool},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
              "external_effort": str, "test_first_for_bugs": bool, "forbidden_check": str, "direct": list,
@@ -261,6 +265,15 @@ def validate(data):
             errors.append(f"repo.branch_prefix: {bp!r} must be non-empty and hold no slash, whitespace or '..'")
         elif any(bp.startswith(p) or f"{bp}/".startswith(p) for p in protected):
             errors.append(f"repo.branch_prefix: {bp!r} equals or starts with a repo.protected_branch_prefixes entry, so the driver would cut branches an agent never pushes to")
+    # setup is one command line the driver runs once in each worktree it creates: checked as a gate's run is
+    st = repo.get("setup")
+    if isinstance(st, str):
+        if not st:
+            errors.append("repo.setup: must be non-empty")
+        elif OURO_TOKEN in st and plugin_root() is None:
+            errors.append(f"repo.setup: {_no_plugin_root()}")
+        if len(f".{st}.".splitlines()) > 1:
+            errors.append(f"repo.setup: holds a line break ({st!r}); a setup is one command line")
     labels = data.get("labels") if isinstance(data.get("labels"), dict) else {}
     # GitHub label names are case-insensitive, and the shape gate matches them with -contains,
     # which ignores case too: both rules compare lowered names.
@@ -392,6 +405,29 @@ def gate_runs(data, area):
     return [run.replace(OURO_TOKEN, str(root)) if isinstance(run, str) else run for run in runs]
 
 
+ON_BLOCK = re.compile(r"(?m)^[\"']?on[\"']?[ \t]*:(.*(?:\n(?![^ \t\r\n]).*)*)")  # the `on:` line and every indented or blank line after it
+PULL_REQUEST = re.compile(r"(?<![\w.-])pull_request(?![\w-])")  # not pull_request_target, nor github.event.pull_request in an expression
+
+
+def names_pull_request(text):
+    """Whether a workflow's top-level `on:` names the pull_request event, comments aside.
+    shortcut: a `branches` filter is not read, so a workflow filtered off the default branch counts; read it when a repository needs it."""
+    m = ON_BLOCK.search(re.sub(r"(?m)(^|[ \t])#.*", r"\1", text.lstrip("\ufeff")))
+    return bool(m and PULL_REQUEST.search(m.group(1)))
+
+
+def pr_workflows(default, cwd=None, env=None):
+    """The workflow files at origin/<default> whose `on:` names pull_request: what runs a pull request's checks."""
+    def git(*args):
+        r = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True)
+        if r.returncode:
+            sys.exit(f"error: git {' '.join(args)} failed: {r.stderr.decode('utf-8', 'replace').strip()}")
+        return r.stdout.decode("utf-8", "replace")
+    ref = f"origin/{default}"
+    names = git("ls-tree", "-z", "--full-tree", "--name-only", ref, "--", ".github/workflows/").split("\0")
+    return [n for n in names if n.endswith((".yml", ".yaml")) and names_pull_request(git("show", f"{ref}:{n}"))]
+
+
 def default_path():
     try:
         # git prints the root as raw path bytes (UTF-8 on Windows). Decoded with the locale encoding
@@ -462,14 +498,21 @@ def check(path):
 
 
 def main(argv):
-    if not argv or argv[0] not in ("check", "get", "gates", "direct"):
+    if not argv or argv[0] not in ("check", "get", "gates", "direct", "pr-workflows"):
         sys.exit(__doc__.strip())
     cmd, rest = argv[0], argv[1:]
+    if cmd == "pr-workflows":
+        for name in pr_workflows(load(rest[0] if rest else None)["repo"]["default_branch"]):
+            print(name)
+        return 0
     if cmd == "direct":
         where = None
         if "--binding" in rest:
             i = rest.index("--binding")
-            where, rest = rest[i + 1] if i + 1 < len(rest) else sys.exit("usage: --binding needs a path"), rest[:i] + rest[i + 2:]
+            if i + 1 >= len(rest):  # 1 means paths were printed: a usage error is 2, as every other error here
+                print("usage: --binding needs a path", file=sys.stderr)
+                return 2
+            where, rest = rest[i + 1], rest[:i] + rest[i + 2:]
         try:
             globs = load(where).get("ship", {}).get("direct") or []
         except SystemExit as e:  # load() exits with its message (already prefixed); here that is exit 2, never 1
@@ -526,18 +569,18 @@ review = "adversarial-review"
 [owner]
 ruling_approvers = ["someone"]
 """
-    # Under a python older than 3.11 nothing here can run (tomllib), and that must be one line
+    # An unsupported python must stop before a binding read, with one line
     # naming the floor, not a traceback. Faked in a subprocess: the version is replaced before
     # this file's module body runs, the way an older interpreter would present it.
     this = str(Path(__file__).resolve())
     fake = (
-        "import runpy, sys; sys.version_info = (3, 10, 0, 'final', 0); "
+        "import runpy, sys; sys.version_info = (3, 11, 2, 'final', 0); "
         f"sys.argv = [{this!r}, 'check', 'no-such-binding.toml']; "
         f"runpy.run_path({this!r}, run_name='__main__')"
     )
     old = subprocess.run([sys.executable, "-c", fake], capture_output=True, text=True)
     assert old.returncode != 0, (old.returncode, old.stdout, old.stderr)
-    assert old.stderr.strip().splitlines() == ["ouro-binding.py needs Python 3.11+ (tomllib); this python is 3.10"], old.stderr
+    assert old.stderr.strip().splitlines() == ["ouro-binding.py needs Python 3.12+ (tomllib); this python is 3.11"], old.stderr
 
     # git prints the work-tree root as UTF-8. Decoded with the locale encoding -- cp1252 on a
     # Windows python outside UTF-8 mode -- a non-ASCII root names no directory, and a byte cp1252
@@ -581,6 +624,10 @@ ruling_approvers = ["someone"]
                  'branch_prefix = "release"\nprotected_branch_prefixes = ["release/"]',
                  'branch_prefix = "release-x"\nprotected_branch_prefixes = ["release"]'):
         assert any(e.startswith("repo.branch_prefix: ") for e in validate(with_prefix(line))), line
+    # setup is checked as a gate's run is: one non-empty line; an empty one or a line break is refused and named
+    assert validate(with_prefix('setup = "npm ci --no-audit --no-fund"')) == []
+    for value in ("", "npm ci" + chr(10) + "npm run build", "npm ci" + chr(13)):
+        assert any(e.startswith("repo.setup: ") for e in validate(with_prefix("setup = " + json.dumps(value)))), value
     for table, key in (("models", "verifier"), ("rolling_issues", "drift_audit"), ("overlays", "drift")):
         errs = validate(tomllib.loads(base + f'\n[{table}]\n{key} = "x"\n'))
         assert any(f"unknown key: {table}.{key}" in e for e in errs), (table, key, errs)
@@ -636,6 +683,11 @@ ruling_approvers = ["someone"]
                         ("[1]", "gate.2.paths: every entry must be a string")):
         errs = validate(tomllib.loads(base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\npaths = {paths}\n'))
         assert errs == [want], (paths, errs)
+
+    # cheap is optional and a boolean: true and false pass, a string or a number is refused, naming the gate.
+    for value, want in (("true", []), ("false", []), ('"yes"', ["gate.2.cheap: expected bool"]), ("1", ["gate.2.cheap: expected bool"])):
+        errs = validate(tomllib.loads(base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\ncheap = {value}\n'))
+        assert errs == want, (value, errs)
 
     # A run may name the plugin root with <ouro>: check accepts it, gates hands out the expansion,
     # and a run without the token is untouched.
@@ -978,6 +1030,18 @@ report_only = ["S9"]
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = main(["direct", "docs/a.md", "--binding", str(Path(tmp) / "missing.toml")])
         assert code == 2 and out.getvalue() == "" and err.getvalue().startswith("error:"), (code, err.getvalue())
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["direct", "docs/a.md", "--binding"])
+        assert code == 2 and out.getvalue() == "" and "--binding needs a path" in err.getvalue(), (code, err.getvalue())
+
+    # The pull_request event in the top-level `on:` only, in each form a workflow writes it.
+    for text, want in (("on: pull_request\n", True), ("on: [push, pull_request]\njobs: {}\n", True),
+                       ("name: x\non:\n  push:\n\n  pull_request:\n    branches: [main]\njobs: {}\n", True),
+                       ("on:\r\n  push:\r\n\r\n  pull_request:\r\n", True), ("\ufeffon: pull_request\n", True),
+                       ("on:\n  pull_request_target:\njobs:\n  a:\n    if: github.event.pull_request.draft == false\n", False),
+                       ("on:\n  push:\n  # pull_request:\njobs:\n  pull_request:\n", False), ("jobs: {}\n", False)):
+        assert names_pull_request(text) is want, text
 
     # [models] is optional, and so is every key in it; each key holds one of MODEL_VALUES.
     # Absent means the reading skill's own default (docs/binding.md), never a pinned version.

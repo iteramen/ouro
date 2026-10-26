@@ -81,7 +81,7 @@ try {
     Write-Host 'a base that gained nothing: reported, nothing rewritten'
     $r = Invoke-Step { Invoke-SyncBranch }
     Assert-Equal '' $r.Stop 'no stop'
-    Assert-Equal 'ship.sync: not declared - merge, the default,the base gained since branching (0):,the base gained nothing - no sync, so step 4 pushes plainly, without a lease' ($r.Lines -join ',') 'the answer, the empty gain, and the no-sync line'
+    Assert-Equal 'ship.sync: not declared - merge, the default,the base gained since branching (0):,the base gained nothing - no sync, so Push-Branch.ps1 pushes plainly, without a lease' ($r.Lines -join ',') 'the answer, the empty gain, and the no-sync line'
     Assert-Equal $head (@(G $m rev-parse HEAD)[0]) 'HEAD is unchanged'
 
     Write-Host 'a conflict stops with the path, the merge left in the tree'
@@ -154,7 +154,7 @@ try {
     $null = G $m checkout -q feat/c
     $r = Invoke-Step { Invoke-SyncBranch -Sync rebase }
     Assert-Match '^the rebase onto origin/master stopped: .*CONFLICT' $r.Stop 'the stop carries git''s message'
-    Assert-Match 'or abandon it with git rebase --abort, which returns to the tip backup/feat/c-\d{14} holds\. The lease for step 4 is none$' $r.Stop 'and names the abort, the backup and the lease'
+    Assert-Match 'or abandon it with git rebase --abort, which returns to the tip backup/feat/c-\d{14} holds\. The lease for Push-Branch.ps1 is none$' $r.Stop 'and names the abort, the backup and the lease'
     $null = G $m rebase --abort
 }
 finally { Pop-Location }

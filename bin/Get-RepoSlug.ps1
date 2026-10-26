@@ -15,7 +15,7 @@
     Two sources, in order:
 
       - `[repo].slug` from `.claude/ouro.toml` at the working directory's repo root. A binding
-        that is there and does not read THROWS: python3 3.11+ is required of a repo that has one,
+        that is there and does not read THROWS: python3 3.12+ is required of a repo that has one,
         and resolving something else would name another repository.
       - else the repository `origin` names, which gh resolves from origin's own URL. Only a URL
         carrying a host or a path is asked about, and never one spelled the way gh spells a

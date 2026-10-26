@@ -9,7 +9,7 @@ description: >
 
 # Weekly table and next wave — `/ouro:weekly`
 
-`<ouro>` is the plugin root: `${CLAUDE_PLUGIN_ROOT}` if set.
+`<ouro>` is the plugin root: `${CLAUDE_PLUGIN_ROOT}` in Claude, or the root named by the installed Codex wrapper.
 
 1. **Bind.** Read `.claude/ouro.toml` at the repo root. None, or one that fails
    `python3 <ouro>/bin/ouro-binding.py check`: refuse and say so.

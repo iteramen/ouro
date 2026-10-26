@@ -41,9 +41,9 @@ landing = "merge-squash"
 
 [models]
 # Optional, like every table below but [owner]. Absent means each role runs the reading
-# skill's own default -- builder sonnet, builder_trivial sonnet, reviewer opus.
+# skill's own default -- builder opus, builder_trivial sonnet, reviewer opus.
 # Values: opus | sonnet | haiku | fable. Table: ouro/docs/binding.md.
-# builder = "sonnet"
+# builder = "opus"
 # builder_trivial = "sonnet"
 # reviewer = "opus"
 

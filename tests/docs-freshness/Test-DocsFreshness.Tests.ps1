@@ -83,7 +83,7 @@ $failures = 0
 # The two parts that run the gate capture its output, and a throw as "threw: <message>". A gate
 # that threw ran no scan, so its content assertions would fail on their own terms and never name
 # the cause; Assert-GateRan fails once with the captured text instead, and the caller skips them.
-# The floor message of a python3 below 3.11 is the throw this exists for, and so is a bound repo
+# The floor message of a python3 below 3.12 is the throw this exists for, and so is a bound repo
 # with no python3, which Part 5 pins. A gate that ran but degraded -- an unbound repo, or a tree
 # with no ouro-binding.py -- throws nothing and prints an INFO line into the same capture, so the
 # content assertions match patterns on the capture and print it whole on a miss.
@@ -108,7 +108,8 @@ function Assert-Equal($Expected, $Actual, $What) {
     else { Write-Host "  FAIL: $What -- expected '$Expected', got '$Actual'" -ForegroundColor Red; $script:failures++ }
 }
 
-$Fixture = Join-Path ([System.IO.Path]::GetTempPath()) ("docsfresh-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+# A `[` in the root: every Resolve-Path and Test-Path on it must be literal, or the root reads as a pattern.
+$Fixture = Join-Path ([System.IO.Path]::GetTempPath()) ("docsfresh-br[1]-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 # Outside the work tree: the empty temp directory, the template and the excludes file the
 # Test-GitIgnored cases below point git at.
 $IgnoreScratch = Join-Path ([System.IO.Path]::GetTempPath()) ("docsfresh-ign-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -328,7 +329,7 @@ finally {
 $SuppressPrefixes = @('vendorlib/', 'hostsite/')
 
 $FixtureSrc = Join-Path $PSScriptRoot 'fixtures'
-$FixtureDir = Join-Path ([System.IO.Path]::GetTempPath()) ("docsfix-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$FixtureDir = Join-Path ([System.IO.Path]::GetTempPath()) ("docsfix-br[1]-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 try {
     New-Item -ItemType Directory -Force -Path $FixtureDir | Out-Null
     Copy-Item -Path (Join-Path $FixtureSrc '*') -Destination $FixtureDir -Recurse -Force
@@ -379,6 +380,8 @@ try {
 
     # bad/dead-href.html pins S1 over HTML: one resolving and one dead relative href, an
     # in-page anchor and an https URL -- exactly the dead one is a finding.
+    $htmlDocs = @(Get-InScopeHtmlDocs -Root $FixtureDir -Globs @('bad/*.html'))
+    Assert-Equal $true ($htmlDocs -contains 'bad/dead-href.html') 'armed HTML globs list the tracked .html fixtures under a bracketed root'
     $s1Html = @(Get-HtmlHrefFindings -Root $FixtureDir -Docs @('bad/dead-href.html'))
     Assert-Equal 1 $s1Html.Count 'S1 over an .html fixture reports only the dead relative href'
     Assert-Equal 'S1' $(if ($s1Html.Count) { $s1Html[0].Signal } else { '<none>' }) 'an html href finding is S1, not a new signal'
@@ -922,7 +925,7 @@ try {
         # -RepoRoot, so resolving the root needs no git: the stop comes before any scan.
         $out = & { try { & $Gate -RepoRoot $NoPyRepo 6>&1 } catch { "threw: $_" } } | Out-String
         Assert-Match '(?m)^threw: ' $out 'a declared binding with no python3 on PATH stops the run'
-        Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.11\+' $out `
+        Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.12\+' $out `
             'the stop names the binding file and the python3 floor a repo with a binding needs'
 
         # A working `python`, in its own directory rather than python3's, must not let the read
@@ -949,7 +952,7 @@ try {
                 if ($pyWorks -and $python3StillGone) {
                     $outPyOnly = & { try { & $Gate -RepoRoot $NoPyRepo 6>&1 } catch { "threw: $_" } } | Out-String
                     Assert-Match '(?m)^threw: ' $outPyOnly 'a working python with no python3 still stops the run'
-                    Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.11\+' $outPyOnly `
+                    Assert-Match '(?s)threw: .*ouro\.toml.*python3 3\.12\+' $outPyOnly `
                         'the stop names python3, not the python that is actually on PATH'
                 }
                 else { Write-Host '  skip: the python shim is not a usable interpreter on this machine' -ForegroundColor DarkGray }

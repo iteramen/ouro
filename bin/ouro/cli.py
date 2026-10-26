@@ -1,41 +1,52 @@
 """Command line: bind first, then dispatch. Exit 0 landed or waiting, 1 driver error, 2 refused, 3 stopped."""
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from . import node, ops, run, sh, triage
+from . import developer, node, ops, run, sh, triage
+from .coordination import worker_env
 from .sh import DriverError, Env, Refused, Stopped
+from .runtime import diagnostics
 
 
 def parser():
     ap = argparse.ArgumentParser(prog="ouro", description="The ouro driver.")
+    ap.add_argument("--developer-config", type=Path, help="developer runtime binding; overrides OURO_DEVELOPER_CONFIG")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="take an agent-ready issue to a landed change; resumable")
     r.add_argument("n", type=int)
     r.add_argument("--part", type=int, help="part k of a checklist deliverable")
+    r.add_argument("--override-claim", action="store_true", help="explicitly override a known advisory board claim; grants no shipping permission")
+    r.add_argument("--validate", action="store_true", help="execute pending approved validation in this driver's context")
+    r.add_argument("--recover-build", action="append", default=[], metavar="PATH", help="preserve the dirty original and offer this selected source file to BUILD in a private clean checkout; repeat for each path")
     r.add_argument("--dry-run", action="store_true", help="print the transitions and commands; write nothing")
     t = sub.add_parser("triage", help="grade an issue with the TRIAGE node and post the verdict")
     t.add_argument("n", type=int)
     t.add_argument("--dry-run", action="store_true", help="run the node, print the comment and label moves, write nothing")
     w = sub.add_parser("weekly", help="print the loop-outcomes table")
     w.add_argument("--post", action="store_true", help="also post it as a comment on the [rolling_issues].loop_runs issue")
+    lock = sub.add_parser("validation-lock", help="inspect this worktree's Git-private caller-validation lock")
+    lock.add_argument("--recover", action="store_true", help="quarantine only a proven inactive lock; never execute validation")
     sub.add_parser("compile", help="print the next wave of the queue")
     return ap
 
 
-def main_checkout():
-    r = sh.run([sh.which("git"), "rev-parse", "--path-format=absolute", "--git-common-dir"])
+def main_checkout(runtime=None):
+    exclusions = worker_env(runtime) if runtime is not None else {}
+    r = sh.run([sh.which("git"), "rev-parse", "--path-format=absolute", "--git-common-dir"], env=exclusions)
     if r.code == 0 and r.out.strip():
         return Path(r.out.strip()).parent
-    top = sh.run([sh.which("git"), "rev-parse", "--show-toplevel"])
+    top = sh.run([sh.which("git"), "rev-parse", "--show-toplevel"], env=exclusions)
     if top.code != 0:
         raise Refused("not inside a git work tree")
     return Path(top.out.strip())
 
 
-def bind(dry):
+def bind(dry, developer_config=None):
     """The binding is read before any tracker call; no binding, or one the reader refuses, refuses the run."""
-    main = main_checkout()
+    runtime = developer.load(developer_config)
+    main = main_checkout(runtime)
     ob = sh.load_binding_module()
     try:
         data = ob.load(main / ".claude" / "ouro.toml")
@@ -44,7 +55,7 @@ def bind(dry):
     errors = ob.validate(data)
     if errors:
         raise Refused("the binding fails its check:\n" + "\n".join(errors))
-    return Env(main, ob, data, dry)
+    return Env(main, ob, data, dry, runtime=runtime)
 
 
 def main(argv):
@@ -53,14 +64,24 @@ def main(argv):
             stream.reconfigure(encoding="utf-8", errors="replace")
     args = parser().parse_args(argv)
     env = None
+    node.USAGE.clear()
+    diagnostics.ATTEMPTS.clear()
     try:
-        env = bind(getattr(args, "dry_run", False))
+        if args.cmd == "validation-lock":
+            from . import validation_lock
+            runtime = developer.load(args.developer_config)
+            result = sh.run([sh.which("git"), "rev-parse", "--absolute-git-dir"], env=worker_env(runtime))
+            if result.code != 0:
+                raise Refused("not inside a git work tree")
+            root = Path(result.out.strip()) / "ouro-validation"
+            print(json.dumps(validation_lock.inspect(root, args.recover, sh.child_env(worker_env(runtime)))))
+            return 0
+        env = bind(getattr(args, "dry_run", False), args.developer_config)
         if args.cmd == "run":
-            code = run.main(env, args.n, args.part)
-            table = node.usage_table()
-            if table and not args.dry_run:
-                print(table)
-            return code
+            env.validate = args.validate
+            env.recover_build = args.recover_build
+            env.override_claim = args.override_claim
+            return run.main(env, args.n, args.part)
         if args.cmd == "triage":
             return triage.triage(env, args.n, args.dry_run)
         if args.cmd == "weekly":
@@ -75,5 +96,11 @@ def main(argv):
         print(f"ouro: error: {e}", file=sys.stderr)
         return 1
     finally:
-        if env:
-            env.close()
+        try:
+            if env:
+                env.close()
+        finally:
+            if args.cmd == "triage" or (args.cmd == "run" and not args.dry_run):
+                for table in (node.usage_table(), diagnostics.table()):
+                    if table:
+                        print(table)

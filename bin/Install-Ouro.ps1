@@ -16,7 +16,8 @@
       1. .claude/ouro.toml, when the repo has none, from templates/ouro.toml.example: repo.slug
          and repo.default_branch from `gh repo view <origin's URL>` -- the repository this clone's
          origin remote names, never gh's own pick among the remotes, which in a fork's clone is
-         the parent -- owner.ruling_approvers from `gh api user`, ship.review from -Review,
+         the parent -- owner.ruling_approvers from `gh api user` (with a WARNING naming the
+         repository's owner when that is a person other than the operator), ship.review from -Review,
          ship.landing from -Landing, and the example's [[gate]] table removed. That gate is a
          placeholder: a made-up verify command makes every issue executable against a check that
          is not the repo's, while no gate makes execute stop and name the uncovered area. A value
@@ -56,13 +57,16 @@
          templates/docs-freshness.yml with both placeholders filled. The branch comes from gh,
          else from a binding that existed before this run -- never from the stub step 1 wrote,
          whose branch is a placeholder. The tag is v + this plugin's .claude-plugin/plugin.json
-         version (every version bump is also a tag). An unknown branch or an unreadable version
-         refuses the copy and says why: a kept branch placeholder never fires, a kept tag
-         placeholder fails to resolve the Action.
+         version (every version bump is also a tag), and must be published on the repository the
+         template's uses: line names: an absent tag refuses the copy, naming the newest published
+         tag, and a gh that cannot answer writes it with a WARNING that the pin is unverified. An
+         unknown branch or an unreadable version refuses the copy and says why: a kept branch
+         placeholder never fires, a kept tag placeholder fails to resolve the Action.
       4. -CI: .github/workflows/ci.yml, when absent, from templates/ci.yml with both placeholders
          filled the same way as -DocsFreshness's workflow: the branch from gh, else from a binding
          that existed before this run, and the tag v + this plugin's .claude-plugin/plugin.json
-         version. An unknown branch or an unreadable version refuses the copy and says why.
+         version, checked against the Action's repository as in step 3. An unknown branch or an
+         unreadable version refuses the copy and says why.
       5. -IssueIntake: three files, each when absent, copied as the template's
          bytes: .github/ISSUE_TEMPLATE/work-item.yml from
          templates/work-item.yml, .github/ISSUE_TEMPLATE/config.yml from
@@ -215,6 +219,27 @@ try {
         [pscustomobject]@{ Ok = ($code -eq 0); Out = $out; Err = $err }
     }
 
+    # The Action tag a workflow pins must be published on the repository the template's uses: line
+    # names, or the pin never resolves: 'present', 'absent' (naming the newest published tag, in
+    # version order) or 'unknown' when gh cannot answer; gh's 404 is told from any other failure by
+    # its message, not by the exit code they share.
+    function Resolve-ActionTag([string]$TemplatePath, [string]$Tag) {
+        $uses = [regex]::Match([System.IO.File]::ReadAllText($TemplatePath), 'uses:\s*([^/\s]+/[^/\s]+)/actions/')
+        if (-not $uses.Success) { return [pscustomobject]@{ State = 'unknown'; Why = 'the template names no Action to pin' } }
+        $slug = $uses.Groups[1].Value
+        $ref = Invoke-Tool 'gh' @('api', "repos/$slug/git/ref/tags/$Tag", '--hostname', 'github.com')  # the Action's host, whatever gh's default host is
+        if ($ref.Ok) { return [pscustomobject]@{ State = 'present'; Why = '' } }
+        if ($ref.Err -notmatch 'HTTP 404') { return [pscustomobject]@{ State = 'unknown'; Why = "gh api repos/$slug/git/ref/tags/$Tag failed ($($ref.Err))" } }
+        $newest = ''
+        $list = Invoke-Tool 'gh' @('api', '--paginate', "repos/$slug/git/matching-refs/tags/v", '--jq', '.[].ref', '--hostname', 'github.com')
+        if ($list.Ok) {
+            $versions = @(foreach ($line in ($list.Out -split "`n")) { $m = [regex]::Match($line.Trim(), '^refs/tags/v(\d+\.\d+\.\d+)$'); if ($m.Success) { [version]$m.Groups[1].Value } })
+            if ($versions) { $newest = 'v' + ($versions | Sort-Object -Descending | Select-Object -First 1).ToString() }
+        }
+        $hint = if ($newest) { " (the newest published is $newest)" } else { '' }
+        [pscustomobject]@{ State = 'absent'; Why = "the Action tag $Tag is not published on $slug$hint - update the plugin to a published version, then run again" }
+    }
+
     function ConvertTo-TomlString([string]$Value) { '"' + $Value.Replace('\', '\\').Replace('"', '\"') + '"' }
 
     # True when the path itself is a symbolic link, whether or not its target exists. A destination
@@ -298,6 +323,8 @@ try {
     $originUrl = Invoke-Tool 'git' @('-C', $Into, 'remote', 'get-url', 'origin')
     $slug = ''
     $branch = ''
+    $ownerLogin = ''
+    $ownerIsOrg = $false
     # A URL names a host or a path, so it carries one of these. A single bare word does not, and gh
     # reads such a word as a repository of its own -- `mirror` would resolve to <signed-in owner>/mirror
     # and the binding would name a repository this clone has nothing to do with. Carrying one is not
@@ -327,12 +354,14 @@ try {
     }
     else {
         $shownUrl = Hide-Userinfo $originUrl.Out
-        $view = Invoke-Tool 'gh' @('repo', 'view', $originUrl.Out, '--json', 'nameWithOwner,defaultBranchRef')
+        $view = Invoke-Tool 'gh' @('repo', 'view', $originUrl.Out, '--json', 'nameWithOwner,defaultBranchRef,owner,isInOrganization')
         if ($view.Ok) {
             try {
                 $repo = $view.Out | ConvertFrom-Json
                 $slug = [string]$repo.nameWithOwner
                 $branch = [string]$repo.defaultBranchRef.name
+                $ownerLogin = [string]$repo.owner.login
+                $ownerIsOrg = [bool]$repo.isInOrganization
             }
             catch { }
         }
@@ -377,6 +406,12 @@ try {
         $user = Invoke-Tool 'gh' @('api', 'user', '--jq', '.login')
         if ($user.Ok -and $user.Out) { $toml = Set-ExampleLine $toml '^ruling_approvers = [^\r\n]*' "ruling_approvers = [$(ConvertTo-TomlString $user.Out)]" }
         else { $placeholders += 'owner.ruling_approvers' }
+        # A person who owns the repository and is not the operator is left out of the approvers, and
+        # their comments then close no needs-ruling or promotion; an organisation owner (a private fork of
+        # an organisation's repository reads as one too) is not a login.
+        if ($user.Ok -and $user.Out -and $ownerLogin -and -not $ownerIsOrg -and $ownerLogin -ne $user.Out) {  # logins compare without case
+            Write-Host "WARNING: owner.ruling_approvers names $($user.Out) alone, while $ownerLogin owns the repository - add $ownerLogin to owner.ruling_approvers in $bindingRel, or their comments cannot close a needs-ruling or a promotion" -ForegroundColor Yellow
+        }
 
         $reviewLine = "review = $(ConvertTo-TomlString $Review)"
         if ($Review -eq 'copilot') { $reviewLine += "${nl}copilot_bot_id = $(ConvertTo-TomlString $CopilotBotId)" }
@@ -535,7 +570,16 @@ try {
     git -C $Into check-ignore -q --no-index $bindingRel 2>$null
     if ($LASTEXITCODE -eq 0) {
         $rule = (git -C $Into check-ignore -v --no-index $bindingRel 2>$null) -join ' '
-        Write-Host "WARNING: $bindingRel is ignored ($rule) - un-ignore it or add it with git add -f, or no other clone and no CI job reads the binding" -ForegroundColor Yellow
+        # git cannot re-include a file whose parent directory is excluded: when the binding's own
+        # directory is ignored (.claude/, .claude, /.claude, *, */ ...), a negation line for the binding
+        # alone does nothing, and the pair stands in only for a rule that names .claude and nothing else.
+        git -C $Into check-ignore -q --no-index (Split-Path $bindingRel -Parent) 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "WARNING: $bindingRel is ignored ($rule) - the rule excludes its directory, which a negation line for the binding alone cannot undo: replace a rule that names .claude with the pair .claude/* and !.claude/ouro.toml, narrow a broader one, or add it with git add -f, or no other clone and no CI job reads the binding" -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "WARNING: $bindingRel is ignored ($rule) - un-ignore it or add it with git add -f, or no other clone and no CI job reads the binding" -ForegroundColor Yellow
+        }
     }
 
     if ($DocsFreshness) {
@@ -575,12 +619,19 @@ try {
             $version = $null
             try { $version = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).version } catch { }
             if ($version -isnot [string] -or -not $version.Trim()) { $why += "the Action tag is unknown: no version could be read from $manifest" }
+            $tagWarning = ''
+            if (-not $why) {
+                $tag = "v$($version.Trim())"
+                $pin = Resolve-ActionTag $template $tag
+                if ($pin.State -eq 'absent') { $why += $pin.Why }
+                elseif ($pin.State -eq 'unknown') { $tagWarning = "WARNING: the Action tag $tag in $workflowRel is unverified - $($pin.Why)" }
+            }
 
             if ($why) {
                 foreach ($w in $why) { Write-Host "REFUSED: $workflowRel not written - $w" -ForegroundColor Yellow }
             }
             else {
-                $tag = "v$($version.Trim())"
+                if ($tagWarning) { Write-Host $tagWarning -ForegroundColor Yellow }  # before the write, so -WhatIf says it too
                 # The owner segment of the uses: line is copied as the template has it.
                 $yml = [System.IO.File]::ReadAllText($template).Replace('<your-default-branch>', $workflowBranch).Replace('<tag>', $tag)
                 $workflowRefused = $false
@@ -638,12 +689,19 @@ try {
             $version = $null
             try { $version = (Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json).version } catch { }
             if ($version -isnot [string] -or -not $version.Trim()) { $why += "the Action tag is unknown: no version could be read from $manifest" }
+            $tagWarning = ''
+            if (-not $why) {
+                $tag = "v$($version.Trim())"
+                $pin = Resolve-ActionTag $template $tag
+                if ($pin.State -eq 'absent') { $why += $pin.Why }
+                elseif ($pin.State -eq 'unknown') { $tagWarning = "WARNING: the Action tag $tag in $workflowRel is unverified - $($pin.Why)" }
+            }
 
             if ($why) {
                 foreach ($w in $why) { Write-Host "REFUSED: $workflowRel not written - $w" -ForegroundColor Yellow }
             }
             else {
-                $tag = "v$($version.Trim())"
+                if ($tagWarning) { Write-Host $tagWarning -ForegroundColor Yellow }  # before the write, so -WhatIf says it too
                 # The owner segment of the uses: line is copied as the template has it.
                 $yml = [System.IO.File]::ReadAllText($template).Replace('<your-default-branch>', $workflowBranch).Replace('<tag>', $tag)
                 $workflowRefused = $false

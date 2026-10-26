@@ -40,7 +40,7 @@
     that bin/ holds a gate of the same name that is not the plugin's copy, a directory of that
     name, or a file it cannot read, and runs its guard instead once the gate's plugin copy sits
     under that bin/ byte for byte. The two rows that run a vendored suite invoking python3 skip
-    where no `python3` at 3.11 or later is on PATH; the unreadable-gate row skips where the gate
+    where no `python3` at 3.12 or later is on PATH; the unreadable-gate row skips where the gate
     cannot be held open or the filesystem does not deny a read of a file held open with no sharing.
 
     A plugin root whose own name holds a '*', beside a sibling the pattern matches, vendors its
@@ -267,12 +267,12 @@ function Assert-Child($Run, $What) {
     if ($Run.Code -eq 0) { Write-Host "  ok: $What" -ForegroundColor DarkGray }
     else { Write-Host "  FAIL: $What -- exit $($Run.Code):`n$($Run.Text)" -ForegroundColor Red; $script:failures++ }
 }
-# The path of `python3` on PATH at 3.11 or later -- the name the vendored scripts invoke, so python
+# The path of `python3` on PATH at 3.12 or later -- the name the vendored scripts invoke, so python
 # alone does not serve -- and $null where there is none.
 function Find-Python {
     $cmd = @(Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
     if (-not $cmd) { return $null }
-    $ok = try { @(& $cmd.Source -c 'import sys; print(1 if sys.version_info >= (3, 11) else 0)' 2>$null) -join "`n" } catch { '' }
+    $ok = try { @(& $cmd.Source -c 'import sys; print(1 if sys.version_info >= (3, 12) else 0)' 2>$null) -join "`n" } catch { '' }
     if ($ok -match '(?m)^1$') { $cmd.Source } else { $null }
 }
 
@@ -592,7 +592,7 @@ try {
 
     # The vendored resolver runs python3 by that name, so both children need it.
     $python = Find-Python
-    if (-not $python) { Write-Host '  skip: no python3 3.11 or later on PATH as python3, which the vendored repo-slug and python suites run' -ForegroundColor DarkGray }
+    if (-not $python) { Write-Host '  skip: no python3 3.12 or later on PATH as python3, which the vendored repo-slug and python suites run' -ForegroundColor DarkGray }
     else {
         $slugRun = Invoke-Child $Pwsh @('-NoProfile', '-File', (Join-Path $repo 'tests/repo-slug/Get-RepoSlug.Tests.ps1'))
         Assert-Child $slugRun 'the vendored repo-slug suite loads the flat resolver, not the decoy in the consumer''s bin/'

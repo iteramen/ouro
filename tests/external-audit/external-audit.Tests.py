@@ -20,7 +20,7 @@ back to it; the rows that exercise --cwd itself, and diff mode's own two-commit 
 
 stdlib only, like bin/*.py. Run: python3 tests/external-audit/external-audit.Tests.py
 """
-import atexit, json, os, pathlib, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, time
+import atexit, importlib.util, json, os, pathlib, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, time
 
 # Two levels up is the plugin root (the driver under bin/) or, once vendored, the scripts dir
 # itself, where the vendor copies it flat.
@@ -944,10 +944,10 @@ check(f"the same name yields the same segment on every run ({jurgen}, {jurgen_ag
 # --- a .cmd shim runs through cmd.exe, which reads &|<>^% in an unquoted argument as its own
 # syntax, so such an argument is refused before the shim starts ------------------------------
 if os.name == "nt":
-    for ch in "&|<>^%":
+    for ch in "&|<>^%\r\n":
         stub_dir, record, env_extra = make_stub(reply_text=APPROVE_REPLY, exit_code=0)
         r = run_driver(BASE_ARGS + ["--model", f"a{ch}b"], stub_dir, env_extra, cwd=REPO)
-        check(f"a .cmd shim given --model 'a{ch}b' is refused, naming the argument and the character, and never runs",
+        check(f"a .cmd shim given --model {'a' + ch + 'b'!r} is refused, naming the argument and the character, and never runs",
               r.returncode == 1 and repr(f"a{ch}b") in r.stderr and repr(ch) in r.stderr and not record.exists())
 else:
     print("  skip: a .cmd or .bat shim resolves only on Windows, so the cmd.exe metacharacter refusal is untested here")
@@ -1380,6 +1380,85 @@ check("a token the content already holds is redrawn, in both modes",
       rc == 0 and len(ends) == 2 and all(e.endswith(" bbbb ===") for e in ends))
 rc, ends = drawn_end_lines("aaaa,bbbb", "x zzzz y")
 check("control: with no collision the first draw is kept", rc == 0 and len(ends) == 2 and all(e.endswith(" aaaa ===") for e in ends))
+
+
+# --- in process: the cmd.exe refusal's set, git run by its resolved path and refused through a
+# .cmd shim, and the grok home's two refusals (each reachable here without Windows or a second
+# account, by standing in for what decides it) ----------------------------------------------
+_spec = importlib.util.spec_from_file_location("external_audit_inproc", DRIVER)
+ea = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ea)
+for ch in "&|<>^%\r\n":
+    check(f"cmd_meta names the argument holding {ch!r} and the character", ea.cmd_meta(["plain", f"a{ch}b"]) == (f"a{ch}b", ch))
+check("control: cmd_meta finds nothing in plain arguments", ea.cmd_meta(["--model", "m1", "HEAD~1..HEAD"]) is None)
+_real_which, _real_sh, _ran = ea.shutil.which, ea.sh, []
+try:
+    ea.sh = lambda *a, cwd=None: _ran.append(list(a)) or ""
+    ea.shutil.which = lambda name: "/opt/git/bin/git" if name == "git" else None
+    ea.git("status", "--porcelain")
+    check("git runs by the path shutil.which resolved, not by its bare name", _ran and _ran[-1][0] == "/opt/git/bin/git")
+    ea.shutil.which = lambda name: "C:/Git/cmd/git.cmd" if name == "git" else None
+    for bad in ("main&calc", "a\nb", "a\rb"):
+        try:
+            ea.git("diff", bad)
+            raised = ""
+        except RuntimeError as e:
+            raised = str(e)
+        check(f"a git found only as git.cmd refuses the argument {bad!r}, naming it, and runs nothing",
+              repr(bad) in raised and "cmd.exe" in raised and _ran[-1][-1] != bad)
+    ea.git("diff", "HEAD~1..HEAD")
+    check("control: through git.cmd a plain argument runs, by the shim's path", _ran[-1][:2] == ["C:/Git/cmd/git.cmd", "diff"])
+    # main's own git calls go through git(): the default cwd's read runs by the shim's path, and a diff range holding a
+    # metacharacter is refused before the diff runs
+    _ran.clear()
+    _argv, _tmpdir = sys.argv, tempfile.tempdir
+    sys.argv, tempfile.tempdir = [str(DRIVER), "--range", "main&calc", "--goal", "g", "--cli", "grok"], str(PARENT_TMP)
+    try:
+        rc = ea.main()
+    finally:
+        sys.argv, tempfile.tempdir = _argv, _tmpdir
+    check("main through a git.cmd shim: the default cwd's git call runs by the shim's path, and a diff range holding & is refused before the diff",
+          rc == 1 and _ran and all(c[0] == "C:/Git/cmd/git.cmd" for c in _ran) and not any("diff" in c for c in _ran))
+finally:
+    ea.shutil.which, ea.sh = _real_which, _real_sh
+check("no git call in the driver runs by its bare name: each goes through git()", 'sh("git"' not in DRIVER.read_text(encoding="utf-8"))
+if os.name != "nt":
+    src = pathlib.Path(tempfile.mkdtemp(prefix="grok-src-", dir=PARENT_TMP))
+    (src / "auth.json").write_text("{}", encoding="utf-8")
+    old_home = os.environ.get("GROK_HOME")
+    os.environ["GROK_HOME"] = str(src)
+    try:
+        def grok_env(session):
+            try:
+                ea.GrokAdapter().env(session)
+                return ""
+            except RuntimeError as e:
+                return str(e)
+        foreign = pathlib.Path(tempfile.mkdtemp(prefix="grok-foreign-", dir=PARENT_TMP))
+        _getuid = ea.os.getuid
+        ea.os.getuid = lambda: _getuid() + 1
+        try:
+            check("a session or grok home another account owns is refused", "owned by another account; refused" in grok_env(foreign))
+        finally:
+            ea.os.getuid = _getuid
+        planted = pathlib.Path(tempfile.mkdtemp(prefix="grok-planted-", dir=PARENT_TMP))
+        (planted / "grok-home").mkdir()
+        (planted / "grok-home" / "config.toml").write_text("planted = true\n", encoding="utf-8")
+        os.chmod(planted / "grok-home", 0o777)
+        why = grok_env(planted)
+        check("a grok home writable by other accounts that holds a file the copy does not seed is refused, naming it",
+              "was writable by other accounts" in why and "config.toml" in why and (planted / "grok-home" / "config.toml").read_text(encoding="utf-8") == "planted = true\n")
+        kept = pathlib.Path(tempfile.mkdtemp(prefix="grok-kept-", dir=PARENT_TMP))
+        (kept / "grok-home").mkdir(mode=0o700)
+        (kept / "grok-home" / "sessions.json").write_text("{}", encoding="utf-8")
+        check("control: a 0700 grok home with grok's own session file is prepared for --resume", grok_env(kept) == "")
+    finally:
+        if old_home is None:
+            os.environ.pop("GROK_HOME", None)
+        else:
+            os.environ["GROK_HOME"] = old_home
+else:
+    print("  skip: the grok home's owner and mode refusals are POSIX-only, as env() applies them")
 
 
 print("all external-audit cases pass" if not failures else f"{failures} failure(s)")

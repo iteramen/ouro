@@ -10,7 +10,7 @@ committer identity naming an agent (`claude`, `anthropic`, `copilot`, `codex`, `
 `user.email=`, `git config user.name` or `user.email`, or a `GIT_AUTHOR_*` or `GIT_COMMITTER_*`
 assignment; `--author="$AUTHOR"` passes, since a variable names nobody.
 
-Stdlib only; python3 3.11+. The recorded events under tests/hooks/guard-commit/ are its test.
+Stdlib only; python3 3.12+. The recorded events under tests/hooks/guard-commit/ are its test.
 """
 import os
 import re

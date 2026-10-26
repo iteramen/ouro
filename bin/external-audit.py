@@ -27,8 +27,9 @@ stderr line; without --cwd the default comes from git rev-parse, and with no git
 working directory.
 
 Prints the session id (round 1 mints one) and the parsed verdict; the id to pass to --resume next
-round is always the one on the "resume with" line, not necessarily this one. Exits 0 on APPROVE, 2
-on REVISE, 1 on a transport/parse failure, a usage error, an unknown or missing --cli, --resume
+round is always the one on the "resume with" line, not necessarily this one. Exits 0 on APPROVE
+without a stop, 2 on REVISE or a meaningful diff-mode acceptance-unrunnable stop (even with
+APPROVE), 1 on a malformed stop, transport/parse failure, usage error, unknown or missing --cli, --resume
 without --digest (or the reverse), not exactly one of --range and --claims, an empty claim set or an
 empty diff, diff mode with no git on PATH, a CLI not found on PATH, or a CLI found as a .cmd or
 .bat shim with an argument holding one of &|<>^% (cmd.exe's own syntax; refused before it
@@ -64,12 +65,9 @@ import time
 import uuid
 from pathlib import Path
 
-# tomllib is not used here, but the floor is shared with every other bin/*.py: a script that
-# imports nothing 3.11-only still needs the fleet's one interpreter contract, and importing an
-# f-string-in-f-string or another 3.11+ construct below on an older python dies with a traceback
-# that does not say what to install.
-if tuple(sys.version_info[:2]) < (3, 11):
-    sys.exit(f"external-audit.py needs Python 3.11+; this python is {sys.version_info[0]}.{sys.version_info[1]}")
+# Use the fleet's shared interpreter floor before running the audit.
+if tuple(sys.version_info[:2]) < (3, 12):
+    sys.exit(f"external-audit.py needs Python 3.12+; this python is {sys.version_info[0]}.{sys.version_info[1]}")
 
 # Critiques quote the diff verbatim (arrows, dashes); a cp1252 console must not crash the
 # verdict printout after the round has already been paid for.
@@ -93,7 +91,7 @@ VERDICT_CONTRACT = (
     '"claim": "<one-sentence defect statement>", '
     '"evidence": "<file:line, quoted text, or reasoning>", '
     '"probe": "<a concrete input or scenario that demonstrates it, when one exists>", '
-    '"in_scope_claim": true}]}'
+    '"in_scope_claim": true}], "stop": null}'
 )
 
 CLAIMS_LENS = (
@@ -121,6 +119,34 @@ CLAIMS_VERDICT_CONTRACT = (
 def sh(*args: str, cwd: str | None = None) -> str:
     return subprocess.run(list(args), capture_output=True, text=True, encoding="utf-8",
                           errors="replace", check=False, cwd=cwd).stdout
+
+
+# What cmd.exe reads as its own syntax in an argument list2cmdline leaves unquoted (it quotes only
+# whitespace), % expanded even inside quotes, and the line breaks that end its command line there.
+CMD_META = "&|<>^%\r\n"
+
+
+def cmd_meta(argv: list[str]) -> tuple[str, str] | None:
+    """(argument, character) for the first argument holding one of CMD_META, else None."""
+    for arg in argv:
+        ch = next((c for c in arg if c in CMD_META), None)
+        if ch:
+            return arg, ch
+    return None
+
+
+def git(*args: str, cwd: str | None = None) -> str:
+    """git's stdout, run by the path shutil.which resolves (Windows starts a bare name only as
+    .exe, so a git.cmd shim is otherwise never found) and, for a .cmd or .bat shim, refused when
+    an argument holds what cmd.exe would interpret: RuntimeError naming it. The caller has
+    checked that git is on PATH."""
+    exe = shutil.which("git")
+    if exe is None:
+        raise RuntimeError("'git' not found on PATH")
+    if os.path.splitext(exe)[1].lower() in (".cmd", ".bat") and (hit := cmd_meta(list(args))):
+        raise RuntimeError(f"the git argument {hit[0]!r} holds {hit[1]!r}, which cmd.exe would interpret when it runs {exe}; refused"
+                           + ("; for a parent commit write `~1` in place of `^`" if hit[1] == "^" else ""))
+    return sh(exe, *args, cwd=cwd)
 
 
 def _artifact_user() -> str:
@@ -188,7 +214,7 @@ def _default_cwd() -> str | None:
     than refusing."""
     if shutil.which("git") is None:
         return None
-    return sh("git", "rev-parse", "--show-toplevel").strip() or None
+    return git("rev-parse", "--show-toplevel").strip() or None
 
 
 def _fence_token(content: str) -> str:
@@ -229,6 +255,10 @@ def build_prompt(diff: str, goal: str, lens: str, digest: str | None, round_no: 
     token = _fence_token(diff)
     parts += [_data_rule("DIFF", token), "",
               f"=== DIFF {token} ===", diff, f"=== END DIFF {token} ===", "",
+              "If required executable acceptance cannot be verified by your read-only capabilities or "
+              "the supplied genuine validation evidence, return stop with reason 'acceptance unrunnable' "
+              "and a meaningful question naming the missing proof/constraint. Do not make that execution "
+              "block a code critique or request an empty fix. Otherwise stop is null.", "",
               "Reply with ONLY this JSON object - no prose, no fences:", VERDICT_CONTRACT]
     return "\n".join(parts)
 
@@ -388,9 +418,19 @@ class GrokAdapter(Adapter):
             d.mkdir(mode=0o700, exist_ok=True)
             # mkdir leaves an existing directory's mode, and another account can create one first.
             if os.name != "nt":
-                if os.lstat(d).st_uid != os.getuid():
+                st = os.lstat(d)
+                if st.st_uid != os.getuid():
                     raise RuntimeError(f"{d} is owned by another account; refused")
-                os.chmod(d, 0o700)
+                os.chmod(d, 0o700)  # before the listing below, so nothing is planted between the two
+                # One the user owns but left writable to others may hold a file another account
+                # planted: any entry the copy below does not replace (a config.toml where the
+                # user's own grok home has none) is refused, not cleared, since grok's own session
+                # files for --resume live there too.
+                copied = {n for n in self.SEEDED if (source / n).is_file()}  # what the copy below replaces
+                planted = sorted(p.name for p in d.iterdir() if p.name not in copied) if d == grok_home and st.st_mode & 0o022 else []
+                if planted:
+                    raise RuntimeError(f"{d} was writable by other accounts and holds {', '.join(planted)}, which grok would read; "
+                                       f"refused: remove the directory, or check those files and run again")
         for name in self.SEEDED:
             if (source / name).is_file():
                 (grok_home / name).unlink(missing_ok=True)  # a planted symlink would take the copy elsewhere
@@ -625,7 +665,11 @@ def main() -> int:
         cap_note = "\n[... claims truncated at 100 KB - split the claim set ...]\n"
     else:
         # -c core.quotepath=false: otherwise git C-quotes a diff header path holding a non-ASCII byte.
-        subject = sh("git", "-c", "core.quotepath=false", "diff", args.range, "--", *args.paths, cwd=cwd)
+        try:
+            subject = git("-c", "core.quotepath=false", "diff", args.range, "--", *args.paths, cwd=cwd)
+        except RuntimeError as e:
+            print(f"external-audit: {e}; nothing started", file=sys.stderr)
+            return 1
         if not subject.strip():
             print(f"external-audit: empty diff for range {args.range!r}", file=sys.stderr)
             return 1
@@ -660,20 +704,17 @@ def main() -> int:
     # Windows runs a .cmd or .bat through cmd.exe, which reads these as its own syntax in an
     # argument list2cmdline leaves unquoted (it quotes only whitespace) and expands % even inside
     # quotes: an argument holding one would be cut there and the rest run as a command.
-    if os.path.splitext(resolved)[1].lower() in (".cmd", ".bat"):
-        for arg in cmd:
-            meta = next((ch for ch in arg if ch in "&|<>^%"), None)
-            if meta:
-                print(f"external-audit: the argument {arg!r} holds {meta!r}, which cmd.exe would interpret "
-                      f"when it runs {resolved}; refused, nothing started", file=sys.stderr)
-                return 1
+    if os.path.splitext(resolved)[1].lower() in (".cmd", ".bat") and (hit := cmd_meta(cmd)):
+        print(f"external-audit: the argument {hit[0]!r} holds {hit[1]!r}, which cmd.exe would interpret "
+              f"when it runs {resolved}; refused, nothing started", file=sys.stderr)
+        return 1
 
     # In both modes whenever git is on PATH: claims mode makes no git call to build its subject,
     # but --cwd may still sit inside a repo, and outside one this is silent (sh() does not check
     # the exit code). Only claims mode reaches here without git.
     dirty_before = None
     if has_git:
-        dirty_before = sh("git", "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
+        dirty_before = git("-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
     else:
         print("external-audit: 'git' not found on PATH; the working-tree check is skipped", file=sys.stderr)
     # Registered before env() runs, so a copy that fails half way is cleaned too; atexit also runs
@@ -761,8 +802,8 @@ def main() -> int:
         print(f"external-audit: could not write the prompt to {adapter.binary}'s stdin ({stdin_errors[0]}) "
               "- failed round, re-run it", file=sys.stderr)
         return 1
-    dirty_after = dirty_before if dirty_before is None else sh(
-        "git", "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
+    dirty_after = dirty_before if dirty_before is None else git(
+        "-c", "core.quotepath=false", "status", "--porcelain", cwd=cwd)
     if dirty_after != dirty_before:
         changed = sorted(set(dirty_after.splitlines()) ^ set(dirty_before.splitlines()))
         # write tools are disallowed, so this is usually the author editing during a parallel
@@ -808,6 +849,15 @@ def main() -> int:
     elapsed = int(time.time() - started)
     print(f"VERDICT: {verdict.get('verdict')}   ({elapsed}s; "
           f"narration: {stdout_path})   (resume with: --cli {args.cli} --resume {reported_session} --digest <triage.md>)")
+
+    if not claims_mode and verdict.get("stop") is not None:
+        stop = verdict["stop"]
+        if (not isinstance(stop, dict) or stop.get("reason") != "acceptance unrunnable"
+                or not isinstance(stop.get("question"), str) or not stop["question"].strip()):
+            print("external-audit: malformed acceptance stop; no approval", file=sys.stderr)
+            return 1
+        print("  ACCEPTANCE UNRUNNABLE: " + stop["question"])
+        return 2  # A meaningful block is never APPROVE, including with no files_read.
 
     if claims_mode:
         claims = verdict.get("claims", []) or []

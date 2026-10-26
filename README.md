@@ -1,6 +1,6 @@
 # ouro
 
-The issue-driven agent loop, as a Claude Code plugin. You write the issue. A program takes it
+The issue-driven agent loop, with Claude Code and Codex runtimes. You write the issue. A program takes it
 from `agent-ready` to a merged pull request: worktree, build, gates, review, fix rounds, checks,
 merge. It asks a model only at the judgment points, and it stops the moment the spec lies to it.
 
@@ -11,13 +11,19 @@ the loop it ships.
 ## Does it fit your repository?
 
 - Work arrives as GitHub Issues, and a pull request's checks are what decides a merge.
-- CI runs on every pull request. The checks are the one gate run the driver merges on, and
-  nothing stands in for them: a repository without CI has no loop to close.
+- CI runs on every pull request and its checks remain required before automatic merge.
+  Normal BUILD delivery also needs leased execution proof against committed inputs; a repository
+  without CI keeps the merge manual.
 - One person, or a short list, answers questions. They rule by comment; nobody edits a running
   spec from the side.
 - Your verify commands fit one line each: a test suite, a lint, a build. Those become the
   binding's gates, and CI runs them on every pull request.
-- The machines that run it have `gh`, `git`, `pwsh` 7, `python3` 3.11 or newer, and Claude Code.
+- The machines that run it have `gh`, `git`, `pwsh` 7, `python3` 3.12 or newer, and the selected worker CLI: Claude Code or Codex.
+
+Normal BUILD delivery requires native Linux for final command-execution proof. Windows supports
+file-only Codex triage; normal delivery and caller validation wait until a supported lifecycle
+boundary is available. WSL also waits. Direct-lane gates and read-only checkpoints retain their
+documented class rules.
 
 If an issue cannot be written so that a stranger could execute it without asking, ouro will not
 execute it either. That is the feature.
@@ -34,7 +40,7 @@ flowchart TD
   issue([an issue is filed]):::person --> triage{{TRIAGE node}}:::model
   triage -->|"agent-ready"| wt
   triage -->|"needs-ruling: a question with a recommendation"| ruling([an approver answers in a comment]):::person
-  ruling -->|"/ouro:triage N again"| triage
+  ruling -->|"triage N again"| triage
   subgraph run ["python3 bin/ouro run N  (re-run it after a merge, a ruling or a crash: it resumes)"]
     direction TB
     wt[worktree cut from the default branch]:::driver --> build{{BUILD node}}:::model
@@ -47,18 +53,22 @@ flowchart TD
     checks --> decide{ship.policy}:::driver
   end
   decide -->|"merge-on-green with the class in unattended_classes, or trivial-merge on a trivial issue"| landed[merged as ship.merge says, branch removed, follow-ups filed]:::driver
-  decide -->|"otherwise, or manual steps"| ready([Ready for merge: a person merges]):::person
+  decide -->|"otherwise, manual steps, or no workflow checks the PR"| ready([Ready for merge: a person merges]):::person
   run -.->|"a stop: open decision, dead anchor, review cap, gate uncovered"| halt[needs-ruling]:::halt
   halt --> ruling
 ```
 
 Yellow is a person. Blue is the driver, fixed code that runs the same way every time. Green is a
-model node, a `claude -p` call with a JSON schema for its answer, a tool allowlist and
-`--permission-mode dontAsk`. Red is a stop: the driver posts what it needs and hands the issue
+model node, a fresh harness call with a structured answer, declared capabilities and a timeout.
+The developer binding selects Claude Code or Codex; the driver owns the transitions in either case. Red is a stop: the driver posts what it needs and hands the issue
 back as `needs-ruling`. Three fix rounds at most; a fourth failure is the `review cap` stop,
 which names the branch and the pull request for a person's round.
 
 ## Install
+
+For Claude Code, install the plugin below. For Codex, use the
+[per-developer installation](#codex-install-once-per-developer). Both use the same repository
+binding and onboarding installer.
 
 1. The plugin:
 
@@ -77,7 +87,7 @@ which names the branch and the pull request for a person's round.
    | `.claude/ouro.toml`, the binding, from `templates/ouro.toml.example`: the slug and default branch of the repository this clone's `origin` names (a fork's clone is onboarded to the fork) and the ruling approver, filled from `gh` | when the repository has none | every ouro command reads it first and refuses without it |
    | `.claude/worktrees/` and `.claude/ouro.local.toml` in `.gitignore` | unless already ignored | runs build in worktrees there; the overlay holds per-machine values |
    | the labels on the repository: the contract's set below, created or updated with `--force`, and your own `[labels]`, only where missing and never with `--force` | when `gh` is signed in and the slug names a repository | the states are the protocol; the team's labels are the team's |
-   | the CI workflow, .github/workflows/ci.yml, which runs your `[[gate]]` list through `actions/gates` | `-CI` | the pull request's checks are the gate run |
+   | the CI workflow, .github/workflows/ci.yml, which runs your `[[gate]]` list through `actions/gates` | `-CI` | the pull request's checks are the gate run; with no workflow of yours on `pull_request` either, each run runs every gate itself and leaves the merge to you, and nothing checks a pull request pushed by hand |
    | the docs-freshness workflow | `-DocsFreshness` | the docs gate on every pull request |
    | the issue form, its chooser config and the intake workflow under .github/ | `-IssueIntake` | issues arrive in the shape triage reads |
 
@@ -120,28 +130,139 @@ which names the branch and the pull request for a person's round.
 `claude plugin update ouro@ouro`; it applies after a restart. Consumers pin by tag;
 `CHANGELOG.md` says what each release moved.
 
+### Codex: install once per developer
+
+Keep an ouro checkout in a stable location, install Codex CLI 0.163.0 or newer, and sign in with
+`codex login`. From the ouro checkout:
+
+```bash
+python3 bin/ouro-developer.py install --backend codex
+python3 bin/ouro-developer.py inspect --check
+```
+
+The installer writes four skills under `~/.agents/skills` and a launcher beside the developer
+binding. Use `$ouro-run`, `$ouro-triage`, `$ouro-weekly` and `$ouro-init` in Codex. Skills call the
+same driver as Claude's commands; selecting Codex workers requires the developer binding, not
+merely installing skills. An existing binding is preserved: edit it explicitly to change workers.
+Start a fresh Codex session if its skill list has not refreshed after installation.
+Re-run install to update owned files; uninstall removes unmodified owned files and preserves
+configuration. It refuses unrelated or personally edited files. `--home <path>` tests installation
+in an isolated home. No consumer repository needs Codex skill files.
+
+Set environment variables required by a repository before starting Codex. Claude Code's settings
+`env` map is not imported; this includes `OURO_FORBIDDEN_TOKENS` when a gate uses the
+[private token list](#the-private-token-list).
+
+On Windows, select an existing list for future processes with PowerShell:
+
+```powershell
+$ouroTokenList = Join-Path $HOME '.config/ouro/forbidden-tokens.txt'
+if (-not (Test-Path -LiteralPath $ouroTokenList -PathType Leaf)) { throw 'Select an existing token list.' }
+[Environment]::SetEnvironmentVariable('OURO_FORBIDDEN_TOKENS', $ouroTokenList, 'User')
+$env:OURO_FORBIDDEN_TOKENS = $ouroTokenList
+```
+
+Use your list's actual path if it lives elsewhere. This sets a path and leaves the file unchanged.
+Restart the Codex app to inherit the per-user variable; a new session inside an existing app
+process can retain the old environment. Other hosts set the same variable in their launch environment.
+
+The binding defaults to `~/.config/ouro/developer.toml`, or under `XDG_CONFIG_HOME` when set:
+
+```toml
+[runtime]
+backend = "codex"
+# effort = "high"
+
+[runtime.models]
+builder = "default"
+builder_trivial = "default"
+reviewer = "default"
+```
+
+An explicit account-served model may replace `default`; the latter uses Codex's built-in default.
+The worker intentionally ignores personal Codex configuration and project config layers, so
+unrelated MCP servers, plugins and hooks are not inherited. Managed requirements still apply.
+Repository policy stays in `.claude/ouro.toml`. Full configuration precedence and node permissions
+are in `docs/binding.md`. Authentication, models and required capabilities are checked before tracker
+mutations. TRIAGE requests file-only readiness: a genuine MCP file read, with native tools disabled,
+without unused command-sandbox, network or Git probes. Its trusted MCP orchestration host remains
+available; only the bridge's list/read/search operations are granted. A file-only result
+does not admit commands, probes or edits. Delivery runs and `inspect --check` keep full readiness.
+Codex proves advertised Git reads in the same sandbox while preserving
+configured identity includes and ignore rules; unprovable worktree transitions refuse before setup.
+Full command readiness also requires a generated unrestricted loopback nonce receipt and explicit sandbox denial.
+The generated probe uses an immutable encoded argument through the configured CLI launcher;
+refusals identify the phase, launcher and receipt without printing unknown wrapper output.
+Windows command-capable workers remain unavailable until a supported implementation and
+disabled-network policy are established. File-only requests also refuse if the outer read-only CLI
+or direct MCP bridge is unavailable; no setup or sandbox fallback is selected. Ouro preserves
+configuration, sandbox selection and host policy. See the
+[Git capability checks](docs/binding.md#git-capability-readiness) and
+[native controls and limits](docs/binding.md#runtime-capability-boundary).
+The opt-in `tests/runtime/live.py` exercises generated public fixtures;
+it does not send a consumer repository or tracker to a model.
+
+### Optional board connection
+
+Developer settings also accept `[coordination]` with required `endpoint` (HTTPS), `person` and
+`forum`, plus `credential_env` (default `MOMENTUS_API_KEY`). The key lives only in the invoking
+environment and is removed from Claude/Codex workers, external readers and their bridge/tool children.
+Omitting the table disables coordination; a missing key makes no network calls.
+
+Issue runs check advisory Momentus claims before branch or tracker writes. A known same-issue
+claim refuses with its holder and thread; only the invoking person's explicit `--override-claim`
+records an override. Review and shipping permissions still apply. Resume reuses the repository
+session's claim, retains it while waiting, and closes it on an observed merge or terminal stop.
+Board outages and incomplete discovery produce a sanitized notice and continue without asserting
+that the board is clear. Check-then-post is advisory, not atomic exclusion.
+See [the claim lifecycle and recovery procedure](docs/contract.md#optional-issue-claims) and
+[developer configuration and protocol limits](docs/binding.md#optional-advisory-board-connection).
+Direct pushes also check actual changed paths and policy-derived areas against other claims;
+fixes and reverts carry their checked heads and outcomes on the owned thread. The prepared-change
+adapter is reusable without adding an issue-less mode. Fixture checks establish behavior; they
+imply no live board verification. The invoking lead reports retained session, test, review, CI,
+merge, elapsed-time and available usage evidence after landing; unreported cost remains unknown.
+
 ## Use it
+
+The entry points accept the same workflow arguments:
+
+| Task | Claude Code | Codex |
+|---|---|---|
+| Onboard a repository | `/ouro:init` | `$ouro-init` |
+| Grade an issue | `/ouro:triage N` | `$ouro-triage N` |
+| Build or resume an issue | `/ouro:run N` | `$ouro-run N` |
+| Print weekly outcomes | `/ouro:weekly` | `$ouro-weekly` |
+| Print the next queue wave | `/ouro:weekly compile` | `$ouro-weekly compile` |
 
 1. **File the issue.** One deliverable, a `Doc impact on close:` line (`none` is a value), and
    anchors into the code: `path — Symbol — "a verbatim fragment"`. The intake workflow labels it
    `needs-triage`.
-2. **`/ouro:triage N`.** The TRIAGE node reads the body against the code and answers with a
-   verdict comment and the labels; on a promotion the `Size:`, `Flow:` and `Doc impact on
+2. **Grade it:** `/ouro:triage N` or `$ouro-triage N`. The TRIAGE node reads the body against
+   the code and answers with a verdict comment and the labels; on a promotion the `Size:`, `Flow:` and `Doc impact on
    close:` lines are written into the body where they are missing. PROMOTE means `agent-ready`.
    A question it cannot settle becomes `needs-ruling` with a recommendation attached.
 3. **Rule when asked.** An approver answers in a comment on the issue, then runs
-   `/ouro:triage N` again.
-4. **`/ouro:run N`.** The driver takes the issue to a landed change, or to a stop that names what
-   it needs. Run it again to resume, from any machine with the binding.
-5. **`/ouro:weekly`** prints the outcome and quality tables of the last cohorts, and posts
-   them with `--post`; **`/ouro:weekly compile`** prints the next wave of the queue.
+   triage again through the same entry point.
+4. **Build it:** `/ouro:run N` or `$ouro-run N`. The driver takes the issue to a landed change,
+   or to a stop that names what it needs. Run it again to resume, from any machine with the binding.
+5. **Check the queue:** `/ouro:weekly` or `$ouro-weekly` prints the outcome and quality tables
+   of the last cohorts, and posts them with `--post`; add `compile` to print the next wave.
 
 | Command | Does |
 |---|---|
-| `run N [--part k] [--dry-run]` | One `agent-ready` issue to a landed change. Each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. |
+| `run N [--part k] [--dry-run] [--validate] [--recover-build PATH]` | One `agent-ready` issue to a landed change. Each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. `--validate` executes pending approved validation in the caller's context. |
 | `triage N [--dry-run]` | The verdict comment, the `Size:`, `Flow:` and `Doc impact on close:` lines and the labels for one issue. |
 | `weekly [--post]` | The outcomes and quality tables of `bin/loop-outcomes.py`. |
 | `compile` | The next wave of the queue. |
+
+For a rejected fix BUILD that left partial edits, inspect the files and explicitly select each
+one with `run N --recover-build PATH --validate` (repeat the path flag). The driver preserves
+the dirty original and its evidence, prints a private clean checkout, and offers only those
+selected files as BUILD references. Resume from the printed checkout through the normal Git
+branch, validation, review and fix caps. Recovery currently needs native Linux process observation;
+known live workers and active or uncertain caller leases refuse. See the
+[recovery contract](docs/contract.md#interrupted-build-recovery) and [runtime details](docs/binding.md#runtime-capability-boundary).
 
 Each skill is `python3 <ouro>/bin/ouro <command>` from the repository root, and relays its exit
 code: 0 is landed, or waiting on a person or on running checks; 1 a driver error; 2 refused,
@@ -196,9 +317,12 @@ for an ordinary executed change; `full` for what runs the checks, gate code, hoo
 machinery, the binding schema, migrations, flag defaults and authorization. The diff can tighten
 the class; it never loosens it.
 
-**A path under `.claude/` is a manual step.** The harness refuses the build node an edit there.
+**A harness configuration path is a manual step.** Paths under `.claude/`, `.codex/`,
+`.agents/` and `.aws/` at the worktree root are protected by the Codex bridge; `.git/` remains
+driver-owned. Configuration files inside ordinary test fixtures remain editable.
 Triage names such paths with a `Manual: <path>` line, the build returns the edit it would make,
-the pull request lists the steps, and a run with manual steps never merges itself.
+the pull request lists the steps, and a run with manual steps never merges itself. Denied edits
+retain this handoff across case, junction and Windows short-path aliases.
 
 ## What a run posts
 
@@ -247,7 +371,7 @@ apply is `docs/binding.md`; this is the map.
 | `ship.direct` | globs | none, the lane off | the files the direct lane may push to the default branch |
 | `ship.forbidden_check` | `required`, `off` | follows the list's `# protects:` line, or with no list the repository's visibility | whether the hook checks what a session posts against the private token list |
 | `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing |
-| `models.builder` | `opus`, `sonnet`, `haiku`, `fable` | `sonnet` | the BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes |
+| `models.builder` | `opus`, `sonnet`, `haiku`, `fable` | `opus` | the BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes |
 | `models.builder_trivial` | the same | `sonnet` | the BUILD node on a `trivial` issue |
 | `models.reviewer` | the same | `opus` | the REVIEW node |
 | `rolling_issues.loop_runs` | an issue title | none | the issue `bin/loop-outcomes.py` appends a comment per run to |
@@ -266,32 +390,50 @@ Five judgment nodes; everything between them is code. The map of the layers, the
 each node's tools and answer, and where each protocol fact is written, read and checked is
 [docs/architecture.html](docs/architecture.html).
 
-No node is granted a commit, a push or a tracker write, and a `full` review's Bash has those
-three denied by prefix. BUILD edits the tree; the driver commits
+No node is granted a commit, a push or a tracker write. The REVIEW node gets command probes for
+`standard`/`sized` and `full`/`probe` in a detached worktree, with publishing and commits prohibited;
+`express`/`light` remains read-only in the BUILD worktree. A configured external reader remains
+read-only. BUILD edits the tree; the driver commits
 it under the human who ran it, with the subject BUILD returned and the record the pull request
 carries, from the newest answer. A decision the issue does not settle comes back as a stop.
 BUILD cannot use skills or run arbitrary commands: anything an issue needs run is listed in its
 acceptance, tests or verification section, backticked and starting with a runner the driver
 knows (`python3`, `python`, `pwsh`, `dotnet`, `npm`, `npx`, `pytest`, `bash` or `go test`).
 
+The newest trusted triage and later trusted spec amendments can also name exact commands with a
+whole-line `Acceptance command:` field followed by the command in backticks. Other quoted examples
+add no grants. Missing required executable proof can stop as `acceptance unrunnable`, with the
+missing command/proof and a meaningful question, before a commit or fix round; genuine environment
+blocks retain pending validation. See the [acceptance contract](docs/contract.md).
+
 **Guardrails are three layers, not prompts.** The driver's code holds the order, each node's
 tools, the fix-round cap and the stop conditions. PreToolUse hooks (`hooks/README.md`) refuse an
 unsafe recursive delete or a forced clean, a discard of unstaged work, a stash that can take
 another worktree's entry, a kill by pattern, a commit under an agent's identity, and a post or
 commit carrying a forbidden token. The gates under `bin/`, and the Actions under `actions/` that
-run them in CI, check the protocol whoever followed it: in every class with a pull request the
-checks are the one gate run and the driver runs locally only a gate they skip; the direct lane
-runs its selected gates itself.
+run them in CI, check the protocol whoever followed it. CI supplies the pull request's merge
+checks. The driver runs selected gates the checks skip and establishes committed-input BUILD
+proof through its leased validator. Additional observed worker commands require explicit
+`--validate` and the invoking allowlist before caller execution. The direct lane runs its
+selected gates itself.
 
 **No state between calls.** Every call rereads the issue, the branch and the pull request, and
 continues from the first step not yet done. A session, a bot or a cron on any host with the
 binding gets the same continuation. A run refuses, before any branch, an issue that another
 branch's open pull request already fixes.
 
+**How ouro builds ouro.** This repository runs the loop on itself. Work starts as an issue that
+triage grades, and `ouro run` takes it to a merge with no person in it: `ship.policy` is
+`merge-on-green` for the express, standard and full classes, behind the REVIEW node's adversarial
+pass and the pull request's checks. Those checks run the fixture suites under `tests/`, each one a
+`[[gate]]`, so a change to a gate is checked by the gates. What the loop cannot settle comes back
+as a question for the owner, and a person cuts each release.
+
 **Skills are thin.** `/ouro:triage`, `/ouro:run` and `/ouro:weekly` bind, run one driver command
 and relay its exit code; `/ouro:init` runs the installer. The knowledge is in the node prompts,
-the contract sections the driver pastes into them, and the repository's own CLAUDE.md and rules,
-which each `claude -p` loads because it runs inside the repository.
+the contract sections the driver pastes into them, and repository instructions. Claude loads its
+native instructions; the Codex adapter supplies root AGENTS.md, CLAUDE.md and .claude/rules text,
+retaining each rule's declared path scope.
 
 **Layout.**
 
@@ -323,7 +465,10 @@ text; it fails closed, exit 1, on a missing or unreadable list or an entry that 
 CI has no list and prints one `SKIP:` line; the check that matters runs on the machines that
 hold it. The hook, which `hooks/hooks.json` registers so that a plugin install runs it with
 `OURO_FORBIDDEN_TOKENS` set in the environment Claude Code starts in, refuses a `gh issue`,
-`gh pr` or `git commit` call whose text or body file matches. A comment line
+`gh pr` or `git commit` call whose text or body file matches. Set the variable in the launch
+environment, or in Claude Code's settings `env` map; Codex does not import that map. The plugin
+sets no such variable, and a Claude session that has none runs the hook under the no-list rule
+below. Installing the Codex skills does not register this interactive hook. A comment line
 `# protects: <owner/repo> ...` in the list names the repositories it guards, and then only a call
 that lands in one (by `repo.slug`, else `origin`, an unresolved one counted in) or names one (a
 `-R`, `--repo` or `GH_REPO` value, or an issue or pull request URL) is checked, so a consumer repository the line does not name needs no binding key;

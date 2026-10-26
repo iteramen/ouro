@@ -64,7 +64,7 @@ $real = Invoke-Gate $Base
 Assert-Equal 0 $real.Code 'the gate over this plugin''s own skills and agents exits 0'
 Assert-Match 'command block\(s\) in \d+ document\(s\): no findings\.' $real.Out 'and reports the block and document count'
 
-# --- fixtures/hazards: one block that fails bash -n, one line per grep rule --------------------
+# --- fixtures/hazards: one block that fails bash -n, at least one line per grep rule -----------
 $hazards = Invoke-Gate (Join-Path $Fixtures 'hazards')
 Assert-Equal 1 $hazards.Code 'the planted findings exit 1'
 # The parse half needs a bash that runs. A runner without one (the Windows CI account has no Git

@@ -13,7 +13,7 @@ name: CI
 # runner: that routes an honest fork away from a self-hosted machine and is no security boundary
 # -- a pull_request run uses the fork's own copy of this file.
 #
-# The runner needs pwsh, and python3 3.11+ when the Action's setup-python input is turned off (see
+# The runner needs pwsh, and python3 3.12+ when the Action's setup-python input is turned off (see
 # actions/gates/action.yml in the ouro plugin).
 
 on:

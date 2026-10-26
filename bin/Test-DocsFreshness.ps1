@@ -6,7 +6,7 @@
     Gate mode exits 1 on a blocking finding. Sweep mode adds S9 (external-URL
     liveness, network) and exits 0 on any finding. Both stop before the scan when a
     binding read this gate must make fails: a repo that declares a binding and has
-    ouro-binding.py beside this script needs python3 3.11+ on PATH.
+    ouro-binding.py beside this script needs python3 3.12+ on PATH.
 
     Every repo-specific value is read from the binding's [docs] table unless the caller
     passed it explicitly, in which case the parameter wins. A key the binding does not
@@ -14,8 +14,8 @@
     with no ouro-binding.py beside this script, runs entirely on the defaults with an INFO
     line saying which -- that is what keeps onboarding at one gate line and zero config. A
     repo that has a binding and the tool, with no python3 on PATH, is a configuration error
-    and stops the run naming it, as a python3 older than 3.11 already does: the first binding
-    read throws with ouro-binding.py's Python 3.11+ message. Note an empty list in
+    and stops the run naming it, as a python3 older than 3.12 already does: the first binding
+    read throws with ouro-binding.py's Python 3.12+ message. Note an empty list in
     [docs] means EMPTY, not "use the default": declaring `exclude = []` scans everything.
 
     Signals: S1 dead markdown link / HTML href, S2 dead heading anchor, S3 dead
@@ -136,7 +136,7 @@ function Get-BlockingSignalSentence {
 
 function Get-InScopeDocs {
     param([string]$Root)
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     # Tracked files only, for the same reason S1/S2/S3 resolve against the index (see
     # Get-TrackedIndex): a doc that is on this disk but not in the repo -- a local
     # graphify-out report, a scratch note -- cannot be fixed by editing the repo and is
@@ -160,7 +160,7 @@ function Test-InScopePath {
 function Get-InScopeHtmlDocs {
     param([string]$Root, [string[]]$Globs = $HtmlGlobs)
     if (-not $Globs) { return }
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     (Get-TrackedIndex -RootFull $rootFull).Files | Where-Object {
         $f = $_
         [bool](@($Globs | Where-Object { $f -like $_ }).Count)
@@ -440,7 +440,7 @@ function Get-CodeSpanCandidates {
 
 function Get-MarkdownLinkFindings {
     param([string]$Root, [string[]]$Docs, [string[]]$IgnoreFiles = @(), [string[]]$IgnoreTokens = @())
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     $trackedIndex = Get-TrackedIndex $rootFull
     foreach ($doc in $Docs) {
         # A `file:` ignore entry exempts the whole file -- Test-Suppressed's token-level
@@ -482,7 +482,7 @@ function Get-MarkdownLinkFindings {
 $HrefPattern = 'href="([^"#][^"]*)"'
 function Get-HtmlHrefFindings {
     param([string]$Root, [string[]]$Docs)
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     $trackedIndex = Get-TrackedIndex $rootFull
     foreach ($doc in $Docs) {
         $full   = Join-Path $rootFull $doc
@@ -532,7 +532,7 @@ function Get-DocHeadingSlugs {
 
 function Get-AnchorFindings {
     param([string]$Root, [string[]]$Docs, [string[]]$IgnoreFiles = @(), [string[]]$IgnoreTokens = @())
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     $trackedIndex = Get-TrackedIndex $rootFull
     foreach ($doc in $Docs) {
         # A `file:` ignore entry exempts the whole file -- see the matching comment in
@@ -644,7 +644,7 @@ function Get-LineReferenceCount {
 
 function Get-CodePathFindings {
     param([string]$Root, [string[]]$Docs, [string[]]$IgnoreTokens, [string[]]$IgnoreFiles = @(), [switch]$Html)
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     # Suffix match because docs commonly reference paths tree-relatively (Sub/Dir/x.md for
     # Top/Sub/Dir/x.md) rather than from the repo root.
     $trackedIndex = Get-TrackedIndex $rootFull
@@ -686,7 +686,7 @@ function Get-CodePathFindings {
 # heuristic, no suppression list), so it blocks like S1-S4 rather than reporting like S9.
 function Get-UnclosedFenceFindings {
     param([string]$Root, [string[]]$Docs)
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     foreach ($doc in $Docs) {
         $full     = Join-Path $rootFull $doc
         $inFence  = $false
@@ -775,7 +775,7 @@ function Get-IndexFindings {
 function Get-BannedReferenceFindings {
     param([string]$Root, [string[]]$Docs, $Banned = $BannedSubstrings)
     if (-not $Banned -or $Banned.Count -eq 0) { return }
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     foreach ($doc in $Docs) {
         $lineNo = 0
         foreach ($line in (Get-Content -LiteralPath (Join-Path $rootFull $doc) -Encoding UTF8)) {
@@ -806,7 +806,7 @@ $ExemptUrlHosts = [ordered]@{
 $ExemptTldPattern = '://[^/]*\.(local|localhost|invalid|test|example)([/:]|$)'
 function Get-ExternalUrlOccurrences {
     param([string]$Root, [string[]]$Docs)
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     foreach ($doc in $Docs) {
         foreach ($pl in (Get-ProseLines -FullPath (Join-Path $rootFull $doc))) {
             foreach ($m in [regex]::Matches($pl.Line, $UrlPattern)) {
@@ -873,7 +873,7 @@ $S10CheckboxPattern = '^\s*[-*+] \[[ xX]\]'
 # test pass). Empty by default -- which paths those are is per-repo.
 function Get-WorkRemainingFindings {
     param([string]$Root, [string[]]$Docs, $Exemptions = $PlanningPaths)
-    $rootFull = (Resolve-Path $Root).Path
+    $rootFull = (Resolve-Path -LiteralPath $Root).Path
     foreach ($doc in $Docs) {
         $exempt = $false
         foreach ($pattern in $Exemptions) { if ($doc -match $pattern) { $exempt = $true; break } }
@@ -932,7 +932,7 @@ if (-not $haveBinding) {
     # nor a fallback: the defaults would stand in for the policy the repo declared.
     $why = if (-not (Test-Path -LiteralPath $bindingFile)) { "no $bindingFile" }
            elseif (-not (Test-Path -LiteralPath $bindingTool)) { 'no ouro-binding.py beside this script' }
-           else { throw "no python3 on PATH, and $bindingFile is a binding: a repo that has one needs python3 3.11+ on PATH, because its [docs] table is read through ouro-binding.py" }
+           else { throw "no python3 on PATH, and $bindingFile is a binding: a repo that has one needs python3 3.12+ on PATH, because its [docs] table is read through ouro-binding.py" }
     Write-Host "INFO - [docs] not read ($why): running on defaults and any explicit parameters"
 } else {
     function Get-BindingDocsValue {
@@ -951,7 +951,7 @@ if (-not $haveBinding) {
         $out = ((@($raw) | Where-Object { $_ -is [string] }) -join "`n").Trim()
         if ($LASTEXITCODE -ne 0) {
             # "no such key" is the undeclared case. Anything else -- an unreadable or invalid
-            # binding, a python below the 3.11 floor -- is a configuration error the caller must
+            # binding, a python below the 3.12 floor -- is a configuration error the caller must
             # see, and ouro-binding.py says which on stderr: the message carries every line, or
             # it ends in an empty colon.
             if ("$raw" -match 'no such key') { return $null }

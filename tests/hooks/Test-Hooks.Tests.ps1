@@ -117,6 +117,18 @@ function Invoke-Hook($Hook, [string]$Stdin, [hashtable]$Env) {
     [pscustomobject]@{ Code = $p.ExitCode; Out = $out.Result; Err = $err.Result }
 }
 
+# Every registered Python hook must refuse an unsupported runtime with the blocking exit.
+foreach ($hook in $hooks) {
+    $scriptPath = @($hook.Args | Where-Object { $_ -match '\.py$' })[0]
+    if (-not $scriptPath) { continue }
+    $scriptJson = ConvertTo-Json -Compress $scriptPath
+    $scriptDirJson = ConvertTo-Json -Compress (Split-Path -Parent $scriptPath)
+    $fake = "import runpy, sys; sys.path.insert(0, $scriptDirJson); sys.version_info = (3, 11, 2, 'final', 0); runpy.run_path($scriptJson, run_name='__main__')"
+    $r = Invoke-Hook ([pscustomobject]@{ Exe = $hook.Exe; Args = @('-c', $fake) }) '' @{}
+    Assert-Equal 2 $r.Code "$($hook.Name): Python 3.11 blocks"
+    Assert-Match 'needs? Python 3\.12\+' $r.Err "$($hook.Name): names the runtime floor"
+}
+
 $platform = if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'darwin' } else { 'linux' }
 $tempSlash = [System.IO.Path]::GetTempPath().TrimEnd('\', '/') -replace '\\', '/'
 $python = (Get-Command python3 -ErrorAction Stop).Source

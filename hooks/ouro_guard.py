@@ -5,11 +5,15 @@ A guard is `python3 hooks/<guard>.py` with a PreToolUse event on standard input.
 the reason on stderr to refuse the call, and 0 to let it run: Claude Code treats every other exit
 as a non-blocking error, so a guard raises nothing it can report instead.
 
-Stdlib only; python3 3.11+.
+Stdlib only; python3 3.12+.
 """
 import json
 import re
 import sys
+
+if tuple(sys.version_info[:2]) < (3, 12):
+    sys.stderr.write(f"ouro guards need Python 3.12+; this python is {sys.version_info[0]}.{sys.version_info[1]}\n")
+    sys.exit(2)
 
 SHELL_TOOLS = ("Bash", "PowerShell")
 

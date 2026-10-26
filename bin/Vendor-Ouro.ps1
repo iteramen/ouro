@@ -283,7 +283,7 @@ foreach ($s in $skipped) { Write-Host "  - $s" }
 $ScriptsDirShown = $ScriptsDir -replace '\\', '/'
 Write-Host "  - .github/workflows/*: point every ouro/bin/ path at $ScriptsDirShown/"
 Write-Host "  - .claude/skills/*: point every <ouro>/bin/ path at $ScriptsDirShown/"
-Write-Host "  - .github/workflows/*: actions/ is not vendored, so a step that uses: the ouro docs-freshness Action becomes an actions/setup-python step (python-version '3.12': reading [docs] needs python3 3.11+, and an older python3 fails the gate with the floor message) and a pwsh step running $ScriptsDirShown/Test-DocsFreshness.ps1 -Mode Gate"
+Write-Host "  - .github/workflows/*: actions/ is not vendored, so a step that uses: the ouro docs-freshness Action becomes an actions/setup-python step (python-version '3.12': reading [docs] needs python3 3.12+, and an older python3 fails the gate with the floor message) and a pwsh step running $ScriptsDirShown/Test-DocsFreshness.ps1 -Mode Gate"
 Write-Host '  - .claude/settings.json (or settings.local.json): remove the ouro marketplace and plugin entries'
 Write-Host '  - .claude/ouro.toml stays; skills read it from the repo root either way'
 # The values are printed, not cited: the example binding is not in the copy plan, and the line

@@ -11,7 +11,7 @@
 
     It fetches origin's default branch and prints what the base gained since the branch forked.
     Where the base gained nothing it stops there, exit 0, and says so: nothing is rewritten and
-    step 4 pushes plainly. Otherwise, by the answer:
+    Push-Branch.ps1 pushes plainly. Otherwise, by the answer:
 
       merge   `git merge origin/<default> --no-edit`. A conflict stops with the conflicted paths,
               the merge left in the tree for the session to resolve, build, test and commit (or
@@ -23,7 +23,7 @@
               hold here: git refuses one branch in two worktrees, and this runs on the branch's
               own.) Then a backup branch is
               named at the current tip (`backup/<branch>-<timestamp>`), the branch is rebased onto
-              origin's default branch, and the lease for step 4 is printed: origin's tip, or
+              origin's default branch, and the lease for Push-Branch.ps1 is printed: origin's tip, or
               `none` where origin had no branch. A rebase that stops leaves git's message and the
               lease in the stop line; `git rebase --abort` returns to the tip the backup holds.
 
@@ -70,7 +70,7 @@ function Invoke-SyncBranch {
     Write-Output "the base gained since branching ($($gained.Count)):"
     foreach ($g in $gained) { Write-Output "  $g" }
     if ((Invoke-Native git @('merge-base', '--is-ancestor', $base, 'HEAD')).Code -eq 0) {
-        Write-Output 'the base gained nothing - no sync, so step 4 pushes plainly, without a lease'
+        Write-Output 'the base gained nothing - no sync, so Push-Branch.ps1 pushes plainly, without a lease'
         return
     }
     $preSync = @(Invoke-Read git @('rev-parse', 'HEAD'))[0]
@@ -108,7 +108,7 @@ function Invoke-SyncBranch {
         Write-Output "backup: $backup at $(@(Invoke-Read git @('rev-parse', '--short', 'HEAD'))[0])"
         $r = Invoke-Native git @('rebase', $base)
         if ($r.Code -ne 0) {
-            throw "the rebase onto $base stopped: $($r.Text)`nresolve, build, test, then git rebase --continue; or abandon it with git rebase --abort, which returns to the tip $backup holds. The lease for step 4 is $lease"
+            throw "the rebase onto $base stopped: $($r.Text)`nresolve, build, test, then git rebase --continue; or abandon it with git rebase --abort, which returns to the tip $backup holds. The lease for Push-Branch.ps1 is $lease"
         }
         Write-Output "rebased $branch onto ${base}: $(@(Invoke-Read git @('rev-parse', 'HEAD'))[0])"
     }

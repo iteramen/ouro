@@ -12,7 +12,7 @@ The script is not vendored: in the vendored layout (the scripts flat, Test-DocsF
 among them, and no release/skill-growth.py) the suite prints one `skip:` line and exits 0, which
 is what the No binding workflow runs. In the plugin layout a missing script is red.
 
-stdlib only; needs python3 3.11 or later and git 2.28 or later on PATH.
+stdlib only; needs python3 3.12 or later and git 2.28 or later on PATH.
 Its [[gate]] in .claude/ouro.toml: run = "python3 tests/skill-growth/skill-growth.Tests.py"
 """
 import atexit, json, os, pathlib, shutil, stat, subprocess, sys, tempfile
@@ -150,7 +150,8 @@ table.write_text("fx 0.1.0\n  Description: fixture\n\nPer-component (rounded)\n"
                  "  component       always-on  on-invoke\n"
                  "  m                    ~310      ~1.8k\n"
                  "  n                    < 20     ~12.2k\n"
-                 "  verifier             ~100        ~2k\n\n"
+                 "  verifier             ~100        ~2k\n"
+                 "  r                    < 20       < 20\n\n"
                  "  On-invoke cost is paid each time a skill or agent fires.\n", encoding="utf-8")
 argv_file = TMP / "argv.json"
 stub_env = {**ENV, "PATH": str(bindir) + os.pathsep + ENV["PATH"],
@@ -160,12 +161,13 @@ fx.mkdir()
 git(fx, "init", "-q", "-b", "master")
 one = commit(fx, "one", {".claude-plugin/plugin.json": '{"name": "fx"}\n',
                          "skills/m/SKILL.md": FM + "a\n", "skills/n/SKILL.md": FM + "a\n"})
-commit(fx, "two", {"skills/n/SKILL.md": FM + "a\nb\n", "agents/q.md": FM + "agent\n"})
+commit(fx, "two", {"skills/n/SKILL.md": FM + "a\nb\n", "agents/q.md": FM + "agent\n", "agents/r.md": FM + "r\n"})
 code, out, err = run(fx, "--base", one, env=stub_env)
 check("claude is called with --plugin-dir <root> plugin details <plugin.json name>",
       json.loads(argv_file.read_text()) == ["--plugin-dir", git(fx, "rev-parse", "--show-toplevel"), "plugin", "details", "fx"])
 check("the changed skill's estimate is the table's on-invoke column", code == 0 and "  n: ~12.2k\n" in out)
 check("an unchanged skill is not listed", "  m:" not in out)
+check("an on-invoke cell the table prints as < 20 is read, not reported missing", "  r: < 20\n" in out)
 check("a changed agent missing from the table says so", "  q: not in the table\n" in out)
 check("the base's estimate is declared not read", "the base's estimate needs a checkout of the base and is not read" in out)
 
@@ -197,6 +199,60 @@ argv_file.unlink(missing_ok=True)
 code, out, err = run(repo, "--base", "master", env=stub_env)
 check("no plugin.json: exit 0, the reason printed, claude not called", code == 0
       and "on-invoke tokens: not read, .claude-plugin/plugin.json names no plugin (" in out and not argv_file.exists())
+
+print("a release head is measured from the newest v* tag; a positive net needs the new version's decision line")
+rel = TMP / "release"
+rel.mkdir()
+git(rel, "init", "-q", "-b", "master")
+
+
+def manifest(v):
+    return json.dumps({"name": "p", "version": v})
+
+
+def changelog(unreleased, released=""):
+    """The layout a release commit leaves: a fresh [UNRELEASED] above the new version's section, the old one below."""
+    return (f"# Changelog\n\n## [UNRELEASED]\n{unreleased}\n" + (f"## [v1.0.1] - 2026-01-02\n{released}\n" if released else "")
+            + "## [1.0.0] - 2026-01-01\n\n**Net lines:** +9 across bin, because an old release's line is not this one's\n")
+
+
+commit(rel, "tagged", {".claude-plugin/plugin.json": manifest("1.0.0"), "bin/x.py": "a\n", "docs/d.md": "one\ntwo\n", "CHANGELOG.md": changelog("")})
+git(rel, "tag", "v1.0.0")
+commit(rel, "master grows bin after the tag", {"bin/x.py": "a\nb\nc\n"})
+git(rel, "checkout", "-q", "-b", "release")
+commit(rel, "bump, the line left under the fresh UNRELEASED", {".claude-plugin/plugin.json": manifest("1.0.1"), "bin/y.py": "d\ne\n", "docs/d.md": "one\n",
+                                                           "CHANGELOG.md": changelog("\n**Net lines:** +3 across bin, docs, because a stale line\n", "\n- a change\n")})
+code, out, err = run(rel, "--base", "master")
+check("version bumped, net positive since the tag, no line under the new version: exit 1, the paths and counts, the form of the line",
+      code == 1 and "release v1.0.0 -> HEAD, net lines: skills +0, docs -1, hooks +0, bin +4, tests +0; overall +3\n" in out
+      and "under `## [v1.0.1]` in CHANGELOG.md" in out and "`**Net lines:** +N across <paths>, because <reason>`" in out and err == "")
+commit(rel, "the line, wrapped", {"CHANGELOG.md": changelog("", "\n**Net lines:** +3 across bin, docs,\nbecause the fixture says so\n")})
+code, out, err = run(rel, "--base", "master")
+check("with the line under the new version's heading, wrapped: exit 0, the line printed joined beside the figure",
+      code == 0 and "overall +3\n  accepted: **Net lines:** +3 across bin, docs, because the fixture says so\n" in out)
+commit(rel, "a line with no reason", {"CHANGELOG.md": changelog("", "\n**Net lines:** +3 across bin, docs\n")})
+code, out, err = run(rel, "--base", "master")
+check("a line without its `, because <reason>` is no decision: exit 1", code == 1 and "accepted" not in out)
+commit(rel, "a line with the wrong sign", {"CHANGELOG.md": changelog("", "\n**Net lines:** -3 across bin, docs, because the sign is wrong\n")})
+code, out, err = run(rel, "--base", "master")
+check("a line whose N is not positive is no decision for a positive net: exit 1", code == 1 and "accepted" not in out)
+git(rel, "checkout", "-q", "-b", "zero", "master")
+commit(rel, "bump with a net of zero", {".claude-plugin/plugin.json": manifest("1.0.1"), "bin/x.py": "a\n"})
+code, out, err = run(rel, "--base", "master")
+check("version bumped with a net of zero: exit 0, no line needed", code == 0 and "bin +0, tests +0; overall +0\n" in out and "accepted" not in out)
+git(rel, "checkout", "-q", "-b", "shrink", "master")
+commit(rel, "bump and shrink", {".claude-plugin/plugin.json": manifest("1.0.1"), "bin/x.py": ""})
+code, out, err = run(rel, "--base", "master")
+check("version bumped with a negative net: exit 0 and no line needed", code == 0 and "bin -1, tests +0; overall -1\n" in out and "accepted" not in out)
+git(rel, "checkout", "-q", "-b", "plain", "master")
+commit(rel, "grows, no bump", {"bin/z.py": "f\ng\nh\n"})
+code, out, err = run(rel, "--base", "master")
+check("no version bump: not measured, exit 0", code == 0 and "net lines" not in out)
+git(rel, "checkout", "-q", "-b", "untagged", "master")
+git(rel, "tag", "-d", "v1.0.0")
+commit(rel, "bump with no tag to measure from", {".claude-plugin/plugin.json": manifest("1.0.1")})
+code, out, err = run(rel, "--base", "master")
+check("a release head with no v* tag reachable from the base: exit 2, the reason on stderr", code == 2 and "describe" in err)
 
 print(f"skill-growth suite: {failures} failure(s)" if failures else "skill-growth suite: every row ok")
 sys.exit(1 if failures else 0)

@@ -3,11 +3,11 @@ import json
 import re
 
 from . import briefs, node, sh
-from .run import parse_parts, restamped
+from .run import Run, acceptance_commands, body_line, empty_list, parse_parts, restamped
 from .sh import DriverError, argv_for, say
 
-STATE_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage", "idea")
-VERDICTS = ("PROMOTE", "NEEDS-RULING", "CHECKPOINT", "SPLIT", "FUSE", "STALE")
+STATE_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage", "idea")  # umbrella is cleared by its children closing, never by a re-triage
+VERDICTS = ("PROMOTE", "NEEDS-RULING", "CHECKPOINT", "SPLIT", "STALE")
 
 
 def label_moves(verdict, size, labels, named=()):
@@ -21,6 +21,8 @@ def label_moves(verdict, size, labels, named=()):
         add = ["agent-ready", "checkpoint"]
     elif verdict == "NEEDS-RULING":
         add = ["needs-ruling"]
+    elif verdict == "SPLIT":
+        add = ["umbrella"]
     else:
         return [], []
     add = list(named) + add
@@ -58,17 +60,29 @@ def size_problem(body):
 def with_manual(body, wanted):
     """(body, paths): a `Manual: <path>` line for each .claude/ path the node named among the body's backticked ones; the build node cannot edit there."""
     paths = []
-    for p in re.findall(r"`(\.claude/[^`\s]+)`", body):
+    for p in re.findall(r"`((?:\.claude|\.codex|\.agents|\.aws)/[^`\s]+)`", body):
         if p in wanted and not p.startswith(".claude/worktrees/") and p not in paths:
             paths.append(p)
     add = [f"Manual: {p}" for p in paths if not re.search(rf"(?m)^Manual: {re.escape(p)}\s*$", body)]
     return (body if not add else body.rstrip("\n") + "\n\n" + "\n".join(add) + "\n"), paths
 
 
-def reasoning(text):
-    """The node's comment text less a leading `**Triage**` line and a leading `Verdict: <word>` line or sentence prefix: the driver writes both, its verdict the one that counts."""
+# a node's own verdict opening, in the forms a node writes: the key and the word bold or not, any case, the word ended by a
+# line end, `.`, `,`, `:` or a dash, after an optional parenthetical
+VERDICT_OPENING = re.compile(r"\A\s*(?:\*\*)?verdict(?:\*\*)?:(?:\*\*)?[ \t]*(?:\*\*)?[\w-]+(?:\*\*)?(?:[ \t]*\([^)\r\n]*\))?"
+                             r"(?:[ \t]*[.,:]|[ \t]*(?:[\u2014\u2013]|-(?=\s))|[ \t]*(?:\r?\n|\Z))\s*", re.I)
+SPLIT_LINE = "The owner files the children this comment lists, by hand."
+# the closing lines the driver writes itself, by verdict: a node's own copy of one, as its last line, is dropped
+DRIVER_TAILS = {"SPLIT": re.compile(r"(?im)\s*^[ \t]*the owner files (?:the|its) children\b[^\n]*\bby hand\b[^\n]*\s*\Z"),
+                "PROMOTE": re.compile(r"(?m)\s*^[ \t]*Parts:[ \t]*\S[^\n]*\s*\Z")}
+
+
+def reasoning(text, verdict):
+    """The node's comment text less what the driver writes itself: a leading `**Triage**` line, a leading verdict opening, and
+    for the verdict that gets one, the closing line the driver appends; the driver's verdict is the one that counts."""
     text = re.sub(r"\A\s*\*\*Triage\*\*[ \t]*(?:\r?\n|\Z)\s*", "", text)
-    return re.sub(r"\A\s*Verdict:[ \t]*[\w-]+(?:[.,]|[ \t]*(?:\r?\n|\Z))\s*", "", text)
+    text = VERDICT_OPENING.sub("", text)
+    return DRIVER_TAILS[verdict].sub("", text) if verdict in DRIVER_TAILS else text
 
 
 def label_problem(labels, sets):
@@ -120,7 +134,46 @@ def behind_note(env):
     return note
 
 
+def granted_gates(env, labels, sets):
+    """The gate runs the BUILD node may run for the issue's area labels, in the binding's spelling: what the run's build_commands grants."""
+    declared = {str(x).lower(): str(x) for x in sets.get("area") or []}
+    areas = {declared[str(l).lower()] for l in labels if str(l).lower() in declared}
+    return [str(g.get("run") or "") for g in env.data.get("gate", []) if ("*" in g.get("areas", []) or areas & set(g.get("areas", [])))
+            and (g.get("cheap") is True or not env.pr_checks() or not Run.notice(g) and (Run.locally_run(str(g.get("run") or ""), g) or g.get("paths")))]
+
+
+def binding_notes(env, body, labels):
+    """What the binding makes of the issue's asks: a `Flow: direct` with no `ship.direct` globs, a `trivial` label under a policy that does not merge on it;
+    the flow value and the label are read as the run reads them, exactly."""
+    notes = []
+    if body_line(body, "Flow") == "direct" and not env.lookup("ship.direct", []):
+        notes.append("The body asks `Flow: direct`, and the binding declares no `ship.direct` globs: the run takes the class the diff warrants, not the direct lane.")
+    policy = env.lookup("ship.policy", "")
+    if "trivial" in labels and policy != "trivial-merge":
+        notes.append(f"The issue carries `trivial`, which does not let the driver merge under `ship.policy = \"{policy}\"` (only `trivial-merge` merges on it): "
+                     "here it picks the trivial builder and nothing more.")
+    return notes
+
+
+def shape_findings(env, issue, body, labels, comment):
+    """Run the real shape gate on the proposed issue before publishing its triage or labels."""
+    candidate = {**issue, "body": body, "labels": [{"name": label} for label in labels],
+                 "comments": [*(issue.get("comments") or []),
+                              {"author": {"login": env.viewer()}, "body": comment}]}
+    proposed = env.body_file("triage-shape.json", json.dumps([candidate]))
+    q = lambda value: str(value).replace("'", "''")
+    wrapper = env.body_file("triage-shape.ps1", f"& '{q((sh.BIN / 'Test-AgentReadyShape.ps1').as_posix())}' "
+                           f"-Issue {int(issue['number'])} -IssuesJson ([IO.File]::ReadAllText('{q(proposed)}'))\n")
+    result = env.run([sh.which("pwsh"), "-NoProfile", "-File", wrapper], cwd=env.main)
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.out)
+    findings = [line.split("SHAPE:", 1)[1].strip() for line in output.splitlines() if "SHAPE:" in line]
+    if result.code != 0 and not findings:
+        raise DriverError(f"the shape preflight failed before any triage write: {result.text}")
+    return findings
+
+
 def triage(env, n, dry):
+    node.preflight(env.runtime, capabilities=node.READ)  # the TRIAGE node runs even in a dry run
     i = env.gh_json("issue", "view", str(n), "--json", "number,title,body,labels,comments,state")
     labels = [l["name"] for l in i.get("labels", [])]
     body = i.get("body") or ""
@@ -136,8 +189,8 @@ def triage(env, n, dry):
                            anchors="\n".join(f"- {a}" for a in anchors) or "No finding: every anchor line resolves.",
                            files=file_list(files), contract=briefs.contract_sections(env, (3, 4, 8)))
     say(f"TRIAGE node for #{n}")
-    ans = node.run_node("TRIAGE", prompt, env.lookup("models.builder", "sonnet"), list(node.READ_TOOLS),
-                        str(env.main), node.TIMEOUTS["TRIAGE"])
+    ans = node.run_node("TRIAGE", prompt, node.model(env, "builder", node.DEFAULT_BUILDER), node.READ,
+                        str(env.main), node.TIMEOUTS["TRIAGE"], runtime=env.runtime)
     verdict = str(ans.get("verdict") or "").strip().upper()
     if verdict not in VERDICTS:
         raise DriverError(f"node TRIAGE answered verdict {ans.get('verdict')!r}")
@@ -145,6 +198,15 @@ def triage(env, n, dry):
         raise DriverError("node TRIAGE answered PROMOTE for a deliverable that is a finding: that is CHECKPOINT")
     size = str(ans.get("size") or "").strip().strip(".,;:").upper()
     flow = str(ans.get("flow") or "").strip().strip(".,;:").lower()
+    if verdict in ("PROMOTE", "CHECKPOINT") and size == "L":  # the node found no split lines: the contract's question, not a silent split
+        verdict = "NEEDS-RULING"
+        ans["question"] = "An L is never agent-ready: owner-driven session, or split how?" + (f"\n\n{ans['question']}" if ans.get("question") else "")
+    elif verdict in ("PROMOTE", "CHECKPOINT") and "umbrella" in labels:  # an umbrella is never executed: its children are
+        verdict = "NEEDS-RULING"
+        ans["question"] = ("The issue holds `umbrella`, which no verdict removes, and an umbrella is never run. Close it when its children "
+                           "are done, or remove the label and run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
+    elif verdict == "SPLIT" and ans.get("question"):  # a split that still asks is a ruling to take, where the owner sees it
+        verdict = "NEEDS-RULING"
     new_body = with_lines(body, size, flow, str(ans.get("doc_impact") or "").strip()) if verdict in ("PROMOTE", "CHECKPOINT") else body
     declared = {str(x).lower(): str(x) for k in ("area", "type") for x in sets.get(k) or []}
     types, have = {str(x).lower() for x in sets.get("type") or []}, {str(l).lower() for l in labels}
@@ -156,19 +218,27 @@ def triage(env, n, dry):
     dead = [a for a in anchors if a != sh.NO_ANCHOR] if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else []
     if dead and (moved := restamped(env, body, dead)) != body and not env.dead_anchors(moved, f"origin/{env.default}"):
         dead = []  # the run re-points these lines at the file their fragments moved to, as it reads them
+    preflight_failed = False
     if problem:  # the shape gate would demote the promotion for its labels: ask first, and post once
+        preflight_failed = True
         verdict = "NEEDS-RULING"
         ans["question"] = (f"The issue has {problem}. Which label? The shape gate refuses the promotion without it; once "
                            f"labeled, run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
     elif verdict in ("PROMOTE", "CHECKPOINT") and size != "L" and size_problem(new_body):  # the gate reads the body's line, not the answer
+        preflight_failed = True
         verdict = "NEEDS-RULING"
         ans["question"] = (f"The body holds {size_problem(new_body)}. The shape gate refuses the promotion as the body stands; fix the "
                            f"line, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
     elif dead:  # the run would stop on a dead anchor: ask first, and post once
+        preflight_failed = True
         verdict = "NEEDS-RULING"
         ans["question"] = ("The anchor gate finds:\n\n" + "\n".join(f"- {a}" for a in dead) + "\n\nThe run stops on a dead anchor; fix the "
                            "anchors, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
-    comment = f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''))}\n"
+    comment = f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n"
+    if verdict != "STALE" and (notes := binding_notes(env, body, labels)):  # a stale issue runs nowhere
+        comment += "\n" + "\n".join(f"- {x}" for x in notes) + "\n"
+    if verdict not in ("STALE", "CHECKPOINT") and not (acceptance_commands(body) + granted_gates(env, labels + named, sets)):  # the labels the verdict adds count
+        comment += "\n- " + empty_list(body) + " A worktree BUILD dispatch stops with `gate uncovered`; the direct lane runs every selected gate in the driver.\n"
     if ans.get("question"):
         comment += f"\nQuestion for the owner:\n\n{ans['question']}\n"
     add, remove = label_moves(verdict, size, labels, named)
@@ -179,8 +249,27 @@ def triage(env, n, dry):
         new_body, manual = with_manual(new_body, [str(p) for p in ans.get("manual") or []])
         if manual:
             comment += "\nManual steps (the build node cannot edit under `.claude/`):\n\n" + "\n".join(f"- `{p}`" for p in manual) + "\n"
+    if verdict == "SPLIT":  # nothing files the children: say who does
+        comment += f"\n{SPLIT_LINE}\n"
+    if verdict in ("PROMOTE", "CHECKPOINT"):
+        findings = shape_findings(env, i, new_body, [label for label in labels if label not in remove] + add, comment)
+        if findings:
+            preflight_failed = True
+            verdict, new_body = "NEEDS-RULING", body
+            question = ("Test-AgentReadyShape.ps1 refuses the proposed promotion:\n\n"
+                        + "\n".join(f"- {finding}" for finding in findings)
+                        + "\n\nThe promotion was withheld; fix these findings and run triage again."
+                        + (f"\n\n{ans['question']}" if ans.get("question") else ""))
+            comment = (f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n"
+                       f"\nQuestion for the owner:\n\n{question}\n")
+            add, remove = label_moves(verdict, size, labels, named)
     say(f"verdict {verdict}; labels +{add} -{remove}" + ("; body lines written" if new_body != body else ""))
     say("comment:\n" + comment)
+    if (env.gh_json("issue", "view", str(n), "--json", "body").get("body") or "") != body:  # an edit landed while the node graded
+        say(f"#{n}'s body changed while triage ran: nothing written, stop posted")
+        env.comment_issue(n, "**Stop:** open decision\n\nThe issue's body changed while triage ran, so this verdict graded a body that is no "
+                             "longer the issue's: no body line, label or verdict is written. Run triage again on the body as it stands.\n")
+        return 3
     if new_body != body:
         env.write("write the Size/Flow/Doc impact lines",
                   argv_for("gh", "issue", "edit", str(n), "-R", env.slug, "--body-file", env.body_file("issue-body.md", new_body)))
@@ -192,13 +281,4 @@ def triage(env, n, dry):
         for l in add:
             argv += ["--add-label", l]
         env.write("set the labels", argv)
-    if "agent-ready" in add and not dry:
-        # the repository's own shape gate on the issue as promoted: a body it refuses goes back to needs-triage
-        r = sh.run(sh.script("Test-AgentReadyShape.ps1", "-Issue", str(n), "-Demote"), cwd=env.main)
-        if r.code != 0:
-            if "SHAPE:" not in r.out:
-                raise DriverError(f"the shape gate failed: {sh.cmdline(r.argv)}: {r.text}")
-            say(r.out.strip())
-            say(f"#{n} fails the shape gate: demoted to needs-triage, comment posted")
-            return 3
-    return 0
+    return 3 if preflight_failed else 0

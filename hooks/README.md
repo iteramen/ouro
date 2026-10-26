@@ -22,8 +22,16 @@ other outcome lets the call run: exit 0, any other exit code, an interpreter it 
 machine without `python3` on the `PATH` Claude Code starts with, or a guard that stalls, disables
 itself silently. So a guard keeps its parsing cheap (no network, no `gh`), every entry sets a
 `timeout`, the suite below pins the exit codes, and the rule each guard enforces stays in the
-prose beside it. Codex and other harnesses have no hook layer at all: there the prose is the only
-enforcement, and the guards are Claude Code's.
+prose beside it. Codex supports user-level PreToolUse hooks, canonical Bash events and exit-2
+refusals too. Its non-managed hooks require explicit trust; installing ouro's Codex skills does
+not register or trust global hooks. See the [Codex hook documentation](https://learn.chatgpt.com/docs/hooks).
+
+Ouro's Codex nodes use a constrained private file bridge and disable inherited hooks. The bridge
+runs the existing delete, stash/kill, discard and author guards before approved commands, then
+executes those commands through the Codex OS sandbox. File-only nodes expose no command tool.
+Exit 2 is a policy refusal. A missing, crashed or timed-out guard is a driver infrastructure
+failure, and cannot become an owner question through the model's answer.
+This node boundary is independent of hooks installed in an interactive developer session.
 
 ## Testing
 

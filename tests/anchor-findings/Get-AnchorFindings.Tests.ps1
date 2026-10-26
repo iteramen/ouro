@@ -58,7 +58,7 @@ function Assert-Case($Body, $Findings, $Paths, $Frags, $What) {
     $r
 }
 
-# Scratch repo: the parser greps git's index, so the fixture only needs `git add`.
+# Scratch repo: the parser greps the working tree limited to tracked files, so the fixture only needs `git add`.
 $scratch = Join-Path ([IO.Path]::GetTempPath()) "anchor-findings-test-$PID"
 if (Test-Path -LiteralPath $scratch) { Remove-Item -LiteralPath $scratch -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $scratch 'src') -Force | Out-Null
@@ -66,10 +66,27 @@ $bt = '`'
 @(
     '$fixtureAnchor = 12345',
     "# release rule: bumps go in ${bt}plugin.json${bt} and a tag.",
-    '# plain words that live in the fixture'
+    '# plain words that live in the fixture',
+    '# every code is checked here, so the fixture',
+    '#   password alone cannot bypass the second factor.'
 ) | Set-Content -LiteralPath (Join-Path $scratch 'src/fixture.ps1')
+@(
+    '    "Enrollment returns a freshly generated secret, so an anonymous call learns nothing it " +',
+    '    "did not itself create.",'
+) | Set-Content -LiteralPath (Join-Path $scratch 'src/concat.ps1')
+@(
+    'Use --max-retries 3 by default.',
+    '# the cache is',
+    'disabled = False',
+    '# Never retry',
+    '',
+    '# a failed upload is logged.',
+    'hello'
+) | Set-Content -LiteralPath (Join-Path $scratch 'src/join.py')
+@('# alpha beta', '# gamma delta epsilon') | Set-Content -LiteralPath (Join-Path $scratch 'src/edited.ps1')
 # A second file holding a line the fixture lacks, and one reached by a unique suffix match.
 '$otherAnchor = 67890' | Set-Content -LiteralPath (Join-Path $scratch 'src/other.ps1')
+@('/fixture/location/config.yaml', '2026-01-01-preview') | Set-Content -LiteralPath (Join-Path $scratch 'config.yaml')
 New-Item -ItemType Directory -Path (Join-Path $scratch 'src/deep') -Force | Out-Null
 'leaf words in the deep file' | Set-Content -LiteralPath (Join-Path $scratch 'src/deep/leaf.md')
 # A directory whose name carries a suffix, holding one file: a span naming it names no file.
@@ -87,8 +104,11 @@ New-Item -ItemType Directory -Path (Join-Path $scratch 'src/[id]') -Force | Out-
 'page words that live in the bracket file' | Set-Content -LiteralPath (Join-Path $scratch 'src/[id]/page.ps1')
 git -C $scratch init -q
 git -C $scratch add .
-# On disk and never added: a path the grep, which reads the index, cannot see.
+'x = 1' | Set-Content -LiteralPath (Join-Path $scratch 'src/edited.ps1')  # staged with the wrapped comment, the working tree without it
+# On disk and never added: a path the grep, limited to tracked files, cannot see.
 'plain words that live untracked' | Set-Content -LiteralPath (Join-Path $scratch 'src/untracked.md')
+# The same under the bracketed directory: found only when the path is probed as spelled.
+'draft words that live untracked' | Set-Content -LiteralPath (Join-Path $scratch 'src/[id]/draft.md')
 # The gate names its repository before its first gh call, and with no binding here that is the
 # repository origin names (bin/Get-RepoSlug.ps1).
 git -C $scratch remote add origin https://github.com/o/n.git
@@ -111,6 +131,26 @@ try {
         'a stale quoted fragment beside a backticked command is still reported' | Out-Null
     Assert-Case "- ${bt}src/fixture.ps1${bt} - `"zzz_gone${bt}n_frag();`" ${bt}:171 @ abc1234${bt}" 1 1 1 `
         'a stale fragment holding a backtick is reported despite a later span' | Out-Null
+
+    # --- class 2b: a cited-file fragment the file wraps is found on a second look --------------
+    Assert-Case "- ${bt}src/fixture.ps1${bt} -- `"every code is checked here, so the fixture password alone cannot bypass the second factor.`"" 0 1 1 `
+        'a comment quote the file wraps across two leader lines greps on the second look' | Out-Null
+    Assert-Case "- ${bt}src/fixture.ps1${bt} -- `"password alone cannot bypass the second factor. every code is checked here, so the fixture`"" 1 1 1 `
+        'the same tokens in another order are still a finding' | Out-Null
+    Assert-Case "- ${bt}src/join.py${bt} -- `"--retries 3 by default`"" 1 1 1 `
+        'the fragment keeps its leader: a quoted flag the file does not hold is a finding' | Out-Null
+    Assert-Case "- ${bt}src/join.py${bt} -- `"the cache is disabled`"" 1 1 1 `
+        'a comment is not joined into the code under it' | Out-Null
+    Assert-Case "- ${bt}src/join.py${bt} -- `"Never retry a failed upload`"" 1 1 1 `
+        'two comments across a blank line are not joined' | Out-Null
+    Assert-Case "- ${bt}src/join.py${bt} -- `"------------------`"" 1 1 1 `
+        'a fragment of leader characters alone is still a finding' | Out-Null
+    Assert-Case "- ${bt}src/edited.ps1${bt} -- `"beta gamma delta epsilon`"" 1 1 1 `
+        'with no ref the second look reads the working tree the first pass grepped, not the index' | Out-Null
+    $concat = Assert-Case "- ${bt}src/concat.ps1${bt} -- `"an anonymous call learns nothing it did not itself create.`"" 1 1 1 `
+        'a phrase split by string concatenation is still a finding'
+    Assert-Match 'string concatenation' ($concat.Findings -join "`n") 'and the finding says the phrase may be split so'
+    Assert-Match "^fragment no longer greps in 'src/concat\.ps1': " ($concat.Findings -join "`n") 'and keeps the prefix the driver re-points by'
 
     # --- class 3: //-spans and prose-code composites are not anchors ------------------------
     Assert-Case "Loads ${bt}//cdn.example.com/lib.js${bt} at startup." 0 0 0 `
@@ -361,6 +401,21 @@ try {
         'conventional path + fragment body is clean and counted' | Out-Null
 
     # --- an anchor-shaped line verifies every fragment, in the file it cites ----------
+    foreach ($fragment in @('/fixture/location/config.yaml', '2026-01-01-preview')) {
+        $bare = Assert-Case ('- `config.yaml` -- "' + $fragment + '"') 1 0 0 `
+            'bare evidence filenames are rejected independently of fragment slashes'
+        Assert-Match '\./config\.yaml' ($bare.Findings -join "`n") 'the correction spells the top-level path explicitly'
+        Assert-Case ('- `./config.yaml` -- "' + $fragment + '"') 0 1 1 `
+            'explicit top-level evidence verifies its own quote with or without slashes' | Out-Null
+        Assert-Case ('- `src/fixture.ps1` -- "$fixtureAnchor = 12345"' + "`n" + '- `config.yaml` -- "' + $fragment + '"') 1 1 1 `
+            'another valid anchor cannot hide the malformed top-level evidence row' | Out-Null
+    }
+    Assert-Case 'Create `config.yaml` later.' 0 0 0 'an inline bare filename remains prose' | Out-Null
+    Assert-Case '- Create `config.yaml` later.' 0 0 0 'a prose list item is not a bare-path evidence row' | Out-Null
+    Assert-Case '- `config.yaml`' 0 0 0 'an unquoted bare file list remains a non-anchor mention' | Out-Null
+    Assert-Case '- `./config.yaml` -- "$fixtureAnchor = 12345"' 1 1 1 `
+        'a top-level anchor quote cannot pass only because another file holds it' | Out-Null
+
     # A list item whose first backticked span passes rule 1 and resolves: every quoted fragment
     # in the length bounds is verified, plain words too, and grepped in that one file.
     # Built by concatenation so the literal never greps in a tracked copy of this file.
@@ -412,6 +467,15 @@ try {
         'a glob span names no one tracked file, so its line reads as before and the fragment greps repo-wide' | Out-Null
     Assert-Case ('- ' + $bt + 'src/untracked.md' + $bt + ' -- "plain words that live untracked"') 0 1 0 `
         'an untracked file is no anchor line, so its plain-words fragment is not reported against it' | Out-Null
+    Assert-Case ("See ${bt}src/[id]/draft.md${bt} here.") 0 1 0 `
+        'an untracked file under a bracketed directory is found as spelled, probed literally' | Out-Null
+    Assert-Case ("See ${bt}eep/leaf.md${bt} here.") 1 1 0 `
+        'a suffix that cuts a path segment names no file: eep/leaf.md is not src/deep/leaf.md' | Out-Null
+    Assert-Case 'Uses "$fixtureAnchor = 12345" and "$FixtureAnchor = 12345" here.' 1 0 2 `
+        'two fragments that differ only in case are two to verify: the variant that does not grep is a finding' | Out-Null
+    $cased = Get-AnchorFindings -Text "See ${bt}src/fixture.ps1${bt} and ${bt}SRC/fixture.ps1${bt}."
+    if ($cased.PathCount -eq 2) { Write-Host '  ok: two spellings that differ only in case are two paths to the count, as to Paths' -ForegroundColor DarkGray }
+    else { Write-Host "FAIL: PathCount of a case pair -- expected 2, got $($cased.PathCount)" -ForegroundColor Red; $failures++ }
     Assert-Case ('- ' + $bt + './src/fixture.ps1' + $bt + ' -- "plain words that live in the fixture"') 0 1 1 `
         'a ./ spelling names the same tracked file' | Out-Null
     Assert-Case ('- ' + $bt + 'src/pkg.d' + $bt + ' -- "plain words inside the package dir"') 0 1 0 `
@@ -634,6 +698,7 @@ try {
         Assert-Match '^1$' (Get-RefFindings $globBody '')   'no -Ref: the glob span, with its file gone from the working tree, is a finding'
         Assert-Match '^1$' (Get-RefFindings 'See `src/gl*b/nope.ps1` for it.' 'at') '-Ref: a glob span that matches no path at the ref is a finding'
         Assert-Match '^0$' (Get-RefFindings 'See `./src/glob/*.ps1` for it.' 'at') '-Ref: a ./-prefixed glob span is normalized before it is matched at the ref'
+        Assert-Match '^1$' (Get-RefFindings 'See `SRC/a.ps1` for it.' 'at') '-Ref: a path that differs from the tracked one only in case does not resolve at the ref'
         $badRef = try { Get-RefFindings $refFrag 'no-such-ref' } catch { "threw: $_" }
         Assert-Match '^threw: .*no-such-ref' $badRef '-Ref: an unresolvable ref throws naming it, not an all-dead report'
     }

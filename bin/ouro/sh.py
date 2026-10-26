@@ -73,9 +73,23 @@ class R:
         return (self.out + self.err).strip()
 
 
+def child_env(overrides=None):
+    """A None override removes an inherited variable, including Windows case aliases."""
+    values = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"}
+    overrides = overrides or {}
+    values.update({key: value for key, value in overrides.items() if value is not None})
+    # Apply removals last so a later Windows case alias cannot restore the key.
+    for key, value in overrides.items():
+        if value is None:
+            for inherited in list(values):
+                if inherited == key or (os.name == "nt" and inherited.casefold() == key.casefold()):
+                    del values[inherited]
+    return values
+
+
 def run(argv, cwd=None, input_text=None, env=None, timeout=None):
     """Run a command; output is decoded as UTF-8, never the locale's code page."""
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1", **(env or {})}
+    env = child_env(env)
     try:
         p = subprocess.run(argv, cwd=cwd, input=None if input_text is None else input_text.encode("utf-8"),
                            capture_output=True, env=env, timeout=timeout)
@@ -105,12 +119,15 @@ def load_binding_module():
 class Env:
     """What a run knows: the main checkout, the binding, the repository, the dry-run switch."""
 
-    def __init__(self, main, binding, data, dry):
+    def __init__(self, main, binding, data, dry, developer_config=None, *, runtime=None):
         self.main, self.ob, self.data, self.dry = Path(main), binding, data, dry
         self.slug = data["repo"]["slug"]
         self.default = data["repo"]["default_branch"]
+        from . import developer
+        self.runtime = runtime if runtime is not None else developer.load(developer_config)
         self.scratch = Path(tempfile.mkdtemp(prefix="ouro-run-"))
         self._viewer = None
+        self._pr_checks = None
 
     def close(self):
         shutil.rmtree(self.scratch, ignore_errors=True)
@@ -121,15 +138,21 @@ class Env:
         except (KeyError, IndexError):
             return default
 
+    def run(self, argv, **kwargs):
+        """Launch with the loaded coordinator's credential excluded; keep other credentials."""
+        from .coordination import worker_env
+        kwargs["env"] = {**(kwargs.get("env") or {}), **worker_env(self.runtime)}
+        return run(argv, **kwargs)
+
     # reads ---------------------------------------------------------------------------------
     def git(self, *args, cwd=None, check=True):
-        r = run([which("git"), "-c", "core.quotepath=false", *args], cwd=cwd or self.main)
+        r = self.run([which("git"), "-c", "core.quotepath=false", *args], cwd=cwd or self.main)
         if check and r.code != 0:
             raise DriverError(f"git {' '.join(args)} failed (exit {r.code}): {r.text}")
         return r
 
     def gh(self, *args, check=True):
-        r = run([*argv_for("gh", *args)], cwd=self.main)
+        r = self.run([*argv_for("gh", *args)], cwd=self.main)
         if check and r.code != 0:
             raise DriverError(f"gh {' '.join(args)} failed (exit {r.code}): {r.text}")
         return r
@@ -150,6 +173,16 @@ class Env:
             self._viewer = self.gh("api", "user", "--jq", ".login").out.strip().lower()
         return self._viewer
 
+    def pr_checks(self):
+        """Whether a workflow at origin/<default> names pull_request: without one a pull request gets no check, and every selected gate runs here."""
+        if self._pr_checks is None:
+            from .coordination import worker_env
+            try:
+                self._pr_checks = bool(self.ob.pr_workflows(self.default, self.main, env=child_env(worker_env(self.runtime))))
+            except SystemExit as x:
+                raise DriverError(f"the workflows at origin/{self.default} cannot be read: {x.code}")
+        return self._pr_checks
+
     def approvers(self):
         return {str(a).lower() for a in self.lookup("owner.ruling_approvers", []) or []}
 
@@ -163,7 +196,7 @@ class Env:
             say(f"  would {desc}: {cmdline(argv)}")
             return R(0, "", "", argv)
         say(f"  {desc}")
-        r = run(argv, cwd=cwd or self.main, input_text=input_text, timeout=timeout)
+        r = self.run(argv, cwd=cwd or self.main, input_text=input_text, timeout=timeout)
         if check and r.code != 0:
             raise DriverError(f"{desc} failed: {cmdline(argv)} (exit {r.code}): {r.text}")
         return r
@@ -181,7 +214,7 @@ class Env:
         write_bytes(ps, f". '{q((BIN / 'Get-AnchorFindings.ps1').as_posix())}'\n$t = [IO.File]::ReadAllText('{q(Path(bf).as_posix())}')\n"
                         f"$r = Get-AnchorFindings -Text $t -Ref '{q(ref)}'\nWrite-Output \"COUNT: $($r.PathCount + $r.FragCount)\"\n"
                         f"$r.Findings | ForEach-Object {{ Write-Output \"FINDING: $_\" }}\n")
-        r = run([which("pwsh"), "-NoProfile", "-File", str(ps)], cwd=self.main)
+        r = self.run([which("pwsh"), "-NoProfile", "-File", str(ps)], cwd=self.main)
         if r.code != 0:
             raise DriverError(f"the anchor check failed: {r.text}")
         out = [l[len("FINDING:"):].strip() for l in r.out.splitlines() if l.startswith("FINDING:")]

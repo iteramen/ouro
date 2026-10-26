@@ -5,15 +5,23 @@ STUB_GH_ORIGIN (the bare repository standing for the remote).
 
 The table maps a call's signature (its arguments, `-R <slug>` removed, joined by spaces) to
 {"Exit": n, "Out": text-or-json} or {"Seq": [rows]} (the Nth call the key names takes the Nth row, the
-last repeats); a key holding `*` is a pattern, and one counter serves every call it matches. A call the table does not name and the stand-in does not
+last repeats; a row {"Model": true} lets the stand-in model that call); a key holding `*` is a pattern, and one counter serves every call it matches. A call the table does not name and the stand-in does not
 model exits 1 and names itself; an `issue create` with a `--label` outside the origin's [labels] sets,
 `needs-triage` and `umbrella` exits 1 as gh refuses an unknown label. The stand-in models what the driver and the land scripts read and
-write: issues, one pull request (create, view, list, ready, edit, comment, merge), the viewer.
-Table keys beginning `_` seed that state: `_viewer`, `_issue_<N>`, `_pr`, `_comments_<N>`, `_mergeable` (the
-`mergeable mergeStateStatus` pairs the views that ask for them answer in order, the last repeating), and for the
+write: issues, one pull request (create, view, list, ready, edit, comment, merge), the viewer, and the runs on each commit it is asked
+about: `_runs` seeds them in first-seen order, one list of per-attempt conclusions per commit (the last entry repeats; "" or
+"in_progress" is a run still going), `run rerun` moves a run to its next attempt, and `run view`, `pr checks` and `run list` answer
+from that one state however often they are read. `_mergeable` is a list of `mergeable mergeStateStatus` pairs the pull request
+steps through once per head change (an UNKNOWN that settles at one head is not expressible); a CONFLICTING entry moves the base
+once (a commit on master), as a conflicting head means it did. `_head_lag` is a list of booleans, one per `pr view` that
+asks for `headRefOid` (the last repeats): true serves `STALE_HEAD` there in place of the branch tip, as GitHub does for a while after a push.
+Table keys beginning `_` seed that state: `_viewer`, `_issue_<N>`, `_pr`, `_comments_<N>`, `_mergeable`, `_head_lag`, and for the
 GraphQL model `_edits` (the issue body's edit history, pages keyed by cursor, "" for the first),
 `_prs` (what a pull request search answers), `_threads` (the pull request's review threads), `_copilot_bot` (the bot id Copilot answers to),
-`_copilot_polls` (reads before its review shows) and `_copilot_never`. Copilot's review is made on
+`_copilot_polls` (reads before its review shows) and `_copilot_never`; `_stale_list` makes the run list read a re-run attempt
+as success whatever it concluded, `_checks_extra` adds check rows to `pr checks --json`, and a `budget` plan entry is an attempt
+that fails with a job that never started, as an Actions budget leaves it, a `matrix` one a real failure beside a leg its
+fail-fast cancelled while it queued (`api .../runs/<id>/attempts/<n>[/jobs]` answer them). Copilot's review is made on
 the head the pull request has when it first shows, and keeps that commit.
 """
 import fnmatch
@@ -38,6 +46,7 @@ table = json.loads(Path(os.environ["STUB_GH_TABLE"]).read_text(encoding="utf-8")
 state = Path(os.environ["STUB_GH_STATE"])
 origin = os.environ.get("STUB_GH_ORIGIN", "")
 sig = " ".join(args)
+STALE_HEAD = "d" * 40
 
 
 def flag(name):
@@ -71,8 +80,17 @@ def out(obj, code=0):
     sys.exit(code)
 
 
-def git(*a):
-    return subprocess.run(["git", "--git-dir", origin, *a], capture_output=True, text=True, encoding="utf-8").stdout.strip()
+def git(*a, env=None, check=False):
+    return subprocess.run(["git", "--git-dir", origin, *a], capture_output=True, text=True, encoding="utf-8", env=env, check=check).stdout.strip()
+
+
+def move_base(name):
+    """A commit on master adding `name`: what a CONFLICTING answer models, so the driver's sync has something to merge."""
+    (state / name).write_text("moved\n", encoding="utf-8")
+    env = {**os.environ, "GIT_INDEX_FILE": str(state / "index"), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    git("read-tree", "refs/heads/master", env=env, check=True)
+    git("update-index", "--add", "--cacheinfo", f"100644,{git('hash-object', '-w', str(state / name), check=True)},{name}", env=env, check=True)
+    git("update-ref", "refs/heads/master", git("commit-tree", git("write-tree", env=env, check=True), "-p", git("rev-parse", "refs/heads/master"), "-m", "base moved", env=env, check=True), check=True)
 
 
 def pr_state():
@@ -89,15 +107,47 @@ def pr_view(pr, fields):
     live["headRefName"] = pr["head"]
     live.setdefault("baseRefName", "master")
     if "mergeable" in (fields or "").split(",") and table.get("_mergeable"):
-        k = load("mergeable.n", 0)
-        save("mergeable.n", k + 1)
-        live["mergeable"], live["mergeStateStatus"] = table["_mergeable"][min(k, len(table["_mergeable"]) - 1)].split()
+        k, seen = load("mergeable.n", 0), load("mergeable.tip", "")
+        if seen and tip != seen:
+            k += 1
+        save("mergeable.n", k)
+        save("mergeable.tip", tip)
+        i = min(k, len(table["_mergeable"]) - 1)
+        live["mergeable"], live["mergeStateStatus"] = table["_mergeable"][i].split()
+        if live["mergeable"] == "CONFLICTING" and origin and not load(f"base-moved.{i}", False):
+            move_base(f"base-{i}.txt")
+            save(f"base-moved.{i}", True)
     live.setdefault("mergeable", "MERGEABLE")
     live.setdefault("mergeStateStatus", "CLEAN")
     live.setdefault("reviewDecision", "")
     if tip and origin:
         git("update-ref", f"refs/pull/{pr['number']}/head", tip)
     return {f: live.get(f) for f in (fields or "").split(",") if f}
+
+
+def run_on(sha):
+    """The run on a commit, seeded by `_runs` in first-seen order: its id, attempt and the conclusion of each attempt."""
+    runs = load("runs.json", {})
+    if sha not in runs:
+        plan = table.get("_runs") or [["success"]]
+        runs[sha] = {"id": 11 + len(runs), "attempt": 1, "plan": plan[min(len(runs), len(plan) - 1)]}
+        save("runs.json", runs)
+    return runs, runs[sha]
+
+
+def attempt_conclusion(r, k):
+    """Attempt k's conclusion as the API records it: `budget` is a failure whose job never started."""
+    c = r["plan"][min(k, len(r["plan"])) - 1]
+    return "failure" if c in ("budget", "matrix") else c
+
+
+def run_row(r):
+    c = attempt_conclusion(r, r["attempt"])
+    if table.get("_stale_list") and r["attempt"] > 1:
+        c = "success"  # the list record lags the attempt it names
+    done = c not in ("", "in_progress", "queued")
+    return {"databaseId": r["id"], "workflowDatabaseId": 1, "workflowName": "ci", "event": "pull_request" if flag("--event") == "pull_request" else "push",
+            "createdAt": "2026-01-01T00:00:00Z", "status": "completed" if done else c or "in_progress", "conclusion": c if done else ""}
 
 
 def comments(kind, n):
@@ -128,6 +178,8 @@ def table_answer():
         k = int(counter.read_text()) if counter.is_file() else 0
         counter.write_text(str(k + 1))
         row = row["Seq"][min(k, len(row["Seq"]) - 1)]
+    if row.get("Model"):
+        return
     o = row.get("Out", "")
     print(o if isinstance(o, str) else json.dumps(o))
     sys.exit(row.get("Exit", 0))
@@ -195,7 +247,13 @@ if pr and n == str(pr["number"]):
     if verb == "pr view" and flag("--json") == "comments":
         out({"comments": comments("pr", n)})
     if verb == "pr view":
-        out(pr_view(pr, flag("--json")))
+        view = pr_view(pr, flag("--json"))
+        if "headRefOid" in view and table.get("_head_lag"):
+            k = load("head-lag.n", 0)
+            save("head-lag.n", k + 1)
+            if table["_head_lag"][min(k, len(table["_head_lag"]) - 1)]:
+                view["headRefOid"] = STALE_HEAD
+        out(view)
     if verb == "pr comment":
         save(f"pr-{n}-comments.json", load(f"pr-{n}-comments.json", []) + [{"author": {"login": viewer}, "body": body_text()}])
         out("")
@@ -221,16 +279,42 @@ if pr and n == str(pr["number"]):
         save("pr.json", pr)
         out("")
     if verb == "pr checks":
-        out([{"name": "ci", "bucket": "pass"}] if "--json" in args else "All checks were successful")
+        bucket = {"success": "pass", "": "pending"}.get(run_row(run_on(pr_view(pr, "headRefOid")["headRefOid"] or "none")[1])["conclusion"], "fail")
+        if "--json" in args:
+            out([{"name": "ci", "bucket": bucket}] + table.get("_checks_extra", []))
+        out("All checks were successful" if bucket == "pass" else "checks " + bucket, {"pass": 0, "pending": 8}.get(bucket, 1))  # gh's exit codes
 if verb == "run list":
-    out([{"databaseId": 11, "workflowDatabaseId": 1, "workflowName": "ci", "event": "pull_request",
-          "createdAt": "2026-01-01T00:00:00Z", "status": "completed", "conclusion": "success"}])
+    out([run_row(run_on(flag("--commit") or "none")[1])])
+if verb in ("run view", "run rerun"):
+    runs = load("runs.json", {})
+    hit = next((r for r in runs.values() if str(r["id"]) == n), None)
+    if verb == "run rerun" and hit:
+        hit["attempt"] += 1
+        save("runs.json", runs)
+        out("")
+    if verb == "run view" and flag("--json") == "attempt" and hit:
+        out({"attempt": hit["attempt"]})
 if verb == "run watch":
     out("")
 if verb == "run view" and flag("--json") == "url":
     out({"url": f"https://example.test/o/n/actions/runs/{n}"})
 if verb == "run view" and "--log-failed" in args:
     out("the failed log line")
+if sig.startswith("api repos/") and "/actions/runs/" in args[1] and "/attempts/" in args[1]:
+    m = re.search(r"/actions/runs/(\d+)/attempts/(\d+)(/jobs)?(?:\?per_page=\d+)?$", args[1])
+    hit = next((r for r in load("runs.json", {}).values() if str(r["id"]) == m.group(1)), None)
+    if hit:
+        k = int(m.group(2))
+        c, raw = attempt_conclusion(hit, k), hit["plan"][min(k, len(hit["plan"])) - 1]
+        done = c not in ("", "in_progress", "queued")
+        if m.group(3):
+            started = raw not in ("budget", "startup_failure")
+            jobs = [{"name": "build", "conclusion": c if done else None, "steps": [{"name": "run"}] if started else [],
+                     "runner_name": "runner-1" if started else None}]
+            if raw == "matrix":  # the leg fail-fast cancelled while it queued: no steps, no runner
+                jobs.append({"name": "build (2)", "conclusion": "cancelled", "steps": [], "runner_name": None})
+            out({"jobs": jobs})
+        out({"run_attempt": k, "status": "completed" if done else c or "in_progress", "conclusion": c if done else None})
 if sig.startswith("api repos/") and "/replies" in args[1]:
     save("replies.json", load("replies.json", []) + [{"id": int(args[1].split("/comments/")[1].split("/")[0]), "body": body_text()}])
     out({})

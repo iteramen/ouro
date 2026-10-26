@@ -170,7 +170,7 @@ try {
     # ── fail loud AND say why: ouro-binding.py's reason is on stderr ───────────────────────
     # A binding that is not valid TOML makes `ouro-binding.py get` exit 1 with
     # `error: <path>: <reason>` on stderr. The value is stdout-only; the error must not be, or
-    # it ends in an empty colon -- the same way the Python 3.11+ floor message would vanish.
+    # it ends in an empty colon -- the same way the Python 3.12+ floor message would vanish.
     Reset-Fixture "`n[docs`n"
     $o = Gate-Output
     Assert-Equal $true (($o -match 'failed \(exit 1\): ') -and ($o -match 'error: .*ouro\.toml')) `

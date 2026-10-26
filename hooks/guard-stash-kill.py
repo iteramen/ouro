@@ -23,7 +23,7 @@ Refused, with the reason on stderr and exit 2:
   process in another worktree is another session's, unless the command carries
   `# pid-ok: <where the PID was recorded>`.
 
-Stdlib only; python3 3.11+. The recorded events under tests/hooks/guard-stash-kill/ are its test.
+Stdlib only; python3 3.12+. The recorded events under tests/hooks/guard-stash-kill/ are its test.
 """
 import os
 import re

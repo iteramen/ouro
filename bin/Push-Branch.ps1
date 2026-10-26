@@ -16,7 +16,7 @@
     origin's tip is read back and must be the local HEAD. The default branch and a protected
     prefix are refused.
 .PARAMETER Lease
-    The tip origin's branch had before the rebase, as step 2 printed it, or `none`.
+    The tip origin's branch had before the rebase, as Sync-Branch.ps1 printed it, or `none`.
 .EXAMPLE
     pwsh -File <ouro>/bin/Push-Branch.ps1
 .EXAMPLE
@@ -38,7 +38,7 @@ function Invoke-PushBranch {
     $head = @(Invoke-Read git @('rev-parse', 'HEAD'))[0]
     if ($Lease -and $Lease -ne 'none') {
         if ((Invoke-Native git @('rev-parse', '--verify', '--quiet', "$Lease^{commit}")).Code -ne 0) {
-            throw "the lease '$Lease' is not a commit this clone has - it is the tip step 2 printed after lease:, which the sync fetched"
+            throw "the lease '$Lease' is not a commit this clone has - it is the tip Sync-Branch.ps1 printed after lease:, which the sync fetched"
         }
         $p = Invoke-Native git @('push', "--force-with-lease=refs/heads/${branch}:$Lease", 'origin', $branch)
         if ($p.Code -ne 0) {

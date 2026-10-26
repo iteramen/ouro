@@ -44,7 +44,7 @@ jobs:
           path: ouro
           persist-credentials: false   # as above: the checkout fetches with the job's own token, which must not stay in its .git/config
 
-      # The gate's binding read calls python3 and needs 3.11+, and a runner image ships whatever python it ships.
+      # The gate's binding read calls python3 and needs 3.12+, and a runner image ships whatever python it ships.
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'

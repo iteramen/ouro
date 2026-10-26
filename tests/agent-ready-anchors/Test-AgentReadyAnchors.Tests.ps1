@@ -60,27 +60,30 @@ try {
     git init -q . 2>$null
     git remote add origin https://github.com/o/n.git 2>$null
     'refOnlyFrag = 1' | Set-Content -LiteralPath 'a.ps1'
-    '- `a.ps1` - "refOnlyFrag = 1"' | Set-Content -LiteralPath 'docs/d.md'
+    '- `./a.ps1` - "refOnlyFrag = 1"' | Set-Content -LiteralPath 'docs/d.md'
     git add . 2>$null
     git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --no-verify -m fixture 2>$null
     'workOnlyFrag = 2' | Set-Content -LiteralPath 'a.ps1'
-    '- `a.ps1` - "workOnlyFrag = 2"' | Set-Content -LiteralPath 'docs/d.md'
+    '- `./a.ps1` - "workOnlyFrag = 2"' | Set-Content -LiteralPath 'docs/d.md'
     'x' | Set-Content -LiteralPath 'docs/new.md'
     git add . 2>$null
-    $global:anchorIssuesJson = '[{"number":7,"title":"i","body":"- `a.ps1` - \"refOnlyFrag = 1\"","labels":[{"name":"agent-ready"}]}]'
+    $global:anchorIssuesJson = '[{"number":7,"title":"i","body":"- `./a.ps1` - \"refOnlyFrag = 1\"","labels":[{"name":"agent-ready"}]}]'
     function gh {
         if ($args[0] -eq 'repo') { $global:LASTEXITCODE = 0; return 'o/n' }
         $global:LASTEXITCODE = 0
         $global:anchorIssuesJson
     }
     $tree = (& $Script 6>&1 | Out-String)
-    Assert-Match 'STALE-ANCHOR: fragment no longer greps: "refOnlyFrag' $tree 'no -Ref: the issue anchor, absent from the working tree, is stale'
+    Assert-Match 'STALE-ANCHOR: fragment no longer greps in ''a.ps1'': "refOnlyFrag' $tree 'no -Ref: the issue anchor, absent from the working tree, is stale'
     $ref = (& $Script -Ref HEAD 6>&1 | Out-String)
     Assert-Match '#7: OK' $ref '-Ref: the issue anchor present at the commit verifies though the working tree lost it'
     $doc = (& $Script -Ref HEAD -Doc docs/d.md 6>&1 | Out-String)
     Assert-Match 'docs/d.md: OK' $doc '-Ref: a -Doc file is read at the commit and its fragment verifies there'
     $docNoRef = (& $Script -Doc docs/d.md 6>&1 | Out-String)
     Assert-Match 'docs/d.md: OK' $docNoRef 'no -Ref: the working-tree doc is read, and its working-tree fragment verifies in the working tree'
+    '- `./a.ps1` - "workOnlyFrag = 2"' | Set-Content -LiteralPath 'docs/br[1].md'
+    $docBracket = (& $Script -Doc 'docs/br[1].md' 6>&1 | Out-String)
+    Assert-Match ([regex]::Escape('docs/br[1].md: OK')) $docBracket 'no -Ref: a -Doc path holding a bracket is read as spelled, not as a pattern'
     $missing = (& $Script -Ref HEAD -Doc docs/new.md 6>&1 | Out-String)
     Assert-Match 'doc not found: docs/new.md' $missing '-Ref: a -Doc file absent at the commit is not found though the working tree holds it'
     $global:anchorIssuesJson = '[]'

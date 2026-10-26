@@ -5,18 +5,18 @@ inputs:
   setup-python:
     description: >-
       Pin the interpreter the gate runs under. Any value but the string true turns the pin off,
-      and true is the default: set it to false on a runner that already carries python3 3.11+, or
+      and true is the default: set it to false on a runner that already carries python3 3.12+, or
       in a repository whose policy forbids actions/setup-*. Unpinned, the gate reads the binding
       through the runner's own python3, and fails with ouro-binding.py's floor message under one
-      older than 3.11.
+      older than 3.12.
     required: false
     default: 'true'
 
 runs:
   using: composite
   steps:
-    # The gate reads the consumer's [docs] table through ouro-binding.py, which needs `tomllib`
-    # (Python 3.11+). Under an older `python3` the gate does not fall back to its defaults: its
+    # The gate reads the consumer's [docs] table through ouro-binding.py, which needs Python 3.12+.
+    # Under an older `python3` the gate does not fall back to its defaults: its
     # first binding read fails with the floor message. Runner images ship whatever python they ship,
     # so the pin makes every runner behave alike, and it is what a consumer gets without asking.
     # update-environment is off, so the pinned python reaches the gate step below and none of the

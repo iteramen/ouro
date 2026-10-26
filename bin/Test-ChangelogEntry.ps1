@@ -5,13 +5,14 @@
     shipped defaults name no repository.
 .DESCRIPTION
     Diff-scoped, unlike every other gate here: the changed paths of
-    `git diff --name-only <base>...HEAD` (three-dot, so the comparison is against the merge
-    base) are classified against the surfaces a consumer's own files name, and when any of
-    them moved, the changelog's unreleased section at HEAD must hold more bullets than the
-    same section at the base, at least one of them new. A branch that bumps the version in its
-    own PR moves the heading, so a section under a `## [version]` the base does not have counts
-    as unreleased too; a heading is matched by its bracketed version, so a corrected date or
-    title is the same release.
+    `git diff --name-only <base>...HEAD` (three-dot, so the comparison is against the merge base;
+    the working tree is not read, and a NOTE line counts its uncommitted changes) are classified
+    against the surfaces a consumer's own files name, and when any of them moved, the
+    changelog's unreleased section at HEAD must hold more bullets than the same section at the
+    base, at least one of them new. A branch that bumps the version in its own PR moves the
+    heading, so a section under a `## [version]` the base does not have counts as unreleased
+    too; a heading is matched by its bracketed version, so a corrected date or title is the same
+    release.
 
     The surfaces, each read from the file's content at both refs rather than from its path
     alone:
@@ -42,7 +43,7 @@
     binding, or a vendored tree with no ouro-binding.py beside this script, falls back to
     origin/master with an INFO line, as the docs-freshness gate falls back to its defaults; a
     repo that has a binding and the tool, with no python3 on PATH, stops the run naming that, as
-    it already stops for a python3 older than 3.11. A base ref this clone does not have -- a
+    it already stops for a python3 older than 3.12. A base ref this clone does not have -- a
     shallow checkout, a throwaway clone -- is an INFO line and a clean exit: there is nothing to
     diff. On the default branch itself the diff is empty and the run is clean.
 .PARAMETER Base
@@ -358,7 +359,7 @@ if (-not $Base) {
     if (-not $branch) {
         $why = if (-not (Test-Path -LiteralPath $bindingFile)) { "no $bindingFile" }
                elseif (-not (Test-Path -LiteralPath $bindingTool)) { 'no ouro-binding.py beside this script' }
-               elseif (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { throw "no python3 on PATH, and $bindingFile is a binding: a repo that has one needs python3 3.11+ on PATH, because its [repo].default_branch is read through ouro-binding.py" }
+               elseif (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { throw "no python3 on PATH, and $bindingFile is a binding: a repo that has one needs python3 3.12+ on PATH, because its [repo].default_branch is read through ouro-binding.py" }
                else { 'repo.default_branch is empty' }
         $branch = 'master'
         Write-Host "INFO - [repo].default_branch not read ($why): diffing against origin/$branch"
@@ -374,6 +375,17 @@ if ((Invoke-Git -Root $RepoRoot -Arguments @('rev-parse', '--verify', '--quiet',
 $diff = Invoke-Git -Root $RepoRoot -Arguments @('diff', '--name-only', "$Base...HEAD")
 if ($diff.Code -ne 0) { throw "git diff --name-only $Base...HEAD failed (exit $($diff.Code))" }
 $changed = @($diff.Lines | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+# Run before a commit, the committed range holds none of the change: a green report then has not
+# seen it, so the count of what was not read is part of the report.
+# --no-optional-locks: a report-only read takes no index lock a concurrent git write could meet.
+$status = Invoke-Git -Root $RepoRoot -Arguments @('--no-optional-locks', 'status', '--porcelain')
+$unread = @($status.Lines | Where-Object { "$_".Trim() })
+if ($status.Code -ne 0) {
+    Write-Output "NOTE - git status failed (exit $($status.Code)): whether the working tree holds uncommitted changes is unknown"
+}
+elseif ($unread.Count -gt 0) {
+    Write-Output ("NOTE - {0} uncommitted path(s) in the working tree are not read: the gate diffs the committed {1}...HEAD; commit, then run it again" -f $unread.Count, $Base)
+}
 
 $findings = @(Get-SurfaceFindings -Root $RepoRoot -BaseRef $Base -ChangedPaths $changed)
 

@@ -265,8 +265,8 @@ try {
             # Modifiers ride only on agent-ready and never stand alone (contract §4).
             # gh writes one edit's removal and addition independently, and a label the repository
             # lacks fails only its own half. So: remove first, naming only labels the issue carries,
-            # then add. A failed add leaves no state label -- the label-invariants gate's safe-to-
-            # restore finding -- never a rejected promotion still on agent-ready.
+            # then add. A failed add leaves an issue with no state label, which the throw below names
+            # for a person to restore -- never a rejected promotion still on agent-ready.
             $remove = @('agent-ready') + @('trivial', 'checkpoint' | Where-Object { $names -contains $_ })
             $removeFlags = @($remove | ForEach-Object { '--remove-label', $_ })
             gh issue edit $i.number @removeFlags | Out-Null

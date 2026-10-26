@@ -1,7 +1,7 @@
 ---
 name: bad
 description: fixture skill for Test-CommandBlocks.Tests.ps1 -- plants one block that fails
-  bash -n and one line per grep rule
+  bash -n and at least one line per grep rule
 ---
 
 # bad (fixture)
@@ -13,7 +13,7 @@ if [ -z "$X" ]; then
   echo "missing"
 ```
 
-A block with no parse error, one line per grep rule:
+A block with no parse error, at least one line per grep rule:
 
 ```bash
 git remote

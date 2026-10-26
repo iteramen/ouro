@@ -38,13 +38,19 @@
     shape gate's one-parseable-anchor minimum.
 
     An ANCHOR LINE is a list item, bulleted or numbered at any indent, whose first backticked
-    span passes rule 1's filters and names one tracked file, matched literally -- spelled as the
-    index spells it, or by a unique literal suffix match, and never as a pattern. On it, every
-    double-quoted fragment in the length bounds is grepped in that one file, whatever its
-    characters, and a miss is a finding naming the file. A span whose brace set expands to
-    several tracked files cites each, and a fragment is a miss only when none holds it. On every
-    other line a fragment is grepped only if it looks like code, repo-wide, and a miss holding a
-    backtick is skipped as a prose-code composite. A continuation line under an item is judged by itself.
+    span passes rule 1's filters and names tracked files, each matched literally -- spelled as
+    the index spells it, or by a unique literal suffix match, and never as a pattern: one file,
+    or each expansion of a brace set in the span that resolves to one. On it, every
+    double-quoted fragment in the length bounds is grepped in those files, whatever its
+    characters, and is a miss only when none holds it; a miss is looked for once more in each
+    file's text as a reader joins it (comment leaders dropped from its lines, consecutive lines
+    of one kind joined, a blank line, a bare leader or a change between comment lines and plain
+    lines ending a run, whitespace collapsed; the fragment only collapsed, so a quote that
+    carries a leader matches on the first pass alone), and is a finding naming the file only
+    when that misses too, noted as a phrase that string concatenation may split. On every other
+    line a fragment is grepped only if it looks like code, repo-wide, and a miss holding a
+    backtick is skipped as a prose-code composite. A continuation line under an item is judged
+    by itself.
 #>
 
 function Get-AnchorFindings {
@@ -187,7 +193,8 @@ function Get-AnchorFindings {
     }
     finally { [Console]::OutputEncoding = $savedEnc }
     function Get-LiteralSuffixHits([string]$Suffix) {
-        $trackedFiles | Where-Object { $_.EndsWith($Suffix, [System.StringComparison]::Ordinal) }
+        # whole path segments only: x/foo.ps1 is a suffix of a/x/foo.ps1, never of bax/foo.ps1
+        $trackedFiles | Where-Object { $_.EndsWith("/$Suffix", [System.StringComparison]::Ordinal) }
     }
     # The tracked file a candidate names: the entry spelled exactly so, else the one tracked file
     # it is a unique literal suffix of; nothing when none or several are. Never a pattern -- an
@@ -208,7 +215,7 @@ function Get-AnchorFindings {
     foreach ($span in ($script:cappedSpans | Select-Object -Unique)) {
         $findings += "brace sets expand past 64 paths in this body - trim the sets: '$span'"
     }
-    $pathMatches = $candidates | Sort-Object -Unique
+    $pathMatches = $candidates | Sort-Object -Unique -CaseSensitive
     # Each candidate as the tracked file it names, else as written: the set a footprint reads.
     # Distinct and ordinal-sorted, since a path is compared case-sensitively.
     $pathSet = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
@@ -219,18 +226,22 @@ function Get-AnchorFindings {
     foreach ($p in $pathMatches) {
         $normalized = Get-NormalizedPath $p
         if (Test-ExactTracked $normalized) { continue }
-        # Test-Path is a wildcard read, kept as the fallback so a root-relative glob span
-        # (src/*.ps1) still resolves. Only when both the exact entry and Test-Path miss does the
-        # literal suffix read below run.
+        # The path is probed literally first, so a name holding `[` is found as spelled; a wildcard
+        # Test-Path is kept as the fallback for a span holding a wildcard character, so a
+        # root-relative glob span (src/*.ps1) still resolves. Only when the exact entry and both
+        # probes miss does the literal suffix read below run.
         # A name Test-Path cannot probe, a component past the filesystem's length limit or an
         # unclosed wildcard bracket with a match in the directory, is an error on some hosts;
         # absent is the answer here, and the suffix read below still decides a tracked file.
         # The answer is assigned inside the try: on Linux the cmdlet writes False and then
         # throws, and a try block's output joined with the catch's would be a two-element array.
         if ($Ref) {
-            $present = [bool]@($trackedFiles | Where-Object { $_ -like $normalized -or $_ -like "$normalized/*" })
+            $present = [bool]@($trackedFiles | Where-Object { $_ -clike $normalized -or $_ -clike "$normalized/*" })
         } else {
-            try { $present = [bool](Test-Path $p) } catch { $present = $false }
+            try { $present = [bool](Test-Path -LiteralPath $p) } catch { $present = $false }
+            if (-not $present -and $p -match '[*?\[]') {
+                try { $present = [bool](Test-Path $p) } catch { $present = $false }
+            }
         }
         if (-not $present) {
             # Bodies often write paths relative to a subtree (Sub/Dir/README.md
@@ -264,11 +275,12 @@ function Get-AnchorFindings {
             ForEach-Object { $_ -replace '^`+' -replace '`+$' }
     }
     # An anchor-shaped line -- a list item, at any indent, whose first backticked span passes
-    # rule 1's filters and resolves -- cites one file, and every fragment on it is verified there,
+    # rule 1's filters and resolves -- cites the tracked files its span names (one, or each
+    # expansion of a brace set that resolves), and every fragment on it is verified in them,
     # whatever its characters: the code-like filter below guesses at prose, and on such a line
-    # the body has said what it quotes. Every other line keeps the filter and the repo-wide grep.
-    # Keyed exactly: fragments and paths are case-sensitive to the grep. A line with no quote
-    # has nothing to verify, so it is not resolved, and each candidate is resolved once.
+    # the body has said what it quotes. Every other line keeps the filter and the repo-wide
+    # grep. Keyed exactly: fragments and paths are case-sensitive to the grep. A line with no
+    # quote has nothing to verify, so it is not resolved, and each candidate is resolved once.
     $anchorFrags = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
     $resolved = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     # A span that expands to several candidates cites each one that resolves, and a fragment on
@@ -276,7 +288,16 @@ function Get-AnchorFindings {
     $otherLines = foreach ($line in $Text -split '\r?\n') {
         $files = @()
         if ($line.Contains('"') -and $line -match '^\s*(?:[-*+]|\d+[.)])\s' -and $line -match '`([^`\r\n]+)`') {
-            foreach ($candidate in Get-PathCandidate $Matches[1]) {
+            $first = $Matches[1]
+            $bare = $first.Trim()
+            # A bare filename in an evidence row is not the slash-qualified path grammar.
+            # Report it before reading the quotation, even when other evidence would satisfy
+            # the shape minimum. Ordinary inline file mentions stay outside this check.
+            if ($line -match '^\s*(?:[-*+]|\d+[.)])\s+`' -and $bare -notmatch '[/\\\s":#]' -and $bare -notmatch '^[\$%<]' -and $bare -match '\.[A-Za-z0-9]{1,7}\z') {
+                $findings += "anchor path needs a directory separator: '$bare' (use './$bare' for a top-level file)"
+                continue
+            }
+            foreach ($candidate in Get-PathCandidate $first) {
                 if (-not $resolved.ContainsKey($candidate)) { $resolved[$candidate] = Resolve-AnchorPath $candidate }
                 if ($resolved[$candidate]) { $files += $resolved[$candidate] }
             }
@@ -290,7 +311,48 @@ function Get-AnchorFindings {
             # Only fragments that look like code: contain a code-ish char, and are not prose
             # (prose fragments have many spaces and no code punctuation).
             ($_ -match '[(){}\[\];=_."<>&:!]') -and -not ($_ -match '^[A-Za-z ,''-]+$')
-        } | Sort-Object -Unique
+        } | Sort-Object -Unique -CaseSensitive
+    # The file's text as a reader joins it: a run of consecutive comment lines (a leader at line
+    # start; a code line that opens with a leader character reads as one too) reads as one line
+    # with the leaders dropped, a run of consecutive plain lines as one; a blank line, a bare leader
+    # or a change between the two kinds ends a run. Whitespace runs collapse to one space. Runs are
+    # joined by newlines, which a fragment never holds, so a fragment matches inside one run only.
+    function Get-FlatText([string]$Chunk) {
+        $runs = [System.Collections.Generic.List[string]]::new()
+        $kind = $null
+        $buf = ''
+        foreach ($line in $Chunk -split '\r?\n') {
+            $m = [regex]::Match($line, '^[ \t]*(?://+|#+|\*+|--+|;+)[ \t]?(.*)$')
+            $text = if ($m.Success) { $m.Groups[1].Value } else { $line }
+            if ($text.Trim() -eq '') { if ($buf) { $runs.Add($buf) }; $buf = ''; $kind = $null; continue }
+            if ($null -ne $kind -and $kind -ne $m.Success) { $runs.Add($buf); $buf = '' }
+            $kind = $m.Success
+            $buf = if ($buf) { "$buf $text" } else { $text }
+        }
+        if ($buf) { $runs.Add($buf) }
+        @($runs | ForEach-Object { ($_ -replace '\s+', ' ').Trim() }) -join "`n"
+    }
+    # The cited file's text: at the ref when one is given, else the working tree the first pass
+    # grepped. Read once per file.
+    $citedTexts = @{}
+    function Read-CitedFile([string]$Path) {
+        if ($citedTexts.ContainsKey($Path)) { return $citedTexts[$Path] }
+        $text = $null
+        if ($Ref) {
+            $savedEnc = [Console]::OutputEncoding
+            try {
+                [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                $lines = git show "${Ref}:$Path" 2>$null
+                if ($LASTEXITCODE -eq 0) { $text = @($lines) -join "`n" }
+            }
+            finally { [Console]::OutputEncoding = $savedEnc }
+        }
+        elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $text = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $Path).Path, [System.Text.UTF8Encoding]::new($false))
+        }
+        $citedTexts[$Path] = $text
+        $text
+    }
     $checkedFrags = 0
     foreach ($pair in $anchorFrags.Values) {
         $files, $frag = $pair
@@ -298,8 +360,17 @@ function Get-AnchorFindings {
         $hit = if ($Ref) { git grep -F -e "$frag" $Ref -- @specs 2>$null | Select-Object -First 1 }
                else { git grep -F -e "$frag" -- @specs 2>$null | Select-Object -First 1 }
         $checkedFrags++
+        $flat = ($frag -replace '\s+', ' ').Trim()  # the fragment keeps its leaders: a quoted flag or directive is what it quotes
+        if (-not $hit -and $flat) {
+            # a second look, in each cited file, at the text as a reader joins it; a hit there is no finding
+            foreach ($file in $files) {
+                $text = Read-CitedFile $file
+                if ($null -ne $text -and (Get-FlatText $text).Contains($flat)) { $hit = $true; break }
+            }
+        }
         if (-not $hit) {
-            $findings += "fragment no longer greps in '$($files -join "', '")': `"$frag`""
+            # the prefix up to the quoted fragment is what the driver re-points by; the note comes after it
+            $findings += "fragment no longer greps in '$($files -join "', '")': `"$frag`" (nor with lines joined; a phrase split by string concatenation is not joined)"
         }
     }
     foreach ($frag in $fragMatches) {

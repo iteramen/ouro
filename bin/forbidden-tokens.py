@@ -105,8 +105,9 @@ hook    A Claude Code PreToolUse hook, registered by `hooks/hooks.json`, which t
 A hit is reported by path, line number and entry number, never by the matched text or the entry,
 since gate output is pasted into pull request bodies.
 
-Stdlib only.
+Stdlib only; Python 3.12+.
 """
+import bisect
 import json
 import os
 import posixpath
@@ -115,6 +116,12 @@ import shlex
 import shutil
 import subprocess
 import sys
+
+# Claude Code treats exit 2 as a refusal; other errors can let a publishing call through.
+if tuple(sys.version_info[:2]) < (3, 12):
+    sys.stderr.write(f"forbidden-tokens.py needs Python 3.12+; this python is {sys.version_info[0]}.{sys.version_info[1]}\n")
+    sys.exit(2)
+
 import tempfile
 import time
 
@@ -202,12 +209,18 @@ def cmd_check():
 
 
 _WS = r"(?:\\\r?\n|`\r?\n|\s)+"
+# Any words may sit between `git` and `commit` (options, quoted or substituted values, continuations), so
+# a commit is never missed; but `git` directly followed by a subcommand that never commits makes the word
+# `commit` an argument (`git grep commit`, `git diff -- commit.py`). Options before the subcommand keep the
+# broad reading, so a directory named like a subcommand cannot hide a commit.
+_GIT_READS = (r"(?!(?:grep|log|diff|show|blame|status|rev-parse|rev-list|ls-files|ls-tree|cat-file|describe|"
+              r"shortlog|reflog|help|merge-base|name-rev|for-each-ref|show-ref|whatchanged|range-diff|cherry)(?![\w-]))")
 _FLAGS = "(?:" + _WS + r"--?[A-Za-z0-9][\w-]*(?:=\S+|" + _WS + r"[^\s-]\S*)?)*"
 PUBLISH = re.compile(
     r"(?<![\w-])(?i:gh(?:\.exe)?)[\"']?" + _FLAGS + _WS + r"(?:"
     r"issue" + _FLAGS + _WS + r"(?:create|new|comment|edit|close|reopen)|"
     r"pr" + _FLAGS + _WS + r"(?:create|new|edit|comment|review|merge|close|reopen|revert))(?![\w-])|"
-    r"(?<![\w-])(?i:git(?:\.exe)?)[\"']?\s+(?:[^\s;&|]+\s+)*?commit(?![\w-])")
+    r"(?<![\w-])(?i:git(?:\.exe)?)[\"']?\s+" + _GIT_READS + r"(?:[^\s;&|]+\s+)*?commit(?![\w-])")
 BODY_FILE = re.compile(
     r"""(?<!\S)(--body-file|--file|-F)(?:=|(?:\\\r?\n|\s)+)("[^"]*"|'[^']*'|[^\s;&|)]+)""")
 ATTACHED = re.compile(r"""(?<!\S)(-F)(?=[^\s=])("[^"]*"|'[^']*'|[^\s;&|)]+)""")
@@ -297,15 +310,19 @@ def policy(read):
             return "absent", [], ""
         return "required", [], "binding fails check: " + (text.strip().splitlines() or ["(no output)"])[0]
     code, text = read(tool + ["get", "ship.forbidden_check"])
+    if code is None:
+        return "required", [], "the binding's ship.forbidden_check could not be read within the hook's budget"
     if code == 0:
         if text.rstrip("\r\n") != "off":
             return "required", [], "the binding requires the check (ship.forbidden_check)"
         kind = "off"
-    elif code is None or not text.startswith("error: no such key: ship.forbidden_check"):
+    elif not text.startswith("error: no such key: ship.forbidden_check"):
         return "required", [], "the binding's ship.forbidden_check could not be read"
     else:
         kind = "absent"
     code, text = read(tool + ["get", "repo.slug"])
+    if code is None:
+        return "required", [], "the binding's repo.slug could not be read within the hook's budget"
     if code != 0 or not text.strip():
         return "required", [], "the binding's repo.slug could not be read"
     return kind, [text.rstrip("\r\n")], ""
@@ -339,6 +356,13 @@ def addressed(command):
     the command, a quoted body's mention included, so the read fails closed."""
     return ([slug(next(g for g in m.groups() if g)) for r in (REPO_FLAG, GH_REPO) for m in r.finditer(command)]
             + ["/".join(m).lower() for m in ISSUE_URL.findall(command)])
+
+
+def in_prose(spans, text, start, end):
+    """Whether a verb found at [start, end) of text sits inside one of the sorted, disjoint quoted spans as prose:
+    it does unless the span is the verb's own quotes, closed inside the match and holding no blank."""
+    i = bisect.bisect_right(spans, (start, float("inf"))) - 1
+    return i >= 0 and start < spans[i][1] and not (start == spans[i][0] and spans[i][1] <= end and not re.search(r"\s", text[start:spans[i][1]]))
 
 
 def quoted_spans(command):
@@ -401,18 +425,35 @@ def check_off(cwd, command, protects, deadline=None):
 
 
 SEGMENT = re.compile(r"&&|\|\||;|\n|\(|\)")
-CD = re.compile(r"(?:\s|[{&!]|(?:builtin|command|exec|if|elif|then|else|do|while|until|time)(?=\s))*"
-                r"(?P<verb>cd|chdir|pushd|sl|Set-Location|Push-Location)(?:\s+(?:-[^\s\"':]*|/d))*(?:\s+-[a-z]+:|\s+)"
-                r"(?P<dir>(?:\"[^\"]*\"|\$?'[^']*'|[^\s\"';&|<>])+)(?P<tail>.*)$", re.I)
+# a NAME=value prefix word: bare, quoted and ANSI-C parts, an escaped character inside any of them read as text,
+# += too; possessive, so a word that fails is given up without backtracking into its parts
+PREFIX_WORD = r"[A-Za-z_]\w*\+?=(?:\$'(?:[^'\\]|\\.)*'|\$\w+|\"(?:[^\"\\]|\\.)*\"|'[^']*'|\\.|[^\s\"'\\`$])*+"
+# the prefix words a segment opens with, as far as the reader follows them; what they stop at says whether the
+# rest is a command word (read on) or a part the reader does not follow: a backtick, a `${` or `$(`, an unpaired quote
+PREFIX_SCAN = re.compile(r"\s*(?:" + PREFIX_WORD + r"\s+)*+(?:" + PREFIX_WORD + r")?+")
+ASSIGN_OPENS = re.compile(r"\s*[A-Za-z_]\w*\+?=")
+KEYWORDS = r"builtin|command|exec|if|elif|then|else|do|while|until|time"
+# a run of prefix tokens (assignment words, keywords, braces) too long to read: refused before the cd reader,
+# whose work per start grows with the run
+PREFIX_RUN = re.compile(r"(?:(?<!\S)(?:" + PREFIX_WORD + "|" + KEYWORDS + r"|[{&!])\s+){65}")
+# the verb, spelled bare or with the quotes and escapes bash removes before it runs the word ('cd', $'cd', $"cd", c\d, c''d, \cd)
+SPELL = r"(?:\$?['\"]|\\)*+"
+VERB = SPELL + r"(?:" + "|".join(SPELL.join(map(re.escape, v)) for v in ("cd", "chdir", "pushd", "sl", "Set-Location", "Push-Location")) + r")" + SPELL
+# a segment whose prefix words stop at a part the reader does not follow, with a bare cd verb after it: refused, not skipped;
+# a match starts only where a run of quotes or escapes starts, so a run no verb follows fails once, not once per position
+CD_VERB = re.compile(r"(?<![\w'\"\\$-])" + VERB + r"\s+\S", re.I)
+CD_HEAD = (r"(?:\s|[{&!]|(?:" + KEYWORDS + r")(?=\s)|" + PREFIX_WORD + r"(?=\s))*+"
+           r"(?P<verb>" + VERB + r")(?:\s+(?:-[^\s\"':]*|/d))*")
+CD = re.compile(CD_HEAD + r"(?:\s+-[a-z]+:|\s+)(?P<dir>(?:\"[^\"]*\"|\$?'[^']*'|[^\s\"';&|<>])+)(?P<tail>.*)$", re.I)
 # a cd verb with nothing readable after it: the segment was cut at a `(` (a command substitution or a
-# PowerShell expression), or only a quote or a `$` follows; it lands somewhere the hook cannot name
-CD_BARE = re.compile(CD.pattern.split("(?P<dir>")[0] + r"\s*[\"']?\$?\s*$", re.I)
+# PowerShell expression) or at a segment separator, or only a quote or a `$` follows; it lands somewhere the hook cannot name
+CD_BARE = re.compile(CD_HEAD + r"(?:\s+-[a-z]+:)?\s*[\"']?\$?\s*$", re.I)
 # a pipe or a background & after the directory (not a redirect's, as in 2>&1 or &>)
 FORKED = re.compile(r"\||(?<![<>&])&(?![>&])")
 # the string (or bare word) a child shell runs: `bash -c`, `bash -lc`, `pwsh -Command`, `cmd /c`, `eval`, `iex`, `Invoke-Expression`
 SHELL_STRING = re.compile(r"(?<!\S)(?:[-/](?:[a-z]*c|c[a-z]*)|eval|iex|Invoke-Expression)\s+[\"']?", re.I)
-GIT_SPAN = re.compile(r"(?<![\w-])(?:env\s+(?:[^\s;&|]+\s+)*?)?[\"']?(?i:git(?:\.exe)?)[\"']?\s+(?:[^\s;&|]+\s+)*?commit(?![\w.-])")
-GIT_OPT = re.compile(r"(?<!\S)(-C|--chdir|--git-dir|--work-tree)(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|\"']+))")
+GIT_SPAN = re.compile(r"(?<![\w-])(?:env\s+(?:[^\s;&|]+\s+)*?)?[\"']?(?i:git(?:\.exe)?)[\"']?\s+" + _GIT_READS + r"(?:[^\s;&|]+\s+)*?commit(?![\w.-])")
+GIT_OPT = re.compile(r"(?<!\S)(-C|--chdir|--git-dir|--work-tree)(=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|\"']+))")
 GIT_ENV = re.compile(r"(?<![\w-])GIT_(?:DIR|WORK_TREE)\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^\s;&|\"'<>]+))", re.I)
 MAX_BASES = 32
 
@@ -422,6 +463,16 @@ def join_dir(base, rel):
     if os.name == "nt":
         rel = re.sub(r"^/([A-Za-z])/", lambda m: m.group(1).upper() + ":/", rel)
     return os.path.normpath(os.path.join(base, rel))
+
+
+def at_home(word, unquoted):
+    """An unquoted leading `~` or `~/` read as the home directory, HOME first (Git Bash's `~` on Windows)
+    and the platform's home otherwise, as bash reads it; `~user` and a quoted `~` stay literal, and so does
+    every `~` when no home is known."""
+    if not unquoted or not (word == "~" or word.startswith("~/")):
+        return word
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    return word if home == "~" else home + word[1:]
 
 
 def work_tree(d):
@@ -441,11 +492,23 @@ def segments(command):
 
 
 def target_dirs(command, cwd):
-    """The directories a publishing command lands in, after cwd: a `cd`, `chdir`, `pushd` or
+    """Every directory a publishing call may land in besides cwd: landing_dirs' keys."""
+    return list(landing_dirs(command, cwd))
+
+
+def landing_dirs(command, cwd):
+    """The directories a publishing command lands in, after cwd, each mapped to how a `cd` reached
+    it (`unexpanded` for `cd -` or a shell variable, `prose` for one in quoted text or after a
+    heredoc opens, else empty), for the refusal to name: a `cd`, `chdir`, `pushd` or
     `Set-Location` command moves the base where it opens a segment or the string a child shell
     runs (`bash -c`, `bash -lc`, `pwsh -Command`, `cmd /c`, `eval`, `iex`, `Invoke-Expression`,
     quoted or a bare word, an escaped quote inside it read as text), after a `{`, `&`, `!`,
-    `builtin`, `command` or a shell keyword, and the -C options of each `git … commit` (an
+    `builtin`, `command`, a shell keyword or one or more `NAME=value` prefix assignments (cd is a
+    regular builtin, so the directory change outlives them; a value bare, quoted or ANSI-C, an
+    escaped character inside any part read as text; a prefix shape the reader cannot follow, a
+    backtick or `${…}` part with a space or a quote it cannot pair, before a cd verb is refused as
+    unreadable, and so is a run of more than 64 prefix words), and the -C
+    options of each `git … commit` (an
     `env -C` or `env --chdir` before it included, the git inside a child's string too) chain from
     it; its --git-dir and --work-tree,
     and a GIT_DIR or GIT_WORK_TREE assignment, name one more (a .git directory read as its
@@ -455,48 +518,88 @@ def target_dirs(command, cwd):
     PowerShell's, whose pipe moves it. A `cd` whose directory reads empty (spliced quotes) or is
     cut away (a command substitution, a parenthesised expression) is refused as unreadable, or
     read as a directory that does not exist and refused for that: it lands somewhere unknown. A
-    bare `cd` with nothing after it lands in the home directory and is not judged.
+    bare `cd` at the very end of the command lands in the home directory and is not judged; one
+    with more after it is refused as unreadable, like a cut one. An unquoted
+    leading `~` or `~/` in a directory, a space-separated -C value or a GIT_DIR/GIT_WORK_TREE value
+    is the home directory (HOME, else the platform's), as bash reads it; `~user`, a quoted `~`, a
+    `~` after `=` in an option word and every `~` in a command that assigns HOME stay literal, and
+    are refused as missing where they do not resolve.
     Every one is judged, and the call passes only when all pass, so a mention in a quoted body
     cannot redirect the judgement away from where the call lands."""
+    if PREFIX_RUN.search(command):
+        raise Block("a run of more than 64 prefix words before a command, too many to read")
     spans = quoted_spans(command)
     heredoc = command.find("<<")
-    bases, out = [cwd], []
+    # a command that assigns HOME changes what `~` means for what follows (a statement) or leaves it to the
+    # old home (a prefix, bound after the expansion): the hook reads neither value, so `~` stays literal
+    home_set = re.search(r"(?<![\w-])HOME\s*=", command) is not None
+    bases, out = [cwd], {}  # directory -> how a cd reached it: "unexpanded", "prose" or ""
     for at, seg in segments(command):
+        # once per segment; a word inside a quoted span is prose, unless the span is the verb's own quotes, closed inside its match
+        verbs = [v.start() for v in CD_VERB.finditer(seg) if not (spans and in_prose(spans, command, at + v.start(), at + v.end()))]
         for e in GIT_ENV.finditer(seg):
-            out += [work_tree(join_dir(b, next(g for g in e.groups() if g))) for b in bases]
+            for b in bases:
+                out.setdefault(work_tree(join_dir(b, at_home(next(g for g in e.groups() if g), bool(e.group(3)) and not home_set))), "")
         for pos in [0] + [s.end() for s in SHELL_STRING.finditer(seg)]:
             m = CD.match(seg, pos)
             if not m:
                 b = CD_BARE.match(seg, pos)
-                if b:
+                # a bare cd with nothing but separators after it ends the command: it lands in the home directory, where nothing
+                # publishes, and is not judged; one with more of the command after it is refused
+                if b and command[at + len(seg):].strip(" \t\r\n;&|()"):
                     raise Block(f"a {b.group('verb')} whose directory cannot be read, so the directory the call lands in is unknown")
+                end = PREFIX_SCAN.match(seg, pos).end()
+                if ASSIGN_OPENS.match(seg, pos) and end < len(seg) and seg[end] in "`$\"'" and any(v >= end for v in verbs):
+                    raise Block("a cd behind prefix assignments the hook cannot read, so the directory the call lands in is unknown")
                 continue
             word = m.group("dir")
             if pos:  # the word ends where the child's string does: an escaped quote inside it is not that end
                 word = word.replace("\\" + seg[pos - 1], "\0").split(seg[pos - 1])[0].replace("\0", seg[pos - 1])
+            bare = (word == "~" or word.startswith("~/")) and not home_set  # on the raw word: a quoted ~, even ~""/x, is literal
             word = re.sub(r"\"([^\"]*)\"|\$?'([^']*)'", lambda q: q.group(1) or q.group(2) or "", word)
             if not word:  # a spliced or empty directory: it lands somewhere, and the hook cannot say where
                 raise Block(f"a {m.group('verb')} whose directory cannot be read, so the directory the call lands in is unknown")
-            moved = [join_dir(b, word) for b in bases]
+            moved = [join_dir(b, at_home(word, bare)) for b in bases]
             keeps = (pos > 0 or spans is None or -1 < heredoc < at or FORKED.search(m.group("tail"))
                      or any(a <= at + m.start("verb") < b for a, b in spans))
             bases = list(dict.fromkeys(bases + moved if keeps else moved))
             if len(bases) > MAX_BASES:
                 raise Block(f"the command moves through more than {MAX_BASES} directories inside quotes, too many to judge")
-            out += moved
+            # how the refusal names a directory that is not there: a word the hook does not expand, else a cd it read in
+            # text it cannot tell from a script (quoted, or after a heredoc opens)
+            raw = re.sub(r"'[^']*'", "", m.group("dir"))  # a $ inside single quotes is literal to the shell too
+            how = ("unexpanded" if word == "-" or "$" in raw else
+                   "prose" if pos == 0 and (-1 < heredoc < at or any(a <= at + m.start("verb") < b for a, b in spans or ())) else "")
+            for d in moved:
+                out.setdefault(d, how)
         if "commit" not in seg.lower():
             continue
         for span in GIT_SPAN.finditer(seg):
             for d in bases:
                 named = []  # git resolves --git-dir and --work-tree after every -C
                 for o in GIT_OPT.finditer(span.group(0)):
-                    v = next(g for g in o.groups()[1:] if g)
+                    # bash leaves a ~ after = in an option word literal: only a space-separated bare value expands
+                    v = at_home(next(g for g in o.groups()[2:] if g), bool(o.group(5)) and o.group(2) != "=" and not home_set)
                     if o.group(1) in ("-C", "--chdir"):
                         d = join_dir(d, v)
                     else:
                         named.append(v)
-                out += [d] + [work_tree(join_dir(d, v)) for v in named]
-    return [d for d in dict.fromkeys(out) if d != cwd]
+                for t in [d] + [work_tree(join_dir(d, v)) for v in named]:
+                    out.setdefault(t, "")
+    return {d: how for d, how in out.items() if d != cwd}
+
+
+def missing_dir(where, how, e):
+    """The no-list refusal for a landing directory that is not there, naming why the hook judged it and what clears it."""
+    head = f"the directory {where} does not exist, so the repository the call lands in cannot be judged, and the machine has no list ({e})"
+    if how == "unexpanded":
+        return (f"{head}: the hook reads a `cd -` or a `cd` to a shell variable as a literal directory, since it expands neither; "
+                "run the call from that directory, or `cd` to it by its literal path")
+    if how == "prose":
+        return (f"{head}: it is a `cd` in quoted text or after a heredoc opens, which the hook cannot tell from a script; "
+                "if it is text, reword it so no line opens with `cd`; if it is a real `cd`, create the directory first, "
+                "or run the call where the machine has a list")
+    return head
 
 
 def refusal(why, where, e):
@@ -565,9 +668,9 @@ def hook_check(payload):
     try:
         entries, protects = load_list()
     except MissingList as e:
-        for where in [cwd] + target_dirs(command, cwd):
+        for where, how in {cwd: "", **landing_dirs(command, cwd)}.items():
             if not os.path.isdir(where):
-                raise Block(f"the directory {where} does not exist, so the repository the call lands in cannot be judged, and the machine has no list ({e})")
+                raise Block(missing_dir(where, how, e))
             ok, why = publishes_unchecked(where, command, deadline)
             if not ok:
                 raise Block(refusal(why, where, e))
@@ -591,8 +694,9 @@ def hook_check(payload):
             with open(os.path.join(payload.get("cwd") or os.getcwd(), value), "rb") as f:
                 text = f.read().decode("utf-8-sig")
         except (OSError, UnicodeDecodeError) as e:
-            raise Block(f"the file {flag} names cannot be read ({type(e).__name__}); "
-                        "retry with an absolute path to a UTF-8 file")
+            raise Block(f"the file {flag} names cannot be read ({type(e).__name__}); the hook reads it before the command runs, so a "
+                        "file the same command writes, or a path given through a shell variable, is not there yet: write the file "
+                        "in a command of its own, then post it by its absolute literal path to a UTF-8 file")
         found = hits(text, entries)
         for lineno, n in found:
             reasons.append(f"the file {flag} names, line {lineno}: entry {n}")
@@ -685,12 +789,20 @@ def cmd_scan():
 def selftest():
     import tempfile
     this = os.path.abspath(__file__)
+    # Refuse before compiling the directory parser, including hook mode's blocking exit.
+    for minor in (10, 11):
+        for mode in ("check", "scan", "hook", "--selftest"):
+            fake = (f"import runpy, sys; sys.version_info = (3, {minor}, 2, 'final', 0); "
+                    f"sys.argv = [{this!r}, {mode!r}]; runpy.run_path({this!r}, run_name='__main__')")
+            old = subprocess.run([sys.executable, "-c", fake], capture_output=True, text=True)
+            assert old.returncode == 2 and not old.stdout, (mode, old)
+            assert old.stderr.strip() == f"forbidden-tokens.py needs Python 3.12+; this python is 3.{minor}", old.stderr
 
-    def run(args, env_add=None, cwd=None, stdin=b"", unset=(), timeout=None):
+    def run(args, env_add=None, cwd=None, stdin=b"", unset=(), timeout=None, script=None):
         env = {k: v for k, v in os.environ.items() if k not in (VAR, "CI") and k not in unset}
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env.update(env_add or {})
-        r = subprocess.run([sys.executable, this, *args], input=stdin, capture_output=True,
+        r = subprocess.run([sys.executable, script or this, *args], input=stdin, capture_output=True,
                            cwd=cwd, env=env, timeout=timeout)
         return r.returncode, r.stdout.decode("utf-8"), r.stderr.decode("utf-8")
 
@@ -869,7 +981,8 @@ def selftest():
         subs = ("gh issue create", "gh issue comment 1", "gh issue edit 1", "gh issue close 1",
                 "gh pr create", "gh pr edit 1", "gh pr comment 1", "gh pr review 1",
                 "gh pr merge 1", "gh pr close 1", "git commit", "git -C . -c a=b commit",
-                "git commit -a")
+                "git commit -a", 'git -c user.name="A B" commit', "git -c 'user.name=A B' commit",
+                "git --no-pager commit", "git $GIT_OPTS commit")
         for tool in ("Bash", "PowerShell"):
             for sub in subs:
                 blocked(sub + ' -m "x Secretword y"', "command text line 1: entry 1", tool=tool)
@@ -886,7 +999,9 @@ def selftest():
                     "gh pr checks 1 secretword", "gh issue comments secretword",
                     "gh pr merged secretword", "gh api repos/x/y -f body=secretword",
                     "git commit-tree secretword", "git log --grep secretword", "echo secretword",
-                    "xgh issue create secretword", "xgit commit secretword", "ls"):
+                    "xgh issue create secretword", "xgit commit secretword", "ls",
+                    "git grep -n -c 'reverts commit' secretword", "git diff -- commit.py secretword",
+                    "git log --oneline --grep fix commit secretword", "git grep -C 3 commit secretword"):
             allowed(cmd)
             allowed(cmd, tool="PowerShell")
             allowed(cmd, env={})
@@ -916,7 +1031,7 @@ def selftest():
         allowed("gh pr create --body-file wrap.md", env=lst("w2.txt", b"nomatch\n"))
         for f in ("missing.md", "dir", "notutf.md", "$BODY"):
             blocked(f"gh issue comment 1 --body-file {f}", "cannot be read")
-        blocked("gh issue comment 1 --body-file missing.md", "cannot be read", cwd=os.path.join(work, "dir"))
+        blocked("gh issue comment 1 --body-file missing.md", "write the file in a command of its own", cwd=os.path.join(work, "dir"))
         blocked("gh issue comment 1 --body-file hit.md", "cannot be read", cwd=os.path.join(work, "dir"))
         # flag text outside a publishing command is not acted on
         allowed("cat --body-file missing.md")
@@ -942,6 +1057,19 @@ def selftest():
                     "gh -R o/r issue view secretword", "gh issue -R o/r list secretword",
                     "gh pr revert-all secretword", "Xgit commit secretword"):
             allowed(cmd)
+        allowed("git grep -n -c 'reverts commit' -- bin; git grep -n -F 'no such file' -- bin")
+        for cmd in ("git \\\ncommit -m secretword", "git -C a \\\ncommit -m secretword",
+                    "git -C $(git rev-parse --show-toplevel) commit -m secretword", "git -C grep commit -m secretword",
+                    "git -C a\\ b commit -m secretword", "git ${opts[@]} commit -m secretword"):
+            blocked(cmd, "entry 1")
+        # each subcommand that never commits makes a later `commit` an argument; any other subcommand does not
+        for word in ("grep", "log", "diff", "show", "blame", "status", "rev-parse", "rev-list", "ls-files", "ls-tree",
+                     "cat-file", "describe", "shortlog", "reflog", "help", "merge-base", "name-rev", "for-each-ref",
+                     "show-ref", "whatchanged", "range-diff", "cherry"):
+            allowed(f"git {word} commit secretword")
+        blocked("git stash commit secretword", "entry 1")
+        blocked("git -C a `\ncommit -m secretword", "entry 1", tool="PowerShell")
+        blocked("git $env:GIT_OPTS commit -m secretword", "entry 1", tool="PowerShell")
         # a body file named with its value attached is read only on the publishing call's own line
         blocked("git commit -Fhit.md", "the file -F names, line 2: entry 1")
         blocked("gh issue comment 1 -Fhit.md", "the file -F names, line 2: entry 1")
@@ -1028,10 +1156,16 @@ def selftest():
         for sp in (" \\\n", " `\n"):
             blocked(f'gh{sp}issue{sp}comment 1 -m "x Secretword y"', "command text line 3: entry 1", tool="PowerShell")
             blocked(f'gh{sp}-R o/r{sp}pr{sp}create -m "x Secretword y"', "command text line 4: entry 1", tool="PowerShell")
-        # a hostile event must not stall the hook
+        # a hostile event must not stall the hook; each names a listed token, so the directory reader runs on it
         for hostile in ("gh " + "--aa " * 30 + "x" * 100000, "gh " + "--aa " * 30 + "issue " + "x" * 100000,
                         "gh " + "--aa=" + "x" * 100000, "git " + "x " * 30 + "x" * 100000,
-                        "gh " + "-" * 100000):
+                        "gh " + "-" * 100000, "git commit -m Secretword; " + "A=' -c ' " * 9000, "git commit -m Secretword; " + 'A=" -c " ' * 9000,
+                        "git commit -m Secretword; " + "A=' -c ' builtin " * 6000, "git commit -m Secretword; A=" + "$'a'" * 40 + '"',
+                        "gh pr create -t Secretword; A=" + "$'a'" * 40 + "x", "git commit -m Secretword; " + ("A=1 " * 60 + "x ") * 400,
+                        "git commit -m Secretword; " + "-c A=1 " * 8000, "gh pr create -t Secretword; " + "eval A=1 " * 8000,
+                        "echo " + "'" * 20000 + "x && git commit -m Secretword", "echo " + "\\" * 20000 + "x && git commit -m Secretword", "echo " + "$'" * 10000 + "x && git commit -m Secretword",
+                        "echo " + "c''d x " * 10000 + "&& git commit -m Secretword", "A=`echo a b` " + "'cd' x " * 10000 + "&& git commit -m Secretword",
+                        "git " + "-c " * 40 + "x; git commit -m Secretword", "git " + "-c $A " * 40 + "x; git commit -m Secretword"):
             run(["hook"], hl, stdin=ev(hostile), timeout=2)
         # a missing list blocks a publishing command and no other, unless the working directory's
         # repository may publish without one, over a gh stand-in on PATH
@@ -1064,6 +1198,16 @@ def selftest():
         nogh = os.path.join(tmp, "nogh")
         os.makedirs(nogh)
         blocked("gh pr merge 1 --body fine", "no gh on PATH to read the repository's visibility, and the machine has no list (", env={**vis("PRIVATE"), "PATH": nogh})  # no gh resolves
+        # a landing directory that is not there names why the hook judged it: a word it does not expand, a cd in text it
+        # cannot tell from a script, else plainly; each still refused
+        for cmd in ("cd $REPO && gh pr merge 1 --body fine", 'cd "$REPO" && gh pr merge 1 --body fine', "cd - && gh pr merge 1 --body fine"):
+            blocked(cmd, "expands neither; run the call from that directory", env=vis("PRIVATE"))
+        for cmd in ('git commit -m "notes\ncd nowhere-dir and back\n"', "gh issue comment 1 --body-file - <<'EOF'\ncd nowhere-dir\nEOF"):
+            blocked(cmd, "which the hook cannot tell from a script; if it is text, reword it", env=vis("PRIVATE"))
+        for cmd in ("cd nowhere-dir && gh pr merge 1 --body fine", "bash -c 'cd nowhere-dir && gh pr merge 1 --body fine'",
+                    "cd '$lit' && gh pr merge 1 --body fine"):  # a child shell's own cd, a single-quoted $: neither is text nor unexpanded
+            code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev(cmd))
+            assert code == 2 and "does not exist" in e and "expands neither" not in e and "cannot tell" not in e, (cmd, code, o, e)
         # the binding at cwd decides first: required blocks a private repository, off passes a failed read
         toml = ('schema = 1\n\n[repo]\nslug = "o/r"\ndefault_branch = "master"\n\n[ship]\npolicy = "stop-at-pr"\n'
                 'review = "none"\n\n[owner]\nruling_approvers = ["o"]\n')
@@ -1146,7 +1290,46 @@ def selftest():
                 (f'pwsh -NoProfile -ExecutionPolicy Bypass -Command "& {{ Set-Location {pubclone}; git commit -m x }}"', 2, "o/pub is PUBLIC"),
                 (f'{{ cd "{pubclone}" && git commit -m fine; }}', 2, "o/pub is PUBLIC"),
                 (f'builtin cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'FOO=1 cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'A=1 B="x y" C=\'z\' cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'A=1 B="x y" C=\'z\' cd "{privclone}" && git commit -m fine', 0, ""),
+                (f'A=x"y" cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"A=a'b c' cd \"{pubclone}\" && git commit -m fine", 2, "o/pub is PUBLIC"),
+                (f"A=$'x' cd \"{pubclone}\" && git commit -m fine", 2, "o/pub is PUBLIC"),
+                (f'A+=1 cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'A=x\\ cd "{pubclone}"; git -C "{privclone}" commit -m fine', 0, ""),  # bash: A='x cd', no cd; the -C target is judged
+                (f'A=x\\\\ cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),  # an escaped backslash, then a real cd
+                (f'A="a\\"b" cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"A=$'it\\'s' cd \"{pubclone}\" && git commit -m fine", 2, "o/pub is PUBLIC"),
+                ("true;" + " " * 201 + f'cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'A=`echo x` cd "{pubclone}" && git commit -m fine', 2, "prefix assignments the hook cannot read"),
+                (f'A=${{X:- y}} cd "{pubclone}" && git commit -m fine', 2, "prefix assignments the hook cannot read"),
+                ('A=1 git commit -m "cd into the repo"', 0, ""),  # the verb inside quotes is prose, no refusal
+                ("MSYS_NO_PATHCONV=1 git grep -n cd -- bin; git commit -m fine", 0, ""),  # a readable prefix before a command that is not a cd: no refusal
+                ("LC_ALL=C grep -rnw sl src && git commit -m fine", 0, ""),
+                (f'A=$HOME cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),  # a plain variable in a value is read through
+                (f'FOO=1 cd && git -C "{pubclone}" commit -m fine', 2, "cd whose directory cannot be read"),
+                ("A=1 " * 65 + f'cd "{privclone}" && git commit -m fine', 2, "more than 64 prefix words"),
+                ("A=1 builtin " * 33 + f'cd "{privclone}" && git commit -m fine', 2, "more than 64 prefix words"),
                 (f'if cd "{pubclone}"; then git commit -m fine; fi', 2, "o/pub is PUBLIC"),
+                (f"'cd' \"{pubclone}\" && git commit -m fine", 2, "o/pub is PUBLIC"),  # a quoted or escaped verb is the builtin all the same
+                (f'"cd" "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"$'cd' \"{pubclone}\" && git commit -m fine", 2, "o/pub is PUBLIC"),
+                (f'c\\d "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"c''d \"{pubclone}\" && git commit -m fine", 2, "o/pub is PUBLIC"),
+                (f'\\cd "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'"pushd" "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f'$"cd" "{pubclone}" && git commit -m fine', 2, "o/pub is PUBLIC"),
+                (f"A=`echo a b` 'cd' \"{pubclone}\" && git commit -m fine", 2, "cd behind prefix assignments the hook cannot read"),  # a quoted verb after an unreadable prefix is still a verb
+                ('A=`echo a b` git commit -m "cd there"', 0, ""),  # a message that opens with the word is prose, not a verb
+                ('A=`echo a b` git commit -m "cd "', 0, ""),  # so is a quoted word with a blank inside its quotes
+                (f'cdx "{pubclone}" && git commit -m fine', 0, ""),  # not the verb
+                (f"'cd'x \"{pubclone}\" && git commit -m fine", 0, ""),
+                ("cd; git commit -m fine", 2, "cd whose directory cannot be read"),  # a bare cd ending its segment, with more after it: it lands in HOME
+                ("'cd'; git commit -m fine", 2, "whose directory cannot be read"),
+                ("cd && git commit -m fine", 2, "cd whose directory cannot be read"),
+                ("git commit -m fine; cd", 0, ""),  # a bare cd ending the whole command moves nothing the commit sees
+                ("git commit -m fine; cd\n", 0, ""),  # a trailing newline, as a multi-line tool command ends
                 (f'cd -- "{privclone}" >/dev/null && git commit -m fine', 0, ""),
                 (f'pushd -n "{privclone}" && git commit -m fine', 0, ""),
                 (f'Set-Location "{pubclone}" | Out-Null; git commit -m fine', 2, "o/pub is PUBLIC"),
@@ -1178,6 +1361,27 @@ def selftest():
         for command, want, text in rows:
             code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev(command, cwd=home))
             assert code == want and text in e and "Traceback" not in e, (command, code, o, e)
+        # an unquoted leading ~ is the home directory, HOME before USERPROFILE, as bash reads it; a quoted ~,
+        # ~user, a ~ after = in an option and any ~ in a command that assigns HOME stay literal (and are
+        # refused as missing, never judged at the hook's own home)
+        pub, priv = os.path.basename(pubclone), os.path.basename(privclone)
+        athome = {**vis("PRIVATE"), "HOME": tmp, "USERPROFILE": norepo}
+        literal = os.path.join(home, "~")
+        for command, want, text in ((f"cd ~/{pub} && git commit -m fine", 2, "o/pub is PUBLIC"),
+                                    (f"cd ~/{priv} && git commit -m fine", 0, ""),
+                                    (f"git -C ~/{pub} commit -m fine", 2, "o/pub is PUBLIC"),
+                                    (f"GIT_WORK_TREE=~/{pub} git commit -m fine", 2, "o/pub is PUBLIC"),
+                                    (f"cd '~/{pub}' && git commit -m fine", 2, f"{literal}"),
+                                    (f'cd ~""/{pub} && git commit -m fine', 2, f"{literal}"),
+                                    (f"cd ~nobody/{pub} && git commit -m fine", 2, f"{literal}nobody"),
+                                    (f"git -C '~/{pub}' commit -m fine", 2, f"{literal}"),
+                                    (f'GIT_DIR="~/{pub}" git commit -m fine', 2, f"{literal}"),
+                                    (f"git --git-dir=~/{pub} commit -m fine", 2, f"{literal}"),
+                                    (f"HOME=/zz; cd ~/{pub} && git commit -m fine", 2, f"{literal}"),
+                                    (f"HOME=/zz cd ~/{pub} && git commit -m fine", 2, f"{literal}"),
+                                    (f'HOME=/zz bash -c "cd ~/{pub} && git commit -m fine"', 2, f"{literal}")):
+            code, o, e = run(["hook"], athome, stdin=ev(command, cwd=home))
+            assert code == want and text in e and "Traceback" not in e, (command, code, o, e)
         for command in ("git commit -m fine", f'git commit -m "see git -C {privclone} commit"', f'git -C "{privclone}" commit -m fine'):
             code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev(command, cwd=pubclone))
             assert code == 2 and "o/pub is PUBLIC" in e, (command, code, o, e)
@@ -1188,6 +1392,7 @@ def selftest():
                         "cd a && git -C b commit -F - <<'EOF'\ndon't\nEOF",
                         "cd a && git commit -F - <<EOF\ncd into the repo\nEOF\ngit -C b commit -m y"):
             assert join_dir(tmp, "a/b") in target_dirs(command, tmp), command
+        assert target_dirs("git grep -C 3 commit; git diff -C away -- commit.py", tmp) == [], "a subcommand's -C is no git -C"
         try:
             target_dirs('git commit -m "x\n' + "\n".join(f"cd d{i}" for i in range(6)) + '"', tmp)
             raise AssertionError("six relative cds inside quotes")
@@ -1303,6 +1508,23 @@ def selftest():
         # from the temp root, which outlives the orphaned stand-in that holds its directory
         code, o, e = run(["hook"], vis("slow"), stdin=ev("gh pr merge 1 --body fine", cwd=tempfile.gettempdir()), timeout=30)
         assert code == 2 and "did not answer within the hook's budget, and the machine has no list (" in e and time.monotonic() - started < 9, (code, e, time.monotonic() - started)
+        # a binding read that stalls names the budget too, not a read that failed: a copy of this script beside a
+        # stand-in binding that sleeps on one chosen key
+        copy = os.path.join(tmp, "hookcopy")
+        os.makedirs(copy)
+        shutil.copyfile(this, os.path.join(copy, os.path.basename(this)))
+        with open(os.path.join(copy, "ouro-binding.py"), "w", encoding="utf-8", newline="\n") as f:
+            f.write('import os, sys, time\na = sys.argv[1:]\nif a[-1:] == [os.environ.get("STUB_SLOW_KEY")]:\n    time.sleep(20)\n'
+                    'if a == ["check"]:\n    sys.exit(0)\nif a[:1] == ["get"]:\n'
+                    '    if a[1] == "ship.forbidden_check":\n        print("error: no such key: ship.forbidden_check", file=sys.stderr)\n        sys.exit(1)\n'
+                    '    if a[1] == "repo.slug":\n        print("o/r")\n        sys.exit(0)\nsys.exit(1)\n')
+        hook_copy = os.path.join(copy, os.path.basename(this))
+        for key, what in (("check", "the binding"), ("ship.forbidden_check", "the binding's ship.forbidden_check"), ("repo.slug", "the binding's repo.slug")):
+            started = time.monotonic()
+            code, o, e = run(["hook"], {**vis("PRIVATE"), "STUB_SLOW_KEY": key}, stdin=ev("gh pr merge 1 --body fine", cwd=tempfile.gettempdir()), timeout=30, script=hook_copy)
+            assert code == 2 and f"{what} could not be read within the hook's budget, and the machine has no list (" in e and time.monotonic() - started < 9, (key, code, o, e, time.monotonic() - started)
+        code, o, e = run(["hook"], vis("PRIVATE"), stdin=ev("gh pr merge 1 --body fine", cwd=tempfile.gettempdir()), timeout=30, script=hook_copy)
+        assert code == 0 and "Traceback" not in e, ("control: the stand-in binding with no stalled read passes a private repository", code, o, e)
         # a payload the hook cannot parse
         for raw in (b"", b"not json", b"[]", b"null", b"{}", b'{"tool_name": 5}', b"\xff\xfe",
                     b'{"tool_name": "Bash"}', b'{"tool_name": "Bash", "tool_input": []}',

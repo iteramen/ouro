@@ -15,13 +15,14 @@ A person does two things: answers a ruling, and merges what `ship.policy` or a m
 keeps for a person.
 The lower branch exists because those two jobs are not equally cheap: reviewing a pull request
 is bounded; answering a ruling can mean an open-ended investigation before the question even
-makes sense. A checkpoint run does that investigation read-only and hands back a
+makes sense. A checkpoint investigates with read tools and the issue's approved commands in a
+disposable worktree, then hands back a
 recommendation, so the ruling costs a review rather than a study.
 
 ## A driver, not a runbook
 
 The loop's control flow is code, `bin/ouro`, and the model is asked only at the judgment nodes.
-A Claude Code plugin's own units are skills,
+A harness integration's own units are skills,
 agents and hooks, none of them a program, and control flow written as prose for the model to
 execute fails in a way of its own: a step with no check behind it is the step a session skips,
 and each rule then lives three times — in the prose, in a hook that catches the model when it
@@ -29,6 +30,10 @@ deviates, and in a copy for the next harness. A transition the driver owns canno
 so the gates check the repository rather than police the model, and a hook catches a rule with
 a command shape. The protocol — the labels, the comment shapes, the anchors, the Flow class,
 the record on the pull request — is repository state, so any harness can read and write it.
+
+Worker transports live behind the node capability contract. Developer runtime/model choices are
+separate from repository grants; adding a harness adds a transport and constrained tool mapping,
+not another workflow engine.
 
 Outside the direct lane, who merges a pull request is the binding's `ship.policy`, a manual
 step aside: autonomy is a value a repository sets, and the driver's unattended merge is logged
@@ -42,7 +47,7 @@ which the binding's areas and gates already carry.
 Agent context separates into four kinds, and nearly every failure a loop has had was one kind
 leaking into another's job.
 
-**1. Stable instruction — how to work.** The per-session briefing (`CLAUDE.md`), path-scoped
+**1. Stable instruction — how to work.** The per-session briefing (AGENTS.md or CLAUDE.md), path-scoped
 rules that load only when the touched files match, the node briefs the driver builds from the
 issue, the binding and the contract, and the repo's deterministic gates. A lesson a run teaches
 lands at the lowest layer that can hold it: a hook for a rule with a command shape, a gate for a
