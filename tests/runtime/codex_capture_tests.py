@@ -1,5 +1,6 @@
 """Real subprocess capture regressions; no model authentication or receipt writes."""
 import json
+import hashlib
 import os
 import pathlib
 import sys
@@ -8,10 +9,121 @@ import unittest
 from unittest.mock import patch
 
 from ouro import developer, sh
-from ouro.runtime import READ, codex, codex_events, diagnostics, process
+from ouro.runtime import READ, PROBE, builder, codex, codex_events, diagnostics, process
 
 
 class CodexCaptureTests(unittest.TestCase):
+    def test_edit_bootstrap_is_additive_and_keeps_repository_text_untrusted(self):
+        """Mocked transport contract only; real BUILD usability is opt-in qualification."""
+        (self.root / "AGENTS.md").write_text("generated-user-context-marker", encoding="utf-8")
+        skill = (sh.PLUGIN / "skills/run/SKILL.md").read_bytes().decode("utf-8-sig")
+        answer = dict(subject="generated", body="", claims=[], gates_run=[], validation_pending=[],
+                      residue=[], manual=[], door="", blast_radius="", stop=None, replies=[])
+        def fake(argv, **kwargs):
+            extra = [arg for arg in argv if arg.startswith("developer_instructions=")]
+            self.assertEqual(len(extra), 1, "edit-capable worker lacks additive developer bootstrap")
+            text = json.loads(extra[0].split("=", 1)[1])
+            self.assertIn("write/edit/delete are granted", text)
+            self.assertIn("Do not invoke the driver again", text)
+            self.assertIn("outer caller", text)
+            self.assertIn(skill, text)
+            self.assertNotIn("generated-user-context-marker", text)
+            self.assertIn("generated-user-context-marker", kwargs["prompt"])
+            self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+            self.assertEqual(argv[argv.index("--model") + 1], "generated-account-model")
+            self.assertIn("features.shell_tool=false", argv)
+            self.assertFalse(any(arg.startswith(("model_catalog_json=", "model_instructions_file=")) for arg in argv))
+            target = pathlib.Path(argv[argv.index("--output-last-message") + 1])
+            policy = json.loads((target.parent / "policy.json").read_text())
+            self.assertIs(policy["edit"], True)
+            self.assertEqual(policy["commands"], list(builder(["python3 check.py"]).commands))
+            target.write_text(json.dumps(answer), encoding="utf-8")
+            (target.parent / "tools.jsonl").write_text(json.dumps({"tool": "read", "path": "fixture.txt", "error": None}) + "\n")
+            return sh.R(0, '\n'.join(json.dumps(event) for event in (
+                {"type": "thread.started", "thread_id": "generated-bootstrap"}, {"type": "turn.completed"})), "", argv)
+        # The POSIX dispatch contract is modeled here, never Windows worker admission.
+        with patch.object(codex, "WINDOWS", False), patch.object(codex, "git_readiness"), \
+                patch.object(sh, "argv_for", side_effect=lambda name, *args: [name, *args]), \
+                patch.object(sh, "which", side_effect=lambda name: name), patch.object(process, "run", side_effect=fake):
+            result, session, _, _ = codex.execute("BUILD", "generated task", "generated-account-model",
+                                                 builder(["python3 check.py"]), self.root, 5, None, {}, developer.Settings("codex"))
+        self.assertEqual((result["subject"], session), ("generated", "generated-bootstrap"))
+
+    def test_read_and_probe_bootstrap_never_grants_edit_or_requires_run_skill(self):
+        with patch.object(sh, "PLUGIN", self.root / "no-installed-skill"):
+            for caps in (READ, PROBE):
+                text = codex.bootstrap("REVIEW", caps)
+                self.assertNotIn("write/edit/delete are granted", text)
+                self.assertNotIn("name: run", text)
+                self.assertIn("Editing is not granted", text)
+
+    def test_invalid_trusted_run_skill_refuses_before_dispatch(self):
+        installed = self.root / "installed"
+        skill = installed / "skills/run/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        for payload in (None, b"x" * (32 * 1024 + 1), b"\xff", b""):
+            with self.subTest(payload=None if payload is None else len(payload)):
+                if payload is not None:
+                    skill.write_bytes(payload)
+                with patch.object(sh, "PLUGIN", installed), patch.object(codex, "WINDOWS", False), \
+                        patch.object(codex, "git_readiness") as git_probe, patch.object(process, "run") as launch:
+                    with self.assertRaisesRegex(sh.DriverError, "trusted run skill"):
+                        codex.execute("BUILD", "generated task", "default", builder([]), self.root, 1, None, {}, developer.Settings("codex"))
+                    git_probe.assert_not_called()
+                    launch.assert_not_called()
+        skill.unlink()
+        skill.mkdir()
+        with patch.object(sh, "PLUGIN", installed), self.assertRaisesRegex(sh.DriverError, "trusted run skill"):
+            codex.bootstrap("BUILD", builder([]))
+
+    def test_trusted_run_skill_cannot_resolve_outside_installed_plugin(self):
+        installed = self.root / "installed"
+        skill = installed / "skills/run/SKILL.md"
+        outside = self.root / "outside-skill.md"
+        real_resolve = pathlib.Path.resolve
+        def escaped(path, *args, **kwargs):
+            return outside if path == skill else real_resolve(path, *args, **kwargs)
+        with patch.object(sh, "PLUGIN", installed), patch.object(pathlib.Path, "resolve", escaped):
+            with self.assertRaisesRegex(sh.DriverError, "trusted run skill"):
+                codex.bootstrap("BUILD", builder([]))
+
+    @unittest.skipUnless(os.name == "nt", "Windows early-closed stdin")
+    def test_windows_closed_prompt_reader_preserves_exit_and_releases_cwd(self):
+        for code in (0, 7):
+            with self.subTest(code=code):
+                cwd = self.root / f"closed-input-{code}"
+                cwd.mkdir()
+                command = ("import os,sys,time; os.close(0); "
+                           f"print('reader closed', flush=True); time.sleep(0.3); sys.exit({code})")
+                result = process.run([sys.executable, "-c", command], cwd=cwd,
+                                     prompt="x" * (1024 * 1024), timeout=5)
+                self.assertEqual(result.code, code)
+                self.assertEqual(result.out.strip(), "reader closed")
+                cwd.rmdir()
+
+    @unittest.skipUnless(os.name == "nt", "Windows batch-launcher stdin")
+    def test_windows_batch_launcher_receives_exact_prompt_and_eof(self):
+        probe = self.root / "stdin probe.py"
+        probe.write_text("import hashlib,sys; data=sys.stdin.buffer.read(); "
+                         "print(hashlib.sha256(data).hexdigest()); sys.exit(7)", encoding="utf-8")
+        for suffix in ("cmd", "bat"):
+            launcher = self.root / f"runtime launcher.{suffix}"
+            launcher.write_text(f'@echo off\n"{sys.executable}" "{probe}"\n', encoding="utf-8")
+            for prompt in ("", "line one\nUnicode: 中文\n", "large prompt\n" * 100000):
+                with self.subTest(suffix=suffix, size=len(prompt)):
+                    result = process.run([str(launcher)], cwd=self.root, prompt=prompt, timeout=15)
+                    self.assertEqual(result.code, 7)
+                    self.assertEqual(result.out.strip(), hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+
+    @unittest.skipUnless(os.name == "nt", "Windows stdin backpressure")
+    def test_windows_unread_prompt_still_times_out_and_releases_cwd(self):
+        cwd = self.root / "blocked-input"
+        cwd.mkdir()
+        with self.assertRaisesRegex(sh.DriverError, "timed out"):
+            process.run([sys.executable, "-c", "import time; time.sleep(30)"],
+                        cwd=cwd, prompt="x" * (1024 * 1024), timeout=0.3)
+        cwd.rmdir()
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="ouro-capture-test-")
         self.addCleanup(tmp.cleanup)
@@ -19,6 +131,7 @@ class CodexCaptureTests(unittest.TestCase):
         self.root = pathlib.Path(tmp.name).resolve()
         self.fake = self.root / "fake_codex.py"
         self.fake.write_text('''import json,pathlib,sys
+assert sys.stdin.buffer.read().endswith(b'\u0072ead fixture'), 'prompt transport lost or changed input'
 mode=sys.argv[1]
 answer=pathlib.Path(sys.argv[sys.argv.index('--output-last-message')+1])
 answer.write_text('{"finding":"bounded fixture","stop":null}',encoding='utf-8')
@@ -35,12 +148,23 @@ if mode=='late-failure':print(json.dumps({'type':'turn.failed','error':{'message
 if mode=='nonzero':sys.exit(7)
 ''', encoding="utf-8")
 
-    def execute(self, mode):
+    def execute(self, mode, batch=False):
         argv_for = sh.argv_for
+        launcher = self.root / "codex launcher.cmd"
+        if batch:
+            launcher.write_text(f'@echo off\n"{sys.executable}" "{self.fake}" {mode} %*\n', encoding="utf-8")
         def argv(name, *args):
-            return [sys.executable, str(self.fake), mode, *args] if name == "codex" else argv_for(name, *args)
+            if name == "codex":
+                return [str(launcher), *args] if batch else [sys.executable, str(self.fake), mode, *args]
+            return argv_for(name, *args)
         with patch.object(sh, "argv_for", side_effect=argv):
             return codex.execute("CHECKPOINT", "read fixture", "default", READ, self.root, 10, None, {}, developer.Settings("codex"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows Codex batch launcher")
+    def test_codex_adapter_consumes_prompt_through_batch_launcher(self):
+        answer, session, usage, cost = self.execute("normal", batch=True)
+        self.assertEqual(answer, {"finding": "bounded fixture"})
+        self.assertEqual(session, "capture-fixture")
 
     def test_large_legitimate_transcript_uses_final_file_and_preserves_usage(self):
         answer, session, usage, cost = self.execute("large")

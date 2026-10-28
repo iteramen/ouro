@@ -26,6 +26,8 @@ every round, the change as a whole being what a fix answers.
 
 Range: <<range>>
 
+Release-note paths the range changes (those `repo.release_notes` matches): <<release_notes>>
+
 <<diff>>
 
 ## The issue

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Fixture suite for the hooks the plugin ships: every hook hooks/hooks.json registers runs once
+    Fixture suite for the hooks the plugin ships: every PreToolUse hook hooks/hooks.json registers runs once
     per recorded event under tests/hooks/<hook>/, and its exit code is compared with the
     fixture's decision.
 .DESCRIPTION
@@ -81,7 +81,7 @@ foreach ($event in $reg.hooks.PSObject.Properties) {
             $tokens = @([regex]::Matches($cmd, '"([^"]*)"|(\S+)') | ForEach-Object { if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value } })
             $script = $tokens | Where-Object { $_ -match '\.(py|ps1|sh|js)$' } | Select-Object -First 1
             Assert-Equal $true ($null -ne $script -and (Test-Path -LiteralPath $script -PathType Leaf)) "the script `"$($h.command)`" names exists under the plugin root"
-            if ($script) {
+            if ($script -and $event.Name -eq 'PreToolUse') {
                 $hooks += [pscustomobject]@{
                     Event = $event.Name; Command = $h.command; Exe = $tokens[0]; Args = @($tokens | Select-Object -Skip 1)
                     Name = [System.IO.Path]::GetFileNameWithoutExtension($script)

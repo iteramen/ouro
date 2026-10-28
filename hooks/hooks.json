@@ -31,6 +31,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/session-sync.py\"",
+            "timeout": 120
+          }
+        ]
+      }
     ]
   }
 }

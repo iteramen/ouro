@@ -54,17 +54,20 @@
 .PARAMETER Merge
     `squash` or `merge`. Default: the binding's `ship.merge`, or `squash` where the binding
     declares none (printed).
+.PARAMETER ExpectedHead
+    Optional full commit checked by the caller. A different current pull-request head stops
+    before any merge; the same head remains pinned with --match-head-commit.
 .EXAMPLE
     pwsh -File <ouro>/bin/Merge-PullRequest.ps1 -Pr <n> -Subject "fix(x): y (#<n>)" -BodyFile body.md -Linear no
 #>
-param([int]$Pr, [string]$Subject, [string]$BodyFile, [string]$Linear, [string]$Merge)
+param([int]$Pr, [string]$Subject, [string]$BodyFile, [string]$Linear, [string]$Merge, [string]$ExpectedHead)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'Get-LandBinding.ps1')
 
 function Invoke-MergePullRequest {
-    param([int]$Pr, [string]$Subject, [string]$BodyFile, [string]$Linear, [string]$Merge)
+    param([int]$Pr, [string]$Subject, [string]$BodyFile, [string]$Linear, [string]$Merge, [string]$ExpectedHead)
     if ($Pr -le 0) { throw '-Pr <number> is required' }
     if (-not $Subject) { throw '-Subject is required: "type(scope): summary (#<Pr>)"' }
     if (-not $Subject.TrimEnd().EndsWith("(#$Pr)")) {
@@ -77,6 +80,7 @@ function Invoke-MergePullRequest {
     if ($Linear -notin 'yes', 'no') {
         throw "-Linear reads '$Linear', not yes or no: yes where a document [authority].local names requires a linear history"
     }
+    if ($ExpectedHead -and $ExpectedHead -cnotmatch '^[0-9a-f]{40}$') { throw '-ExpectedHead must be a full commit object id' }
     $b = Get-LandBinding
     if (-not $Merge) {
         if ($b.Merge) { $Merge = $b.Merge }
@@ -96,6 +100,7 @@ function Invoke-MergePullRequest {
     }
     $head = "$($view.headRefOid)"; $branch = "$($view.headRefName)"
     if (-not $head) { throw "cannot read #$Pr's head, base and state" }
+    if ($ExpectedHead -and $head -cne $ExpectedHead) { throw "#$Pr's head moved from the checked $ExpectedHead to $head - nothing is merged" }
     if ($view.isDraft -ne $false) {
         throw "#$Pr is still a draft, or its draft state did not read - mark it ready (gh pr ready) once the review has converged, then run this again"
     }

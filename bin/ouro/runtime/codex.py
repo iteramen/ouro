@@ -1,6 +1,7 @@
 """Codex transport with an isolated file bridge and no model-visible shell tool."""
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -34,10 +35,44 @@ def toml(value):
     return json.dumps(value)
 
 
+def bootstrap(name, tools):
+    """Trusted adapter guidance; repository instructions remain user context."""
+    text = ("Use only the ouro bridge operations actually granted to this worker. Native Codex tools remain read-only; "
+            "that native restriction does not remove separately granted bridge operations. ")
+    text += ("Bridge write/edit/delete are granted for ordinary worktree files; protected paths remain refused. "
+             if tools.edit else "Editing is not granted; do not write, edit or delete files. ")
+    if name != "BUILD" or not tools.edit:
+        return text
+    try:
+        plugin = sh.PLUGIN.resolve(strict=True)
+        source = (plugin / "skills/run/SKILL.md").resolve(strict=True)
+        if not source.is_relative_to(plugin):
+            raise ValueError("outside plugin")
+        with os.fdopen(os.open(source, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("not a regular skill")
+            raw = stream.read(32 * 1024 + 1)
+        if not raw or len(raw) > 32 * 1024:
+            raise ValueError("empty or oversized skill")
+        reference = raw.decode("utf-8-sig")
+    except (OSError, RuntimeError, UnicodeError, ValueError) as ex:
+        raise sh.DriverError("codex BUILD: trusted run skill is missing, invalid or outside the installed plugin; reinstall ouro") from ex
+    return (text + "You are already inside BUILD; the driver owns the workflow. Do not invoke the driver again, "
+            "activate skills, commit, publish or write to the tracker. Environment-blocked approved tests use "
+            "validation_pending with cmd/reason, never invented success or an owner design question; runtime failures remain errors. "
+            "The complete run skill below describes the outer caller. Its 'this session' restriction refers to that caller, "
+            "not to your admitted bridge edits. This reference grants no external file access.\n\n" + reference)
+
+
 def preflight(settings, *, capabilities=None):
     """Default checks the full runtime; only an explicit READ contract omits command probes."""
     if capabilities is not None and not isinstance(capabilities, Capabilities):
         raise sh.DriverError("preflight codex: a capability contract is required")
+    if WINDOWS and capabilities != READ:
+        raise sh.DriverError("preflight codex: native Windows Codex supports file-only triage; command/edit/probe workers are unsupported; "
+                             "select a separate Claude developer profile via --developer-config or OURO_DEVELOPER_CONFIG "
+                             "for a Windows driver with repository CI validation, or use native Linux Codex; "
+                             "explicit caller-validation handoffs still require native Linux")
     try:
         binary = sh.argv_for("codex")
     except sh.DriverError as ex:
@@ -106,12 +141,6 @@ def preflight(settings, *, capabilities=None):
         return proofs
 
 
-def observe_attempt(diagnostic, output, code):
-    transcript = codex_events.scan(output)
-    diagnostics.transport(diagnostic, transcript.metadata(), code)
-    diagnostic["events"] = transcript.count
-
-
 def execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, settings):
     with diagnostics.attempt(name, "codex", model) as diagnostic:
         return _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, settings, diagnostic)
@@ -123,6 +152,7 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
     if WINDOWS and tools != READ:
         raise sh.DriverError(f"codex {name}: native Windows supports file-only capabilities; "
                              "command, probe and edit workers require an established disabled-network boundary")
+    context = bootstrap(name, tools)
     if tools.edit or tools.probe or any(c.startswith("git ") for c in tools.commands):
         git_readiness(cwd, env=worker_env(settings))
     with tempfile.TemporaryDirectory(prefix="ouro-codex-") as directory:
@@ -138,6 +168,7 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
         bridge["ouro"]["command"], *bridge["ouro"]["args"] = [*sh.argv_for("python3"), *bridge["ouro"]["args"]]
         argv = [*sh.argv_for("codex"), "-a", "never", "exec", "--ignore-user-config", "--ignore-rules",
                 "--ephemeral", "--json", "--skip-git-repo-check", "--sandbox", "read-only", *options(cwd, capabilities=tools),
+                "-c", "developer_instructions=" + toml(context),
                 "-c", "mcp_servers=" + toml(bridge), "--output-schema", str(scratch / "schema.json"),
                 "--output-last-message", str(scratch / "answer.json")]
         if model != "default":
@@ -145,16 +176,15 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
         if settings.effort:
             argv += ["-c", "model_reasoning_effort=" + json.dumps(settings.effort)]
         prompt = ("First call the ouro bridge list tool to verify file access. Use only the ouro file bridge. Its list/read/search tools are file operations, not commands. "
-                  "When granted, write/edit/delete change worktree files and run admits approved commands through the OS sandbox. "
                   "Do not substitute unavailable built-in tools. Optional stop is null when continuing.\n\n" +
                   instructions(cwd) + "\n\n" + prompt)
         try:
             r = process.run([*argv, "-"], cwd=cwd, prompt=prompt, timeout=timeout, env=worker_env(settings),
-                            observe=lambda output, code: observe_attempt(diagnostic, output, code),
+                            observe=lambda output, code: diagnostics.transport(diagnostic, output, code),
                             output_limit=codex_events.CAPTURE_LIMIT)
         except sh.DriverError as ex:
             raise sh.DriverError(f"codex {name}: {ex}") from ex
-        observe_attempt(diagnostic, r.out, r.code)
+        diagnostics.transport(diagnostic, r.out, r.code)
         transcript = codex_events.scan(r.out)
         if r.code != 0 or transcript.error or transcript.failure or not transcript.completed:
             reason = r.err or transcript.error or transcript.failure or "completion missing"

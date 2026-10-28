@@ -115,7 +115,7 @@ function Invoke-WatchPullRequestChecks {
         if (-not $new.Count) { break }
         foreach ($run in $new) {
             Write-Output "watching run $($run.databaseId) ($($run.workflowName)/$($run.event))"
-            $null = Invoke-Native gh @('run', 'watch', "$($run.databaseId)", '-R', $b.Slug, '--interval', '60')
+            $null = Invoke-Native gh @('run', 'watch', "$($run.databaseId)", '-R', $b.Slug, '--interval', '15')
             $watched["$($run.databaseId)"] = $true
         }
         $runs = @(Get-NewestRuns $b.Slug $commits $branch $event)

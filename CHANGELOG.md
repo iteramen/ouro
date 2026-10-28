@@ -8,8 +8,8 @@ moving a pin. One bullet per landing; an entry names no issue or pull request nu
 This file keeps the minor series being prepared under UNRELEASED and the two preceding
 minor series. Older published sections, including their **Consumer contract:** migration
 notes, remain verbatim in dated root archives:
-[v0.2 through v1.3](CHANGELOG-0.2-through-1.3.md). An archive is frozen history; the linked
-current documentation defines the protocol.
+[v0.2 through v1.3](CHANGELOG-0.2-through-1.3.md) and [v1.4](CHANGELOG-1.4.md). An archive is
+frozen history; the linked current documentation defines the protocol.
 
 A `**Consumer contract:**` line marks an entry that moves something a consumer's own files
 name: a skill's invocation flags or its credential and tool requirements, a table or key of the
@@ -20,6 +20,107 @@ one-line migration. A release carrying any such entry takes a minor version bump
 release takes a patch.
 
 ## [UNRELEASED]
+
+## [v1.7.1] - 2026-10-28
+
+**Net lines:** +4 across tests, because the public export's verify tree needs its own branch in
+the gates Action suite, and v1.7.0's export refused without it.
+
+- The gates Action suite skips its rows about this repository's own Gates workflow in an exported
+  tree, which leaves that workflow out by design, and still fails where the workflow is missing
+  but not excluded.
+
+## [v1.7.0] - 2026-10-28
+
+**Net lines:** +5579 across skills, docs, hooks, bin and tests, because this release keeps the
+features below and their tests (tests +3837, bin +1772): pull-request adoption, collection of
+finished driver worktrees, the session-start sync hook, Codex BUILD bridge guidance, the direct
+lane's size and check policy with pinned publication, CI-backed validation, and the gates Action's
+parallel runs and timing reports. The docs shrank by 139 lines and duplicated driver code was
+merged; restructuring the driver and its tests into modules, in the next minor, pays the rest back.
+
+- The gates Action takes an optional `parallel` input: how many selected gates run at once. The
+  default `1` keeps the one-after-another loop with live output; above it, each gate's output,
+  stderr included, prints as one group when the gate ends.
+
+- A `SessionStart` hook fast-forwards a bound repository's clean main checkout on its default
+  branch to `origin/<default>`, then asks for a restart so the session loads the current
+  instructions; a checkout it cannot move is left untouched with a one-line notice.
+
+- The driver's children run with .NET's multicore-JIT profile off, so parallel `pwsh` starts no
+  longer share, and corrupt, one startup profile cache (an invalid-assembly-name abort).
+
+- `ouro run N --pr M` adopts an existing open or merged pull request from the same repository into
+  the default branch whose body has its own `Fixes #N` line (`Part k/n of #N` for a part short of
+  the last): the run gates, reviews and ships that branch from its own worktree under the binding's
+  usual policy, or finishes the landing of a merged one. Only an explicit request adopts; every
+  resume repeats `--pr M`, and the refusal for an issue another pull request already fixes names it.
+
+- Run and triage start by removing the driver's own finished worktrees: a clean, settled tree whose
+  pull request is closed or merged and whose HEAD is on origin, with its local branch. A dirty,
+  unpushed, active or uncertain tree stays and is named; remote branches are never deleted.
+
+- Codex BUILD is told that its file bridge may edit although the native sandbox is read-only, and
+  gets the installed run skill as context, so it no longer stops claiming read-only access.
+
+- A direct run whose BUILD could write the installed ouro runtime or instruction sources takes the
+  pull-request path instead.
+
+- **Consumer contract:** the direct lane publishes inline only when the change fits
+  `ship.direct_max_lines` and `ship.direct_max_files` (defaults 20 and 3) and at least one
+  applicable `cheap` gate passes, with a `gate.direct_code_check` for each changed code path;
+  otherwise it opens a pull request. A binding with no applicable cheap gate therefore always takes
+  the pull-request path. Update the plugin before adding the new keys, which older readers refuse.
+
+- **Consumer contract:** `Push-Direct.ps1` accepts optional `ExpectedHead` and `ExpectedBase` pins,
+  and `Push-Branch.ps1` an optional `ExpectedHead`; unpinned calls work as before. Update flat
+  direct helpers together: a new direct publisher refuses an old companion that cannot pin the head.
+
+- **Consumer contract:** `repo.release_notes`, an optional binding key, lists the release-note
+  paths as regexes (per-change fragment files, a localised twin): the S shape's file count leaves
+  them out, and the REVIEW brief names them as the release-note entries to verify. Old form: only a
+  `CHANGELOG.md` basename counted; new form: `release_notes = ['^changes/']` under `[repo]`;
+  migration: none, since an unset key keeps the `CHANGELOG.md` basename rule. `check` refuses a
+  pattern that does not compile.
+
+- **Consumer contract:** `Merge-PullRequest.ps1` accepts optional `-ExpectedHead <full-sha>`, and
+  the driver passes the reviewed head, so a pull request whose head moved after review is not
+  merged. Manual callers without the pin work as before.
+
+- **Consumer contract:** a repository may set `ship.validation = "ci"` with exact
+  `ship.validation_checks` names, so pull-request CI validates the final head instead of the local
+  run. The default stays `local`. Update older ouro pins before adding these keys.
+
+- **Consumer contract:** the gates Action logs each gate's elapsed time and the platform, writes
+  them to the job summary, and outputs `selection-mode` (`full`, `paths`, `fallback`). Callers need
+  no change; one that reads `selection-mode` treats a missing value as unknown.
+
+- **Consumer contract:** flat vendoring copies all tests except the plugin-only `tests/driver/`
+  and `tests/runtime/` roots. Remove flat-layout gate entries naming those suites; files already
+  copied stay until removed by hand. Plugin installs and exports keep both roots.
+
+- **Consumer contract:** docs-index entries match exact repository-relative paths. Replace a
+  shortened suffix entry with the doc's full path; a root basename covers only its own root doc.
+
+- Triage applies its label changes before posting the verdict, so a failed label edit leaves no
+  verdict that contradicts the labels. Promoting an answered measurement removes `checkpoint`, and a
+  stale checkpoint also loses `agent-ready`.
+
+- Native Windows Codex refuses command and edit workers at preflight, before any probe, and names a
+  Claude developer profile as the alternative.
+
+- On Windows, prompts reach npm batch launchers complete, with EOF, and a timed command no longer
+  hangs on stdin backpressure or on a descendant that keeps an output pipe open.
+
+- The token hook reads a commit or issue body file the way the shell resolves it: after a `cd` in
+  the same command, through `~`, and on Windows through a Git Bash drive path (`/c/...`).
+
+- Check watches poll every 15 seconds instead of 60, and the driver's own waits every 15 instead
+  of 30, so a run notices finished checks sooner.
+
+- The No binding provider counts uppercase and mixed-case skip-only output as skipped.
+
+- Codex Git readiness accepts a stable symlinked worktree parent and refuses a retargeted one.
 
 ## [v1.6.0] - 2026-10-26
 
@@ -360,40 +461,3 @@ sweeps and each rule's own rows all landed as lines and nothing was removed.
   runs, the ones the watcher waits for, still move (one appeared, changed status or concluded
   within the limit), at most four more times; a limit in which they did not move ends the run as
   before, with the message to invoke it again. The default branch's watch after a merge is as it was.
-
-## [v1.4.1] - 2026-10-20
-
-- `docs/architecture.html` names this repository's own rules file instead of linking to it: the
-  public tree does not hold that file, so the link was dead there.
-
-## [v1.4.0] - 2026-10-20
-
-- `bin/forbidden-tokens.py hook` reads a `# protects: <owner/repo> ...` line in the token list:
-  with one, a hit blocks only a call that lands in a named repository (the directory's
-  `repo.slug`, else its `origin`; one it cannot resolve counts as named) or names one with a `-R`,
-  `--repo` or `GH_REPO` value or an issue or pull request URL, and `ship.forbidden_check` stays the
-  override, `"required"` scanning and `"off"` passing whatever the line names; with the line,
-  `"off"` passes a hit only when no such name is another repository's. **Consumer contract:** old form, with a list set an absent
-  `ship.forbidden_check` scans every publishing call in every repository; new form, it follows the
-  list's `# protects:` line, and a list without one scans every call as before. Migration: add
-  the line to the list naming the repositories it guards, then drop the `forbidden_check = "off"`
-  a binding carried only to opt out.
-- `bin/forbidden-tokens.py` judges a commit at the directory a `cd` behind an escaped inner quote,
-  a `cmd /c`, `eval`, `iex` or `Invoke-Expression` string, an unquoted `-c` word, or an `env -C`
-  before a `bash -c` moves to, and refuses a `cd` whose directory reads empty (spliced quotes) or
-  is cut away (a command substitution, a parenthesised expression) instead of skipping it.
-- A follow-up write that fails after an earlier one succeeded leaves the unfiled items in the
-  `**Follow-ups filed**` comment, and a resumed run files exactly those, once each, then posts
-  the comment with everything filed. Only a comment from the bot or an approver counts, both for
-  the items to file and for ending the step; another account's comment is data.
-- The `Review:` line no longer counts a verification's OUTSIDE finding, as the contract's
-  Review-line rule says; the FOLLOWUP brief still carries it.
-- `bin/forbidden-tokens.py` reads `chdir`, pwsh's alias of `Set-Location`, as a cd verb wherever
-  `cd` is one; its selftest pins `chdir`, `env --chdir=` and a `--chdir` a `-C` chains from.
-- `bin/external-audit.py` creates its artifact tree (the per-user parent, the session directory
-  and the round folder) owner-only for every adapter, on POSIX re-setting each level to 0700 and
-  refusing one another account owns, before anything is written; `prompt.txt`, which holds the
-  diff, is written 0600.
-- The FOLLOWUP brief lists an OUTSIDE finding once when a later round reports it again with other
-  evidence or another severity, as the latest round reported it: the identity is the file, the
-  line and the claim, the one the `Review:` line counts by, less the severity.

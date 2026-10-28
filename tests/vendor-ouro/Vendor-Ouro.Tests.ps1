@@ -21,7 +21,7 @@
     same directory, and the suppress_prefixes line holds the bin paths the vendored docs cite
     beside its three present entries and no bare bin prefix, and one line names the two
     .gitignore entries the installer appends. A plugin root holding none
-    of the seven files a run reaches by name warns once per missing file and plans the rest at
+    of the by-name files a run reaches by name warns once per missing file and plans the rest at
     exit 0.
 
     A -ScriptsDir that resolves outside the tree -- a `..` segment that walks out of it, a sibling
@@ -44,7 +44,7 @@
     cannot be held open or the filesystem does not deny a read of a file held open with no sharing.
 
     A plugin root whose own name holds a '*', beside a sibling the pattern matches, vendors its
-    own files and nothing of the sibling's -- the seven destinations a run reaches by name, which
+    own files and nothing of the sibling's -- the by-name destinations a run reaches by name, which
     both roots hold under the same names, compared by content. A System-attribute file, and a
     skill directory that is one, are planned, and so is a link to a file. A link to a directory
     under a skill is not walked through, nor is one to the root above it.
@@ -136,14 +136,16 @@ function New-Link([string]$Dir, [string]$Rel, [string]$Target) {
 $ByNamePairs = @(@('bin/external-audit.py', 'scripts/external-audit.py'),
     @('bin/forbidden-tokens.py', 'scripts/forbidden-tokens.py'),
     @('bin/ouro-binding.py', 'scripts/ouro-binding.py'),
+    @('bin/ouro-direct.py', 'scripts/ouro-direct.py'),
+    @('bin/ouro/runtime/process.py', 'scripts/ouro-process.py'),
     @('docs/binding.md', 'docs/ouro-binding.md'),
     @('docs/contract.md', 'docs/ouro-contract.md'),
     @('docs/docs-governance.md', 'docs/ouro-docs-governance.md'),
     @('templates/documentation-rule.md', '.claude/rules/documentation.md'))
 $ByNameSources = @($ByNamePairs | ForEach-Object { $_[0] })
-# A plugin root under $scratch: the script itself, the seven files a run reaches by name, and the
+# A plugin root under $scratch: the script itself, the by-name files a run reaches by name, and the
 # $Files a run reaches by enumerating. Every file holds $Tag, so a copy says which root it is from.
-# -NoByName leaves all seven out, which is the root a run must warn about rather than skip silently.
+# -NoByName leaves all named files out, which is the root a run must warn about rather than skip silently.
 # The writes go through System.IO, since a root's name may hold a character a provider path globs.
 function New-PluginRoot([string]$Name, [string]$Tag, [string[]]$Files, [switch]$NoByName) {
     $root = Join-Path $scratch $Name
@@ -292,6 +294,21 @@ try {
     $files = @((Get-TreeState $repo) -split '; ' | Where-Object { $_ -match '=[0-9A-F]{64}$' } |
             ForEach-Object { $_ -replace '=[0-9A-F]{64}$' } | Sort-Object)
     Assert-Equal (@($Planned | Sort-Object) -join '; ') ($files -join '; ') 'and the tree holds exactly the files it lists'
+    foreach ($pluginOnly in 'driver', 'runtime') {
+        Assert-Equal $false (Test-Path -LiteralPath (Join-Path $repo "scripts/tests/$pluginOnly")) "fresh flat copy omits plugin-only tests/$pluginOnly"
+    }
+    # Every other fixture/helper keeps its bytes; neither exclusion may swallow a sibling.
+    foreach ($file in Get-ChildItem -LiteralPath (Join-Path $Base 'tests') -Recurse -File) {
+        $rel = [IO.Path]::GetRelativePath((Join-Path $Base 'tests'), $file.FullName).Replace('\', '/')
+        if ($rel.StartsWith('driver/', [StringComparison]::Ordinal) -or $rel.StartsWith('runtime/', [StringComparison]::Ordinal)) { continue }
+        Assert-Equal (Get-RootHex $Base "tests/$rel") (Read-Hex $repo "scripts/tests/$rel") "retained tests/$rel stays byte-identical"
+    }
+    $legacy = Join-Path $repo 'scripts/tests/runtime/legacy-user-file.py'
+    New-Item -ItemType Directory -Force -Path (Split-Path $legacy -Parent) | Out-Null
+    [IO.File]::WriteAllText($legacy, 'existing consumer file', $Utf8)
+    $upgrade = Invoke-Vendor $repo
+    Assert-Equal 0 $upgrade.Code 'upgrading an existing flat tree succeeds'
+    Assert-Equal 'existing consumer file' ([IO.File]::ReadAllText($legacy)) 'upgrade never prunes an old excluded-root consumer file'
     # A source that is not there must not read as a destination the run never wrote: the pairs
     # below compare one reader's answer with the other's, and would pass on two equal sentinels.
     Assert-Equal $false ((Get-RootHex $Base 'no/such/file') -ceq (Read-Hex $repo 'no/such/file')) `
@@ -763,15 +780,15 @@ try {
     }
 
     # A plugin root of its own for the cases below: what a run enumerates, what it lists when it
-    # enumerates that root, and the seven destinations it reaches by name instead.
+    # enumerates that root, and the by-name destinations it reaches by name instead.
     $ownFiles = @('bin/Real-Gate.ps1', 'skills/real/SKILL.md', 'agents/real.md', 'tests/real/Real.Tests.ps1')
     $enumPlan = @('.claude/agents/real.md', '.claude/skills/real/SKILL.md', 'scripts/Real-Gate.ps1',
         'scripts/Vendor-Ouro.ps1', 'scripts/tests/real/Real.Tests.ps1')
     $ownPlan = @($enumPlan + @($ByNamePairs | ForEach-Object { $_[1] })) | Sort-Object
     $byName = $ByNamePairs
 
-    # ── a plugin root holding none of the seven files a run reaches by name ────────────────
-    # Each of the seven is one warning naming it, and the enumerated plan still lands: a silent skip
+    # ── a plugin root holding none of the by-name files a run reaches by name ────────────────
+    # Each named file is one warning naming it, and the enumerated plan still lands: a silent skip
     # delivers a fixture suite without the script it tests, at exit 0.
     $bare = New-PluginRoot 'bareroot' 'real' $ownFiles -NoByName
     $repo = New-Fixture
@@ -789,7 +806,7 @@ try {
     # ── 7. a plugin root whose own name holds a '*' ───────────────────────────────────────
     # On Linux, Get-ChildItem -LiteralPath globs a '*' or '?' in the directory's own path, so the
     # plan is read out of whatever sibling the pattern matches -- and that tree lands in the
-    # consumer's repository at exit 0. The sibling holds the seven by-name destinations under the
+    # consumer's repository at exit 0. The sibling holds the named destinations under the
     # same names, so those are compared by content: a provider path that globs the same way would
     # copy the sibling's bytes to the right destination. Where such a name cannot be created, the
     # case skips.

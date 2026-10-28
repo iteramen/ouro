@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 from ouro import developer, sh, validation
+from ouro.runtime import process as owned_process
 
 
 class ValidationTests(unittest.TestCase):
@@ -37,7 +38,8 @@ class ValidationTests(unittest.TestCase):
             "commit", "-qm", "fixture")
         return types.SimpleNamespace(
             worktree=self.root, head=lambda: git("rev-parse", "HEAD").out.strip(), wt_git=git,
-            env=types.SimpleNamespace(runtime=developer.Settings()))
+            env=types.SimpleNamespace(runtime=developer.Settings(),
+                                      lookup=lambda key: "local" if key == "ship.validation" else None))
 
     @unittest.skipUnless(os.name == "posix", "kernel platform detection")
     def test_platform_facts_ignore_environment_and_fail_closed(self):
@@ -98,6 +100,7 @@ class ValidationTests(unittest.TestCase):
         run = Run.__new__(Run)
         run.worktree, run.wt_git = base.worktree, base.wt_git
         run.env = types.SimpleNamespace(pr_checks=lambda: True, validate=validating,
+                                        lookup=lambda key: "local" if key == "ship.validation" else None,
                                         default="main", runtime=developer.Settings())
         run.rederive, run.find_pr, run.records = lambda: None, lambda: None, lambda pr: []
         run.validation_commands = lambda: [p["cmd"] for p in pending]
@@ -281,7 +284,7 @@ class ValidationTests(unittest.TestCase):
         owned = {10: "old-parent", 20: "owned-child"}
         table = {10: (1, "reused-parent"), 20: (1, "owned-child"), 30: (10, "unrelated-child")}
         process = types.SimpleNamespace(wait=lambda: None)
-        with patch.object(validation, "process_table", return_value=table), \
+        with patch.object(owned_process, "process_table", return_value=table), \
                 patch.object(validation.os, "kill") as kill:
             validation.terminate_owned(process, owned)
         self.assertEqual(set(owned), {10, 20})

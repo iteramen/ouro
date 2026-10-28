@@ -12,18 +12,19 @@ the loop it ships.
 
 - Work arrives as GitHub Issues, and a pull request's checks are what decides a merge.
 - CI runs on every pull request and its checks remain required before automatic merge.
-  Normal BUILD delivery also needs leased execution proof against committed inputs; a repository
-  without CI keeps the merge manual.
+  Final changed inputs need successful validation under the repository's declared authority;
+  a repository without CI keeps the merge manual.
 - One person, or a short list, answers questions. They rule by comment; nobody edits a running
   spec from the side.
 - Your verify commands fit one line each: a test suite, a lint, a build. Those become the
   binding's gates, and CI runs them on every pull request.
 - The machines that run it have `gh`, `git`, `pwsh` 7, `python3` 3.12 or newer, and the selected worker CLI: Claude Code or Codex.
 
-Normal BUILD delivery requires native Linux for final command-execution proof. Windows supports
-file-only Codex triage; normal delivery and caller validation wait until a supported lifecycle
-boundary is available. WSL also waits. Direct-lane gates and read-only checkpoints retain their
-documented class rules.
+Normal PR delivery can use repository-owned CI validation: set `ship.validation = "ci"` and
+name the exact required checks in `ship.validation_checks`. Their successful execution at the
+final PR head covers selected nonlocal gates, including a build toolchain available only in
+Windows CI; private-token checks still run locally. See
+[validation authority](docs/binding.md#validation-authority).
 
 If an issue cannot be written so that a stranger could execute it without asking, ouro will not
 execute it either. That is the feature.
@@ -140,14 +141,15 @@ python3 bin/ouro-developer.py install --backend codex
 python3 bin/ouro-developer.py inspect --check
 ```
 
-The installer writes four skills under `~/.agents/skills` and a launcher beside the developer
-binding. Use `$ouro-run`, `$ouro-triage`, `$ouro-weekly` and `$ouro-init` in Codex. Skills call the
-same driver as Claude's commands; selecting Codex workers requires the developer binding, not
-merely installing skills. An existing binding is preserved: edit it explicitly to change workers.
-Start a fresh Codex session if its skill list has not refreshed after installation.
-Re-run install to update owned files; uninstall removes unmodified owned files and preserves
-configuration. It refuses unrelated or personally edited files. `--home <path>` tests installation
-in an isolated home. No consumer repository needs Codex skill files.
+The installer writes four skills under `~/.agents/skills`, a launcher, and a new
+[developer binding](docs/binding.md#the-developer-binding) at `~/.config/ouro/developer.toml`
+(under `XDG_CONFIG_HOME` when set). Use `$ouro-run`, `$ouro-triage`, `$ouro-weekly` and
+`$ouro-init` in Codex. Skills call the same driver as Claude's commands; selecting Codex workers
+requires the developer binding, not merely installing skills. An existing binding is kept: edit
+it explicitly to change workers. Start a fresh Codex session if its skill list has not refreshed
+after installation. Re-run install to update owned files; uninstall removes unmodified owned files
+and keeps configuration. It refuses unrelated or personally edited files. `--home <path>` tests
+installation in an isolated home. No consumer repository needs Codex skill files.
 
 Set environment variables required by a repository before starting Codex. Claude Code's settings
 `env` map is not imported; this includes `OURO_FORBIDDEN_TOKENS` when a gate uses the
@@ -164,64 +166,32 @@ $env:OURO_FORBIDDEN_TOKENS = $ouroTokenList
 
 Use your list's actual path if it lives elsewhere. This sets a path and leaves the file unchanged.
 Restart the Codex app to inherit the per-user variable; a new session inside an existing app
-process can retain the old environment. Other hosts set the same variable in their launch environment.
+process can keep the old environment. Other hosts set the same variable in their launch environment.
 
-The binding defaults to `~/.config/ouro/developer.toml`, or under `XDG_CONFIG_HOME` when set:
+The worker ignores personal Codex configuration and project config layers, so unrelated MCP
+servers, plugins and hooks are not inherited; managed requirements still apply. Repository policy
+stays in `.claude/ouro.toml`. Native Windows has no command-capable Codex worker: for a Windows
+driver, select a separate Claude developer profile with `--developer-config` or
+`OURO_DEVELOPER_CONFIG` and use repository CI validation, or use native Linux Codex. Readiness
+checks, node permissions and limits are in [Git capability checks](docs/binding.md#git-capability-readiness)
+and [native controls and limits](docs/binding.md#runtime-capability-boundary).
 
-```toml
-[runtime]
-backend = "codex"
-# effort = "high"
-
-[runtime.models]
-builder = "default"
-builder_trivial = "default"
-reviewer = "default"
-```
-
-An explicit account-served model may replace `default`; the latter uses Codex's built-in default.
-The worker intentionally ignores personal Codex configuration and project config layers, so
-unrelated MCP servers, plugins and hooks are not inherited. Managed requirements still apply.
-Repository policy stays in `.claude/ouro.toml`. Full configuration precedence and node permissions
-are in `docs/binding.md`. Authentication, models and required capabilities are checked before tracker
-mutations. TRIAGE requests file-only readiness: a genuine MCP file read, with native tools disabled,
-without unused command-sandbox, network or Git probes. Its trusted MCP orchestration host remains
-available; only the bridge's list/read/search operations are granted. A file-only result
-does not admit commands, probes or edits. Delivery runs and `inspect --check` keep full readiness.
-Codex proves advertised Git reads in the same sandbox while preserving
-configured identity includes and ignore rules; unprovable worktree transitions refuse before setup.
-Full command readiness also requires a generated unrestricted loopback nonce receipt and explicit sandbox denial.
-The generated probe uses an immutable encoded argument through the configured CLI launcher;
-refusals identify the phase, launcher and receipt without printing unknown wrapper output.
-Windows command-capable workers remain unavailable until a supported implementation and
-disabled-network policy are established. File-only requests also refuse if the outer read-only CLI
-or direct MCP bridge is unavailable; no setup or sandbox fallback is selected. Ouro preserves
-configuration, sandbox selection and host policy. See the
-[Git capability checks](docs/binding.md#git-capability-readiness) and
-[native controls and limits](docs/binding.md#runtime-capability-boundary).
-The opt-in `tests/runtime/live.py` exercises generated public fixtures;
-it does not send a consumer repository or tracker to a model.
+At `run` and `triage` startup, Ouro collects its own finished local worktrees: only trees it
+created whose run settled and whose closed or merged PR matches the exact clean HEAD still on
+origin. Legacy, manual, dirty, unpushed, ignored, active or uncertain trees stay, with a reason, as
+does every tree when the process observer is unavailable. An unreadable external process is
+reported as a visibility limitation and does not veto collection; external Git and process races
+are not excluded. Collection never deletes remote branches, backups or processes.
 
 ### Optional board connection
 
-Developer settings also accept `[coordination]` with required `endpoint` (HTTPS), `person` and
-`forum`, plus `credential_env` (default `MOMENTUS_API_KEY`). The key lives only in the invoking
-environment and is removed from Claude/Codex workers, external readers and their bridge/tool children.
-Omitting the table disables coordination; a missing key makes no network calls.
-
-Issue runs check advisory Momentus claims before branch or tracker writes. A known same-issue
-claim refuses with its holder and thread; only the invoking person's explicit `--override-claim`
-records an override. Review and shipping permissions still apply. Resume reuses the repository
-session's claim, retains it while waiting, and closes it on an observed merge or terminal stop.
-Board outages and incomplete discovery produce a sanitized notice and continue without asserting
-that the board is clear. Check-then-post is advisory, not atomic exclusion.
-See [the claim lifecycle and recovery procedure](docs/contract.md#optional-issue-claims) and
-[developer configuration and protocol limits](docs/binding.md#optional-advisory-board-connection).
-Direct pushes also check actual changed paths and policy-derived areas against other claims;
-fixes and reverts carry their checked heads and outcomes on the owned thread. The prepared-change
-adapter is reusable without adding an issue-less mode. Fixture checks establish behavior; they
-imply no live board verification. The invoking lead reports retained session, test, review, CI,
-merge, elapsed-time and available usage evidence after landing; unreported cost remains unknown.
+A `[coordination]` table in the developer binding connects advisory Momentus issue claims; the key
+lives only in the invoking environment. Issue runs and direct pushes refuse on a known conflicting
+claim unless the invoking person passes `--override-claim`; board outages produce a sanitized
+notice and never gate shipping. See [the claim lifecycle and recovery procedure](docs/contract.md#optional-issue-claims) and
+[developer configuration](docs/binding.md#optional-advisory-board-connection).
+The invoking lead reports retained session, test, review, CI, merge, elapsed-time and available
+usage evidence after landing; unreported cost is unknown.
 
 ## Use it
 
@@ -251,18 +221,14 @@ The entry points accept the same workflow arguments:
 
 | Command | Does |
 |---|---|
-| `run N [--part k] [--dry-run] [--validate] [--recover-build PATH]` | One `agent-ready` issue to a landed change. Each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. `--validate` executes pending approved validation in the caller's context. |
+| `run N [--part k] [--dry-run] [--validate] [--recover-build PATH] [--pr M]` | One `agent-ready` issue to a landed change. Each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. `--validate` executes pending approved validation in the caller's context. `--pr M` adopts open pull request M, whose body has its own `Fixes #N` line, instead of building a branch. |
 | `triage N [--dry-run]` | The verdict comment, the `Size:`, `Flow:` and `Doc impact on close:` lines and the labels for one issue. |
 | `weekly [--post]` | The outcomes and quality tables of `bin/loop-outcomes.py`. |
 | `compile` | The next wave of the queue. |
 
-For a rejected fix BUILD that left partial edits, inspect the files and explicitly select each
-one with `run N --recover-build PATH --validate` (repeat the path flag). The driver preserves
-the dirty original and its evidence, prints a private clean checkout, and offers only those
-selected files as BUILD references. Resume from the printed checkout through the normal Git
-branch, validation, review and fix caps. Recovery currently needs native Linux process observation;
-known live workers and active or uncertain caller leases refuse. See the
-[recovery contract](docs/contract.md#interrupted-build-recovery) and [runtime details](docs/binding.md#runtime-capability-boundary).
+For a rejected fix BUILD that left partial edits, inspect the files and select each one with
+`run N --recover-build PATH --validate` (repeat the path flag); the
+[recovery contract](docs/contract.md#interrupted-build-recovery) says what it keeps and refuses.
 
 Each skill is `python3 <ouro>/bin/ouro <command>` from the repository root, and relays its exit
 code: 0 is landed, or waiting on a person or on running checks; 1 a driver error; 2 refused,
@@ -310,8 +276,8 @@ greps means the code moved or the item landed; the run stops on it rather than b
 spec the code has left behind, and after each merge the driver re-checks the queue's anchors.
 
 **`Size` and `Flow` are stamped at triage.** `Size: S` or `M` (one BUILD node builds either; they
-differ in who reviews). `Flow` is the ceremony: `direct` for files under `[ship].direct`, committed
-on the default branch with no pull request; `express` when nothing executed changes, or for an
+differ in who reviews). `Flow` is the ceremony: `direct` for small changes under `[ship].direct`,
+published on the default branch where protection permits, or through its required PR; `express` when nothing executed changes, or for an
 S-shaped executed change whose whole acceptance is a same-PR test or gate; `standard`
 for an ordinary executed change; `full` for what runs the checks, gate code, hooks, release
 machinery, the binding schema, migrations, flag defaults and authorization. The diff can tighten
@@ -321,8 +287,7 @@ the class; it never loosens it.
 `.agents/` and `.aws/` at the worktree root are protected by the Codex bridge; `.git/` remains
 driver-owned. Configuration files inside ordinary test fixtures remain editable.
 Triage names such paths with a `Manual: <path>` line, the build returns the edit it would make,
-the pull request lists the steps, and a run with manual steps never merges itself. Denied edits
-retain this handoff across case, junction and Windows short-path aliases.
+the pull request lists the steps, and a run with manual steps never merges itself.
 
 ## What a run posts
 
@@ -351,6 +316,7 @@ apply is `docs/binding.md`; this is the map.
 | `repo.protected_branch_prefixes` | prefixes | `[]` | branches an agent never lands on, pushes to, branches from or sweeps |
 | `repo.branch_prefix` | text | none | the prefix of every task branch the driver cuts, in place of the label-derived one |
 | `repo.checkout` | an absolute path | none | the canonical local checkout; per-machine, so it belongs in the overlay |
+| `repo.release_notes` | regexes | a `CHANGELOG.md` basename | the release-note paths: out of the S shape's file count, and named to the reviewer as the entries to verify |
 | `labels.scope` | labels | `[]` | scope or effort labels that may ride on any state |
 | `labels.area` | labels | `[]` | the area labels a gate's `areas` selects on; the shape gate wants at least one per `agent-ready` issue |
 | `labels.type` | labels | `[]` | the type labels; exactly one per `agent-ready` issue; disjoint from `area` |
@@ -361,6 +327,8 @@ apply is `docs/binding.md`; this is the map.
 | `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the stricter of the repository's and the issue's |
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
 | `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe |
+| `ship.validation` | `local`, `ci` | `local` | final-input authority for PRs, including resumed direct PRs; inline direct checks remain local |
+| `ship.validation_checks` | exact GitHub check names | required in `ci` mode | nonempty unique names whose success covers selected nonlocal gates at the final PR head |
 | `ship.copilot_bot_id` | a Bot node id | required under `copilot` | the id the review request names |
 | `ship.external_cli` | `grok`, `claude`, `codex`, `copilot` | required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
 | `ship.external_model` | a model name | the CLI's own | the reader's model |
@@ -369,6 +337,7 @@ apply is `docs/binding.md`; this is the map.
 | `ship.sync` | `merge`, `rebase` | `merge` | how a branch is brought up to date |
 | `ship.merge` | `squash`, `merge` | `squash` | how a pull request lands |
 | `ship.direct` | globs | none, the lane off | the files the direct lane may push to the default branch |
+| `ship.direct_max_lines` / `ship.direct_max_files` | positive integers | `20` / `3` | limits across the complete linear range; exceeding them uses PR delivery |
 | `ship.forbidden_check` | `required`, `off` | follows the list's `# protects:` line, or with no list the repository's visibility | whether the hook checks what a session posts against the private token list |
 | `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing |
 | `models.builder` | `opus`, `sonnet`, `haiku`, `fable` | `opus` | the BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes |
@@ -396,15 +365,12 @@ No node is granted a commit, a push or a tracker write. The REVIEW node gets com
 read-only. BUILD edits the tree; the driver commits
 it under the human who ran it, with the subject BUILD returned and the record the pull request
 carries, from the newest answer. A decision the issue does not settle comes back as a stop.
-BUILD cannot use skills or run arbitrary commands: anything an issue needs run is listed in its
+BUILD cannot invoke skills or run arbitrary commands: anything an issue needs run is listed in its
 acceptance, tests or verification section, backticked and starting with a runner the driver
 knows (`python3`, `python`, `pwsh`, `dotnet`, `npm`, `npx`, `pytest`, `bash` or `go test`).
 
-The newest trusted triage and later trusted spec amendments can also name exact commands with a
-whole-line `Acceptance command:` field followed by the command in backticks. Other quoted examples
-add no grants. Missing required executable proof can stop as `acceptance unrunnable`, with the
-missing command/proof and a meaningful question, before a commit or fix round; genuine environment
-blocks retain pending validation. See the [acceptance contract](docs/contract.md).
+Trusted triage and spec amendments can also grant exact commands with a whole-line
+`Acceptance command:` field; see the [acceptance contract](docs/contract.md).
 
 **Guardrails are three layers, not prompts.** The driver's code holds the order, each node's
 tools, the fix-round cap and the stop conditions. PreToolUse hooks (`hooks/README.md`) refuse an
@@ -412,10 +378,8 @@ unsafe recursive delete or a forced clean, a discard of unstaged work, a stash t
 another worktree's entry, a kill by pattern, a commit under an agent's identity, and a post or
 commit carrying a forbidden token. The gates under `bin/`, and the Actions under `actions/` that
 run them in CI, check the protocol whoever followed it. CI supplies the pull request's merge
-checks. The driver runs selected gates the checks skip and establishes committed-input BUILD
-proof through its leased validator. Additional observed worker commands require explicit
-`--validate` and the invoking allowlist before caller execution. The direct lane runs its
-selected gates itself.
+checks. The driver runs selected gates the checks skip and requires execution proof of the final
+committed inputs before review or merge (`docs/contract.md` §4).
 
 **No state between calls.** Every call rereads the issue, the branch and the pull request, and
 continues from the first step not yet done. A session, a bot or a cron on any host with the
@@ -431,9 +395,7 @@ as a question for the owner, and a person cuts each release.
 
 **Skills are thin.** `/ouro:triage`, `/ouro:run` and `/ouro:weekly` bind, run one driver command
 and relay its exit code; `/ouro:init` runs the installer. The knowledge is in the node prompts,
-the contract sections the driver pastes into them, and repository instructions. Claude loads its
-native instructions; the Codex adapter supplies root AGENTS.md, CLAUDE.md and .claude/rules text,
-retaining each rule's declared path scope.
+the contract sections the driver pastes into them, and repository instructions.
 
 **Layout.**
 

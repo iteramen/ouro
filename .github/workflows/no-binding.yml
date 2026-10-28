@@ -6,7 +6,10 @@ name: No binding
 # name; CI runs it here. A pull request runs the Linux leg; the push to master and the tag run
 # both, so a row that runs on Windows only shows on the default branch's run.
 
+# Manual provider checks can run alone; full and weekly Gates runs reuse the same workflow.
 on:
+  workflow_call: {}
+  workflow_dispatch: {}
   # The list mirrors the copy plan in bin/Vendor-Ouro.ps1 (its .DESCRIPTION block), plus this
   # file and .gitattributes, which decides the bytes every checked-out file has: a change to what
   # that script copies changes this list, in both triggers, in the same PR. A pushed `v*` tag runs
@@ -20,9 +23,13 @@ on:
       - '.gitattributes'
       - 'bin/*.ps1'
       - 'bin/ouro-binding.py'
+      - 'bin/ouro-direct.py'
+      - 'bin/ouro/runtime/process.py'
       - 'bin/external-audit.py'
       - 'bin/forbidden-tokens.py'
       - 'tests/**'
+      - '!tests/driver/**'
+      - '!tests/runtime/**'
       - 'skills/**'
       - '!skills/init/**'
       - 'agents/*'
@@ -36,9 +43,13 @@ on:
       - '.gitattributes'
       - 'bin/*.ps1'
       - 'bin/ouro-binding.py'
+      - 'bin/ouro-direct.py'
+      - 'bin/ouro/runtime/process.py'
       - 'bin/external-audit.py'
       - 'bin/forbidden-tokens.py'
       - 'tests/**'
+      - '!tests/driver/**'
+      - '!tests/runtime/**'
       - 'skills/**'
       - '!skills/init/**'
       - 'agents/*'
@@ -110,15 +121,23 @@ jobs:
           & ./bin/Vendor-Ouro.ps1 -Into $root
           Write-Host '::endgroup::'
 
-          $isSuite = { $_.Name -like '*.Tests.ps1' -or $_.Name -like '*.Tests.py' }
-          $here = @(Get-ChildItem -Path tests -Recurse -File | Where-Object $isSuite)
+          function Get-SuitePaths([string]$Directory, [switch]$Plugin) {
+            @(Get-ChildItem -LiteralPath $Directory -Recurse -File |
+              Where-Object { $_.Name -like '*.Tests.ps1' -or $_.Name -like '*.Tests.py' } |
+              ForEach-Object {
+                $relative = [IO.Path]::GetRelativePath($Directory, $_.FullName).Replace('\', '/')
+                if (-not $Plugin -or -not ($relative.StartsWith('driver/', [StringComparison]::Ordinal) -or $relative.StartsWith('runtime/', [StringComparison]::Ordinal))) { $relative }
+              } | Sort-Object -CaseSensitive)
+          }
+          $expected = @(Get-SuitePaths (Join-Path $PWD 'tests') -Plugin)
+          $actual = @(Get-SuitePaths (Join-Path $root 'scripts/tests'))
           $suites = @(Get-ChildItem -LiteralPath (Join-Path $root 'scripts/tests') -Recurse -File |
-            Where-Object $isSuite | Sort-Object Name)
+            Where-Object { $_.Name -like '*.Tests.ps1' -or $_.Name -like '*.Tests.py' } | Sort-Object Name)
           # Two guards against a vacuous green: a run that finds none passes with nothing
           # executed, and a copy that drops one passes without it.
           if ($suites.Count -eq 0) { Write-Host '::error::no fixture suite in the vendored tree'; exit 1 }
-          if ($suites.Count -ne $here.Count) {
-            Write-Host "::error::the vendored tree carries $($suites.Count) suite(s), this checkout has $($here.Count)"
+          if (($actual -join "`n") -cne ($expected -join "`n")) {
+            Write-Host "::error::the vendored suite paths differ from the flat copy plan ($($actual.Count) carried, $($expected.Count) expected)"
             exit 1
           }
 
@@ -143,7 +162,7 @@ jobs:
             Write-Host '::endgroup::'
             # A suite that printed nothing but `skip:` lines ran no case, and a tally that counts
             # it as a pass hides how much of the vendored layout has no subject to test.
-            $cases = @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and -not $_.StartsWith('skip:') })
+            $cases = @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and -not $_.StartsWith('skip:', [StringComparison]::OrdinalIgnoreCase) })
             $verdict = if ($code -ne 0) { 'FAIL' } elseif ($cases.Count) { 'PASS' } else { 'SKIP' }
             Write-Host "$verdict exit=$code  $($s.Name)"
             if ($code -ne 0) { $failed += $s.Name } elseif (-not $cases.Count) { $skipped++ }

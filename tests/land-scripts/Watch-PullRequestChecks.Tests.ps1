@@ -46,8 +46,8 @@ try {
     Assert-Equal '' $r.Stop 'the run ends without a stop'
     Assert-Line $r.Gh 'pr view 7 -R o/n --json headRefOid' 'the head is read from the pull request, naming the repository'
     Assert-Line $r.Gh "run list -R o/n --commit $H --limit 100 --json databaseId,workflowDatabaseId,workflowName,event,createdAt,status,conclusion --event pull_request" 'the runs are listed by commit and event, on the server'
-    Assert-Line $r.Gh 'run watch 12 -R o/n --interval 60' 'the newest run of workflow 1 is watched'
-    Assert-Line $r.Gh 'run watch 13 -R o/n --interval 60' 'the run of workflow 2 is watched'
+    Assert-Line $r.Gh 'run watch 12 -R o/n --interval 15' 'the newest run of workflow 1 is watched'
+    Assert-Line $r.Gh 'run watch 13 -R o/n --interval 15' 'the run of workflow 2 is watched'
     Assert-NoMatch 'run watch 11' ($r.Gh -join "`n") 'the superseded run of workflow 1 is not watched'
     Assert-Line $r.Lines 'run 12 (wf1/pull_request): success' 'the verdict names the newest run with its conclusion'
     Assert-Line $r.Lines 'run 13 (wf2/pull_request): skipped' 'a skipped run passes'
@@ -60,7 +60,7 @@ try {
         'run watch 11' = @{ Exit = 0; Out = '' }; 'run watch 14' = @{ Exit = 0; Out = '' } }
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
     Assert-Equal '' $r.Stop 'the run ends without a stop'
-    Assert-Equal 'run watch 11 -R o/n --interval 60,run watch 14 -R o/n --interval 60' (@($r.Gh | Where-Object { $_ -like 'run watch*' }) -join ',') 'both runs are watched, in the order they appeared'
+    Assert-Equal 'run watch 11 -R o/n --interval 15,run watch 14 -R o/n --interval 15' (@($r.Gh | Where-Object { $_ -like 'run watch*' }) -join ',') 'both runs are watched, in the order they appeared'
     Assert-Equal 3 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'three lists: the first, one after each round of watches'
     Assert-Line $r.Lines 'run 14 (wf3/pull_request): success' 'the late run is judged'
 
@@ -117,8 +117,8 @@ try {
     Assert-Equal '' $r.Stop 'the run ends without a stop'
     Assert-Line $r.Gh "run list -R o/n --commit $H --limit 100 --json databaseId,workflowDatabaseId,workflowName,event,createdAt,status,conclusion --branch master" 'each commit is listed on the default branch, with no event filter'
     Assert-NoMatch 'run watch 11' ($r.Gh -join "`n") 'the older run of workflow 1, on the first commit, is superseded by the second commit''s'
-    Assert-Line $r.Gh 'run watch 15 -R o/n --interval 60' 'the newest run of workflow 1 is watched'
-    Assert-Line $r.Gh 'run watch 16 -R o/n --interval 60' 'the run of workflow 2 is watched'
+    Assert-Line $r.Gh 'run watch 15 -R o/n --interval 15' 'the newest run of workflow 1 is watched'
+    Assert-Line $r.Gh 'run watch 16 -R o/n --interval 15' 'the run of workflow 2 is watched'
     Assert-NoMatch 'pr view' ($r.Gh -join "`n") 'no pull request is read'
 
     Write-Host 'no run after a minute is reported, not a stop, with -Sha; -Sha none watches nothing'

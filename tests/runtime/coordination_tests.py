@@ -113,10 +113,10 @@ def board(mode="json"):
                 if mode == "slow_headers":
                     self.wfile.write(b"HTTP/1.0 200 OK\r\n")
                     self.wfile.flush()
-                    for _ in range(20):
+                    for _ in range(100):
                         self.wfile.write(b"X-Drip: x\r\n")
                         self.wfile.flush()
-                        time.sleep(0.03)
+                        time.sleep(0.05)
                     self.wfile.write(b"\r\n")
                     return
                 self.send_response(200)
@@ -131,7 +131,7 @@ def board(mode="json"):
                     self.wfile.write(payload[offset:offset + step])
                     self.wfile.flush()
                     if mode.startswith("fragmented") or slow:
-                        time.sleep(0.0002 if mode.startswith("fragmented") else 0.03)
+                        time.sleep(0.0002 if mode.startswith("fragmented") else 0.1)
             except (OSError, ValueError):
                 pass
 
@@ -346,7 +346,7 @@ class CoordinationTests(unittest.TestCase):
             with self.subTest(mode=mode), board(mode) as (endpoint, requests):
                 start = time.monotonic()
                 reply = co.Board(self.config(endpoint), {"MOMENTUS_API_KEY": KEY}, budget=0.15).call("board_post", {})
-                self.assertLess(time.monotonic() - start, 0.7)
+                self.assertLess(time.monotonic() - start, 2)  # each stall runs for seconds
                 self.assertFalse(reply.available)
                 self.assertIn("timeout", reply.notice)
                 time.sleep(0.1)
@@ -650,6 +650,7 @@ else:
                         self.assertEqual(os.environ[VARIABLE], KEY)
                     self.assertEqual((root / ("reader-" + cli)).read_text(), "safe")
 
+    @patch.object(codex, "WINDOWS", False)
     def test_preflight_subprocesses_also_remove_the_credential(self):
         cfg = developer.Settings(coordination=self.config(credential_env=VARIABLE))
         def result(out="", code=0):

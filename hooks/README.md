@@ -14,6 +14,16 @@ matcher fits runs on each call, and any one refusal stops the call.
 | `hooks/guard-commit.py` | an author or committer identity naming an agent (`claude`, `anthropic`, `copilot`, `codex`, `[bot]`, `noreply@anthropic.com`) in `git commit --author`, `git -c user.name=` or `user.email=`, `git config user.name` or `user.email`, or a `GIT_AUTHOR_*` or `GIT_COMMITTER_*` assignment: a commit carries the human who ran the session, wherever the call's directory is. | none | `tests/hooks/guard-commit/` |
 | `hooks/guard-discard.py` | `git checkout -- <path>`, `git checkout <ref> -- <path>`, `git checkout .`, `git restore <path>` and its `--worktree` forms when a named path has changes in the worktree and nothing staged, so the restore would drop the only copy of the work, or when a path is a variable; a path with staged changes passes, since the restore returns the staged work. Stage the work before mutating it, or mutate on an export (`git archive HEAD \| tar -x -C <scratch>`). | `# discard-ok: <why>` | `tests/hooks/guard-discard/` |
 
+## Session start
+
+`hooks/session-sync.py`, a `SessionStart` hook on `startup`, keeps a bound repository's main
+checkout current: on the default branch with no tracked changes, it fetches and fast-forwards to
+`origin/<default>`, never over an untracked or ignored file.
+Claude Code reads the instructions before the hook runs, so a move prints one line asking for a
+restart. A dirty, diverged or other-branch checkout is left as it is, with one line saying why;
+a linked worktree and an unbound repository are untouched. It never stashes, resets or rebases.
+`tests/hooks/session_sync_tests.py` is its test.
+
 ## How a guard fails
 
 A guard refuses by exit 2, with the reason on stderr, which Claude Code shows the session. Every
@@ -35,8 +45,8 @@ This node boundary is independent of hooks installed in an interactive developer
 
 ## Testing
 
-`pwsh -NoProfile -File tests/hooks/Test-Hooks.Tests.ps1` runs every hook `hooks.json` registers
-once per recorded event under `tests/hooks/<hook>/`, `<hook>` being the script's file name
+`pwsh -NoProfile -File tests/hooks/Test-Hooks.Tests.ps1` runs every `PreToolUse` hook `hooks.json`
+registers once per recorded event under `tests/hooks/<hook>/`, `<hook>` being the script's file name
 without its extension, and compares the exit code with the fixture's decision: `allow` is exit 0
 and `deny` is exit 2, and any other code fails the row by name. Each hook needs at least one event
 it allows and one it refuses. A fixture is one JSON file: `decision`, the `event` as Claude Code

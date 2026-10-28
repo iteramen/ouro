@@ -190,12 +190,30 @@ def exercise(h):
         check("external merge reconciles and closes only the owned claim", code == 0 and b.threads[first]["thread"]["status"] == "closed"
               and records(b, first)[-1]["outcome"].startswith("landed:"))
 
-    for scenario in ("green", "fix", "revert", "push-failed", "overlap", "override"):
+    try:
+        h.runmod.validation.check_platform()
+        inline_supported = True
+    except h.shmod.DriverError:
+        inline_supported = False
+    scenarios = ("green", "fix", "revert", "push-failed", "overlap", "override") if inline_supported else (
+        "green", "push-failed", "overlap", "override")
+    if not inline_supported:
+        print("INFO: actual inline fix/revert publication needs admitted caller execution; "
+              "offline phase controls and real ordinary-PR fallback remain exercised")
+    for scenario in scenarios:
         with board() as (b, endpoint):
             table = h.run_rows("failure", "success") if scenario == "fix" else (
                 h.run_rows("failure", "failure") if scenario == "revert" else {})
             files = {"gates/doc_gate.py": "open('junk.txt', 'w').write('x')\n"} if scenario == "push-failed" else {}
-            c = h.lane_case("claim-direct-" + scenario, table=table, files=files)
+            fallback_binding = None
+            if not inline_supported and scenario in ("green", "override"):
+                # Keep the actual publisher's platform refusal and use the
+                # declared ordinary CI authority; no local receipt is invented.
+                fallback_binding = (h.BINDING.format(policy="stop-at-pr", review="adversarial-review")
+                                    + h.LANE_GATES.replace('run = "python3 gates/doc_gate.py"\n',
+                                        'run = "python3 gates/doc_gate.py"\nci = "echo another workflow runs this gate"\n'))
+                fallback_binding = fallback_binding.replace('[ship]\n', '[ship]\nvalidation="ci"\nvalidation_checks=["ci"]\n')
+            c = h.lane_case("claim-direct-" + scenario, table=table, files=files, binding=fallback_binding)
             if scenario in ("fix", "revert"):
                 c.node("BUILD", {**h.NOTE_BUILD, "writes": {"docs/note.md": "fixed note\n"}}, 2)
             if scenario in ("overlap", "override"):
@@ -213,11 +231,32 @@ def exercise(h):
                 check("direct override records actor/thread and never closes foreign claim",
                       code == 0 and prepared[-1]["override"]["conflicts"][0]["thread"] == "1"
                       and b.threads["1"]["thread"]["status"] == "open")
+                if not inline_supported:
+                    check("unsupported inline override retains the foreign claim and waits on its ordinary PR",
+                          c.pr()["head"] == "gates/1-fix-the-total"
+                          and any(row["body"].startswith("**Ready for merge**") for row in c.pr_comments())
+                          and h.git(c.origin, "rev-list", "--count", "master") == "1"
+                          and b.threads[owned]["thread"]["status"] == "open"
+                          and recs[-1]["outcome"].startswith("waiting"))
             elif scenario == "push-failed":
                 check("failed direct push records no publication before fallback",
                       any(r["outcome"] == "direct push failed; nothing pushed" for r in recs)
                       and not any(r["outcome"].startswith("landed:") for r in recs))
             else:
+                if not inline_supported:
+                    head = h.git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total")
+                    check("unsupported inline delivery retains prepared scope and exact-head CI authority on its ordinary PR",
+                          code == 0 and len(prepared) == 1 and prepared[0]["stage"] == "parent"
+                          and prepared[0]["scope"]["paths"] == ["docs/note.md"]
+                          and len(prepared[0]["base"]) == len(prepared[0]["head"]) == 40
+                          and c.pr()["head"] == "gates/1-fix-the-total"
+                          and any(row["body"].startswith("**Ready for merge**") and head in row["body"] for row in c.pr_comments())
+                          and not h.modeled_command_heads(c, "python3 gates/doc_gate.py")
+                          and not list(c.main.rglob("ouro-validation/*/receipt.json"))
+                          and h.git(c.origin, "rev-list", "--count", "master") == "1"
+                          and b.threads[owned]["thread"]["status"] == "open"
+                          and recs[-1]["outcome"].startswith("waiting"))
+                    continue
                 stages = [r["stage"] for r in prepared]
                 expected = ["parent", "fix", "revert"] if scenario == "revert" else (
                     ["parent", "fix"] if scenario == "fix" else ["parent"])
@@ -421,7 +460,8 @@ def resume_offline(h):
                               ob=SimpleNamespace(tomllib=__import__("tomllib")),
                               lookup=lambda *a: "fixture", viewer=lambda: "actor",
                               body_file=lambda *a: c.root / "body.md", pr_checks=lambda: True,
-                              gh_json=lambda *a: [], trusted=lambda: {"actor", "alice", "bob"})
+                              gh_json=lambda *a: [], trusted=lambda: {"actor", "alice", "bob"},
+                              run=h.runmod.sh.run)
         def git_result(*args, cwd=None, check=True):
             result = h.runmod.sh.run(["git", *args], cwd=cwd or c.main)
             if check and result.code != 0:
@@ -889,7 +929,7 @@ def resume_offline(h):
 
         c, r, commit, outcomes, builds, reverts = setup("resume-refused-fix")
         parent = commit("published parent")
-        gates, pushes = [], []
+        modeled_floors, pushes, legacy_gates = [], [], []
         r.env.override_claim = False
         def build_fix(**kw):
             builds.append(kw)
@@ -897,16 +937,26 @@ def resume_offline(h):
             git(c.main, "commit", "-qam", "fix note\n\nFixes #1" + r.lane_record("fix", parent))
         r.build = build_fix
         r.build_facts = lambda **kw: dict(validation_pending=[])
-        r.run_gates = lambda head: gates.append(head)
+        r.run_gates = lambda head: legacy_gates.append(head)
         r.lane_ship = h.runmod.Run.lane_ship.__get__(r)
         conflict = dict(thread="foreign", holder="other developer")
         r.claim.discover = lambda *a: (["ours"], [conflict], False)
         def run_command(argv, **kw):
             if any("Push-Direct.ps1" in str(a) for a in argv):
-                pushes.append(git(c.main, "rev-parse", "HEAD"))
-                git(c.main, "push", "-q", "origin", "master")
+                head = git(c.main, "rev-parse", "HEAD")
+                prepared = [data for data, _ in outcomes if data["outcome"] == "direct prepared"]
+                h.check("prepared override and pinned head precede the modeled publisher floor",
+                        argv[argv.index("-ExpectedHead") + 1] == head and prepared
+                        and prepared[-1]["head"] == head and prepared[-1]["base"] == parent
+                        and prepared[-1]["stage"] == "fix"
+                        and prepared[-1]["override"] == dict(actor="actor", conflicts=[conflict]))
+                # This offline boundary models a completed public floor; real
+                # command execution is established by the public CLI fixtures.
+                modeled_floors.append(head)
+                pushes.append(head)
+                git(c.main, "push", "-q", "origin", f"{head}:refs/heads/master")
                 return SimpleNamespace(code=0, out="vehicle: push\n")
-            return SimpleNamespace(code=0)  # direct-path policy check
+            raise AssertionError("unexpected modeled publisher command")
         r.env.run = run_command
         r.lane_watch = lambda sha: ("red" if sha == parent else "running", "run/" + sha, "failure")
         for attempt in range(2):
@@ -916,16 +966,17 @@ def resume_offline(h):
             except h.runmod.Refused:
                 refused = True
             fix = git(c.main, "rev-parse", "HEAD")
-            h.check("scope-refused fix retry retains one committed fix and reruns gates",
-                    refused and len(builds) == 1 and gates == [fix] * (attempt + 1)
+            h.check("scope-refused retries retain one committed fix without publisher, floor or extra BUILD",
+                    refused and len(builds) == 1 and not modeled_floors and not legacy_gates
                     and git(c.origin, "rev-parse", "master") == parent
+                    and git(c.main, "rev-list", "--count", f"{parent}..{fix}") == "1"
                     and not pushes and not git(c.main, "status", "--porcelain"))
         r.env.override_claim = True  # explicit caller override on the next invocation
         r.claim.prepared = None
         code = r.go()
         prepared = [data for data, _ in outcomes if data["outcome"] == "direct prepared"]
-        h.check("override resume publishes the existing fix after gates and prepared-change check",
-                code == 0 and len(builds) == 1 and gates == [fix] * 3 and pushes == [fix]
+        h.check("override resume prepares the existing fix before one modeled floor and actual Git push",
+                code == 0 and len(builds) == 1 and modeled_floors == [fix] and not legacy_gates and pushes == [fix]
                 and git(c.origin, "rev-parse", "master") == fix
                 and prepared[-1]["head"] == fix and prepared[-1]["base"] == parent
                 and prepared[-1]["stage"] == "fix"
@@ -934,7 +985,8 @@ def resume_offline(h):
         r.lane_watch = lambda sha: ("red", "run/" + sha, "failure")
         r.go()
         h.check("retried fix still spends the one-fix allowance when published checks turn red",
-                len(builds) == 1 and reverts == [([fix, parent], ["run/" + parent, "run/" + fix])])
+                len(builds) == 1 and modeled_floors == [fix] and pushes == [fix]
+                and reverts == [([fix, parent], ["run/" + parent, "run/" + fix])])
 
         for foreign_path in ("docs/other.md", "docs/note.md"):
             c, r, commit, outcomes, builds, reverts = setup("repair-delta-" + foreign_path.split("/")[-1])
@@ -948,7 +1000,7 @@ def resume_offline(h):
             git(c.main, "push", "-q", "origin", "master")
             upstream = git(c.main, "rev-parse", "HEAD")
             git(c.main, "reset", "--hard", parent)
-            gates, pushes = [], []
+            modeled_floors, pushes, legacy_gates = [], [], []
             r.env.override_claim = False
             r.env.ob.plugin_root = lambda: None
             r.env.ob.OURO_TOKEN = "<ouro>"
@@ -958,15 +1010,20 @@ def resume_offline(h):
                 git(c.main, "commit", "-qam", "fix note\n\nFixes #1" + r.lane_build_record)
             r.build = build_fix
             r.build_facts = lambda **kw: dict(validation_pending=[])
-            def check_gates(head):
-                chosen, skipped = r.select_gates("direct")
-                gates.append((head, [cmd for cmd, _ in chosen], skipped))
-            r.run_gates = check_gates
+            r.run_gates = lambda head: legacy_gates.append(head)
             r.lane_ship = h.runmod.Run.lane_ship.__get__(r)
             def run_command(argv, **kw):
                 if any("Push-Direct.ps1" in str(a) for a in argv):
-                    pushes.append(git(c.main, "rev-parse", "HEAD"))
-                    git(c.main, "push", "-q", "origin", "master")
+                    head = git(c.main, "rev-parse", "HEAD")
+                    prepared = [data for data, _ in outcomes if data["outcome"] == "direct prepared"]
+                    h.check("repair scope is prepared before the modeled publisher sees its exact head",
+                            argv[argv.index("-ExpectedHead") + 1] == head and prepared
+                            and prepared[-1]["head"] == head and prepared[-1]["base"] == upstream
+                            and prepared[-1]["stage"] == "fix")
+                    chosen, skipped = r.select_gates("direct")
+                    modeled_floors.append((head, [cmd for cmd, _ in chosen], skipped))
+                    pushes.append(head)
+                    git(c.main, "push", "-q", "origin", f"{head}:refs/heads/master")
                     return SimpleNamespace(code=0, out="vehicle: push\n")
                 return h.runmod.sh.run(argv, **kw)  # real direct-path policy check
             r.env.run = run_command
@@ -992,9 +1049,10 @@ def resume_offline(h):
                 except h.runmod.Refused as ex:
                     refused = "other holder" in str(ex)
                 fix = git(c.main, "rev-parse", "HEAD")
-                h.check("P -> U -> F uses only repair paths for gates and claims on " + foreign_path,
+                h.check("P -> U -> F prepares only repair scope and reaches a modeled floor only when admitted on " + foreign_path,
                         refused == (foreign_path == "docs/note.md") and builds == [upstream]
-                        and gates[-1] == (fix, ["note gate"], ["other gate"])
+                        and modeled_floors == ([] if refused else [(fix, ["note gate"], ["other gate"])])
+                        and not legacy_gates
                         and r.claim.prepared == dict(base=upstream, head=fix, stage="fix",
                                                     scope=dict(paths=["docs/note.md"], areas=[]))
                         and r.lane_provenance(fix)["parent"] == parent
@@ -1005,7 +1063,8 @@ def resume_offline(h):
                         and git(c.origin, "rev-parse", "master") == (upstream if refused else fix))
                 if not refused:
                     break
-            h.check("repair retries rerun gates without another BUILD", len(gates) == (2 if refused else 1))
+            h.check("refused repair retries spend neither another BUILD nor modeled publisher floor",
+                    len(modeled_floors) == (0 if refused else 1) and builds == [upstream])
 
         for stage in ("parent", "fix", "revert"):
             c, r, commit, outcomes, builds, reverts = setup("resume-pr-scope-" + stage)

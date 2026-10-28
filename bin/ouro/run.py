@@ -12,13 +12,16 @@ import posixpath
 import re
 import shlex
 import shutil
+import stat
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import briefs, execution, node, sh, validation
+from . import briefs, execution, node, sh, validation, worktrees
+from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, empty_list
 from .coordination import Claim, worker_env
+from .runtime.tools import caller_source_writable
 from .sh import DriverError, Refused, Stopped, argv_for, say, script
 
 FIX_CAP = 3
@@ -43,7 +46,6 @@ THREADS_QUERY = ("query($o:String!,$r:String!,$n:Int!,$c:String){repository(owne
                  "nodes{databaseId author{login} body path line}}}pageInfo{hasNextPage endCursor}}}}}")
 REVIEW_DENIED = ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"]
 BUILD_LINE = "Ouro-Build: "
-ACCEPTANCE = ("python3 ", "python ", "pwsh ", "dotnet ", "npm ", "npx ", "pytest", "bash ", "go test")
 NO_REPLY = "No reply came from the build for this thread; nothing was changed for it."
 ONE_ROUND = "Copilot's one review round on this pull request is spent; this thread is left for the merger."
 MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
@@ -54,7 +56,7 @@ def watch_limit():
 
 
 def poll_seconds():
-    return int(os.environ.get("OURO_POLL_SECONDS", "30"))
+    return int(os.environ.get("OURO_POLL_SECONDS", "15"))
 
 
 # ---- pure helpers (unit-tested directly) -------------------------------------------------------
@@ -242,6 +244,8 @@ def render_body(rec, review):
             for g in rec.get("validation_results") or []]
     out += [f"- Driver validation attempt @ {g['sha']}: `{g['cmd']}` exit {g['exit']}; evidence `{g['log']}`"
             for g in rec.get("validation_attempts") or [] if g not in (rec.get("validation_results") or [])]
+    out += [f"- CI validation @ {g['sha']}: `{g['name']}` succeeded; {g['url']}"
+            for g in rec.get("ci_validation") or []]
     if rec.get("note"):
         out.append(f"- {rec['note']}")
     out += [f"- {review}", ""]
@@ -311,91 +315,11 @@ def without_build_lines(text):
     return "\n".join(l for l in text.splitlines() if not l.startswith(BUILD_LINE)).strip()
 
 
-def acceptance_text(body):
-    """The approved body's acceptance/test/verification sections, including prose requirements."""
-    level, text = 0, []
-    for line in body.splitlines():
-        h = re.match(r"(#{2,3})\s+(.*)", line)
-        if h and (not level or len(h.group(1)) <= level):
-            level = len(h.group(1)) if re.search(r"\b(acceptance|tests?|testing|verif\w*)\b", h.group(2), re.I) else 0
-        elif level:
-            text.append(line)
-    return "\n".join(text)
-
-
-def acceptance_spans(body):
-    """Backticked spans in the sections whose heading names acceptance, tests or verification."""
-    joined = acceptance_text(body)
-    spans = [s.strip() for s in re.findall(r"`([^`\n]+)`", joined)]
-    for block in re.findall(r"(?ms)^```(?:sh|bash|shell|powershell|ps1)?[ \t]*\n(.*?)^```", joined):
-        spans.extend(line.strip() for line in block.splitlines() if line.strip())
-    return spans
-
-
-def acceptance_commands(body):
-    """The acceptance spans that start like a runner: what the brief grants."""
-    return list(dict.fromkeys(s for s in acceptance_spans(body) if s.startswith(ACCEPTANCE)))
-
-
-PREFIXED = re.compile(r"^(?:[A-Za-z_]\w*=\S*\s+)+")  # NAME=value words before a runner, which no grant covers
-
-
-def named_commands(body):
-    """The acceptance spans that name a command: a runner after any leading NAME=value words."""
-    return list(dict.fromkeys(s for s in acceptance_spans(body) if PREFIXED.sub("", s).startswith(ACCEPTANCE)))
-
-
-DECLARED_ACCEPTANCE = re.compile(r"(?mi)^[ ]{0,3}(?:[-*][ ]+)?(?:Acceptance command:|\*\*Acceptance command:\*\*)\s*`([^`\n]+)`[ \t]*$")
-
-
-def acceptance_declarations(text):
-    """An explicit field is prose, never a fenced or indented historical example."""
-    result, fence = [], None
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        marker = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
-        if marker:
-            value = marker.group(1)
-            if fence is None:
-                fence = value
-            elif value[0] == fence[0] and len(value) >= len(fence) and not marker.group(2).strip(" \t"):
-                fence = None
-            continue
-        if fence is None and not line.startswith(("    ", "\t")):
-            result.extend(DECLARED_ACCEPTANCE.findall(line))
-    return result
-
-
 def acceptance_source(run):
     """Only explicit fields in approved spec comments extend the body's grants."""
     comments = getattr(run, "spec_amendments", lambda: [])()
     declared = [command for comment in comments for command in acceptance_declarations(str(comment.get("body") or ""))]
     return run.body + ("\n## Acceptance commands\n" + "\n".join(f"Acceptance command: `{cmd}`" for cmd in declared) if declared else "")
-
-
-def acceptance_problems(body, caller_commands=()):
-    problems = []
-    allowed = set(acceptance_commands(body))
-    for cmd in dict.fromkeys(named_commands(body) + acceptance_declarations(body)):
-        try:
-            _, environment = validation.command(cmd)
-            if environment:
-                if cmd not in caller_commands:
-                    raise DriverError("leading environment assignments require an already-approved caller validation command")
-                continue  # caller handoff only; acceptance_commands never makes this a worker grant
-            if cmd not in allowed:
-                raise DriverError("this explicit command is outside the approved acceptance runner forms")
-        except DriverError as ex:
-            problems.append(f"`{cmd}`: {ex}")
-    return problems
-
-
-def empty_list(body):
-    """Why a run whose BUILD node would get an empty command list stops before the first build: it would ship code no node ran."""
-    named = named_commands(body)
-    return (("The acceptance names " + ", ".join(f"`{s}`" for s in named) + ", and the" if named else "The")
-            + " BUILD node would get an empty command list: no acceptance command it is granted, and no `[[gate]]` for the area marked `cheap`, "
-            "run here, or declaring `paths` (an environment prefix is not a runner the brief grants). A build would ship code no node ran. "
-            "Name the acceptance command in the issue, or mark a gate `cheap = true`, or give it `paths` or a local run.")
 
 
 def read_record(body):
@@ -410,9 +334,18 @@ def review_plan(value, size):
     return ("node", value == "copilot")
 
 
-def derive_size(paths, lines):
-    """('M', why) when a diff is over the S shape (contract section 4), else ('S', '')."""
-    counted = [p for p in paths if posixpath.basename(p) != "CHANGELOG.md"]
+RELEASE_NOTES = [r"(^|/)CHANGELOG\.md$"]  # repo.release_notes unset
+
+
+def release_notes(paths, patterns=RELEASE_NOTES):
+    """The paths a repo.release_notes pattern matches, searched case-sensitively as git compares paths."""
+    return [p for p in paths if any(re.search(x, p) for x in patterns)]
+
+
+def derive_size(paths, lines, patterns=RELEASE_NOTES):
+    """('M', why) when a diff is over the S shape (contract section 4), else ('S', ''); release notes count toward the lines only."""
+    notes = release_notes(paths, patterns)
+    counted = [p for p in paths if p not in notes]
     why = []
     if len(counted) > 3:
         why.append(f"{len(counted)} files")
@@ -515,6 +448,7 @@ class Run:
         self.fresh = False
         self.notes = []  # sentences the record carries: a tightening, a reader that was unavailable
         self.in_lane = False
+        self.messages, self.ancestry = {}, {}  # facts about full commit ids, which never change
         self.claim = Claim(self)
 
     # ---- reading the tracker
@@ -569,14 +503,35 @@ class Run:
             return head + "Build this part only. Every other part is out of scope: each lands in its own pull request.\n\n"
         return head + "A gap that another part's acceptance covers is not a finding against this change.\n\n"
 
+    def fixes_line(self):
+        """A pull request body's own line that fixes the issue, or carries the part this run takes."""
+        part = rf"|Part {self.k}/\d+ of #{self.n}" if self.k else ""
+        return re.compile(rf"(?m)^(Fixes #{self.n}{part})\s*$")
+
+    def adopt(self, number):
+        """Take over an existing pull request's branch, by explicit request only, so the run resumes it instead of building anew."""
+        e = self.env
+        p = e.gh_json("pr", "view", str(number), "--json", "number,state,headRefName,baseRefName,isCrossRepository,body")
+        # a part short of the last must not carry Fixes: GitHub would close the whole issue at the merge
+        line = self.fixes_line() if self.fixes else re.compile(rf"(?m)^Part {self.k}/\d+ of #{self.n}\s*$")
+        if (p.get("state") not in ("OPEN", "MERGED") or p.get("isCrossRepository") or p.get("baseRefName") != e.default
+                or not line.search(p.get("body") or "")):
+            raise Refused(f"--pr {number}: only an open or merged pull request from this repository into {e.default} "
+                          f"whose body has its own `{'Fixes' if self.fixes else f'Part {self.k}/{self.parts_n} of'} #{self.n}` line can be adopted")
+        self.branch = p["headRefName"]
+        # its own worktree: the derived one may hold an earlier run's tree on another branch
+        self.dirname = f"{self.n}-pr{number}"
+        self.worktree = self.env.main / ".claude" / "worktrees" / self.dirname
+        say(f"  adopting pull request #{number} from {self.branch}")
+
     def refuse_other_pr(self):
         """An open pull request from another branch whose body fixes the issue, or carries the part this run takes, on its own line: the run would duplicate it."""
         e = self.env
-        part = rf"|Part {self.k}/\d+ of #{self.n}" if self.k else ""
-        mine = re.compile(rf"(?m)^(Fixes #{self.n}{part})\s*$")
+        mine = self.fixes_line()
         for p in e.gh_json("pr", "list", "--state", "open", "--search", f"{self.n} in:body", "--limit", "50", "--json", "number,headRefName,body,url,state"):
             if p.get("state", "OPEN") == "OPEN" and p.get("headRefName") != self.branch and mine.search(p.get("body") or ""):
-                raise Refused(f"#{self.n} is already being fixed by pull request #{p['number']} from {p['headRefName']} ({p.get('url') or ''}): nothing to build")
+                raise Refused(f"#{self.n} is already being fixed by pull request #{p['number']} from {p['headRefName']} ({p.get('url') or ''}): "
+                              f"nothing to build; to land it, run with `--pr {p['number']}`")
 
     def manual_paths(self):
         """The `Manual: <path>` lines triage wrote, those its own part names when the run takes a checklist part."""
@@ -662,7 +617,7 @@ class Run:
         """The newest trusted triage and later trusted amendments, rendered only for briefs."""
         return "\n\n".join(f"{(c.get('author') or {}).get('login')} at {c.get('createdAt')}:\n{str(c.get('body') or '').strip()}" for c in self.spec_amendments()) or "(none)"
 
-    def find_pr(self, branch=None, states=("OPEN", "MERGED")):
+    def find_pr(self, branch=None, states=("OPEN", "MERGED", "CLOSED")):
         prs = self.env.gh_json("pr", "list", "--head", branch or self.branch, "--state", "all", "--limit", "20", "--json",
                                "number,state,isDraft,headRefOid,mergeCommit,title,body,url,baseRefName")
         for state in states:
@@ -701,6 +656,8 @@ class Run:
             if parts and all(done for _, done, _ in parts):
                 self.part_arg = parts[-1][0]
         self.plan_part()
+        if getattr(e, "adopt_pr", None):
+            self.adopt(e.adopt_pr)
         say(f"#{self.n} {self.title}")
         say(f"  class {self.flow}, size {self.size}, branch {self.branch}")
         if not coordination:
@@ -754,9 +711,11 @@ class Run:
         if coordination and not published and not lane_pr and (self.issue.get("state") == "CLOSED" and not (pr and pr["state"] == "MERGED")
                                  or pr and pr["state"] == "CLOSED"):
             self.claim.update("closed externally without merge", close=True)
+            worktrees.sweep(e, only=self.worktree)
             say("[2] work closed externally; claim reconciled")
             return 0
         if pr and pr["state"] == "CLOSED":
+            worktrees.sweep(e, only=self.worktree)
             say("[2] pull request closed externally: nothing to do")
             return 0
         if coordination:
@@ -782,7 +741,7 @@ class Run:
                 say(f"[2a] direct: not taken, {why}; the run continues as express from a worktree")
                 self.flow = "express"
             self.require_acceptance()
-            if not self.build_commands()[1]:  # the direct lane runs every selected gate itself; a worktree's build runs what it is granted
+            if not self.build_commands()[1] and not execution.ci_commands(self, selected=False):
                 self.stop_issue("gate uncovered", empty_list(self.body), 3)
         else:
             say("[2] verify: skipped, the run already has a branch or a pull request")
@@ -956,6 +915,7 @@ class Run:
 
     def ensure_worktree(self):
         e = self.env
+        worktrees.use(e, self.worktree)
         def readiness(base):
             node.worktree_readiness(e.runtime, e.main, self.worktree, self.branch, base)
         if (self.worktree / ".git").exists():
@@ -988,6 +948,7 @@ class Run:
             argv = ["worktree", "add", rel, "-b", self.branch, f"origin/{e.default}"]
         say(f"[3] worktree: git {' '.join(argv)}")
         e.git(*argv)
+        worktrees.created(e, self.worktree, self.branch, self.n, self.k)
         self.setup_tree(self.worktree)
 
     def fetch_branch(self):
@@ -1105,6 +1066,8 @@ class Run:
                 continue
             records = self.records(pr)
             pending = self.build_facts(evidence=False)["validation_pending"]
+            covered = execution.ci_commands(self)
+            pending = [p for p in pending if p["cmd"] not in covered]
             if pending:
                 validation.requests(pending, self.validation_commands())
                 if not getattr(e, "validate", False):
@@ -1125,7 +1088,7 @@ class Run:
                                        f"evidence {failed['log']}:\n{tail}", records)
                         continue
             head = results[0]["sha"] if pending else self.head()
-            inputs = validation.check_inputs(self, head)
+            inputs = self.check_inputs(head)
             if inputs == 75:
                 say("waiting for validation: execution requires a supported lifecycle boundary")
                 return 0
@@ -1144,12 +1107,26 @@ class Run:
                 if red:
                     self.fix_round(f"gate `{red[0]}` exited {red[1]}; the failure in its log:\n{red[2]}", records)
                     continue
-            inputs = validation.check_inputs(self, head)
+            inputs = self.check_inputs(head)
             if inputs == 75:
                 say("waiting for validation: execution requires a supported lifecycle boundary")
                 return 0
             if inputs is not None:
                 raise Refused("execution evidence requires clean unchanged inputs after driver gates; preserve and resolve the worktree edits")
+            if execution.ci_mode(self):
+                # CI cannot validate an unpublished head. This repository policy
+                # deliberately opens a draft before express review, never Ready.
+                if self.origin_tip() != head:
+                    self.sync_and_push(records)
+                    continue
+                if pr is None:
+                    pr = self.open_pr(head)
+                state = self.checks(pr, head)
+                if state in ("fix", "conflict"):
+                    continue
+                if state != "green" or not execution.check_ci(self, pr, head):
+                    return 0
+                self.check_inputs(head)
             missing = self.missing_execution(results if pending else [])
             if missing:
                 finding = "Missing successful execution evidence @ " + head + ": " + ", ".join(
@@ -1191,7 +1168,7 @@ class Run:
                     return 0
                 if state == "fix":
                     continue
-            state = self.checks(pr, head)
+            state = "green" if execution.ci_mode(self) else self.checks(pr, head)
             if state == "running":
                 say(f"checks on #{pr['number']} are still running: invoke `run {self.n}` again")
                 return 0
@@ -1226,7 +1203,7 @@ class Run:
         if stop:
             reason = "acceptance unrunnable" if isinstance(stop, dict) and stop.get("reason") == "acceptance unrunnable" else "open decision"
             self.stop_issue(reason, self.stop_text(stop), 3)
-        required = set(acceptance_commands(acceptance_source(self)))
+        required = set(acceptance_commands(acceptance_source(self))) - execution.ci_commands(self, selected=False)
         refused = [str((denial.get("tool_input") or {}).get("command") or "")
                    for denial in ans.get("_denied") or [] if isinstance(denial, dict)]
         if node.USAGE and node.USAGE[-1].get("node") == name:
@@ -1241,9 +1218,14 @@ class Run:
 
     def build_commands(self):
         """(the brief's command list, the commands the node may run): contract section 4's Gates bullet."""
-        runnable = acceptance_commands(acceptance_source(self))
+        covered = execution.ci_commands(self, selected=False)
+        runnable = [cmd for cmd in acceptance_commands(acceptance_source(self)) if cmd not in covered]
         lines = [f"- `{c}` (acceptance)" for c in runnable]
-        for run, g in self.area_gates():
+        for run, g in self.area_gates(tree=not self.in_lane):
+            if self.in_lane and not (g.get("cheap") is True or g.get("direct_code_check") is True):
+                continue  # Inline publication has the trusted minimal floor, not the full BUILD suite.
+            if run in covered:
+                continue
             if g.get("cheap") is True:  # whatever the checks run: it needs no toolchain, so every build runs it
                 lines.append(f"- `{run}` (cheap: run it on every build)")
                 runnable.append(run)
@@ -1254,11 +1236,20 @@ class Run:
             when = f" (run it when the change touches: {', '.join(paths)})" if paths and not here else ""
             lines.append(f"- `{run}`{when}")
             runnable.append(run)
+        if covered:
+            lines.append("CI-owned commands (do not run locally or report as gates_run; local toolchain absence or denial is expected, "
+                         "not an owner ruling; successful configured CI is still required):\n"
+                         + "\n".join(f"- `{cmd}`" for cmd in sorted(covered)))
         return "\n".join(lines) or "(none: the pull request's checks are the run)", runnable
 
     def required_execution(self):
         """Recompute obligations from trusted grants and final changed paths, including resumed heads."""
         commands = acceptance_commands(acceptance_source(self))
+        if execution.ci_mode(self):
+            commands += [cmd for cmd, gate in self.area_gates(tree=False)
+                         if gate.get("cheap") is True and self.locally_run(cmd, gate)
+                         or not gate.get("paths") or self.touches(gate["paths"])]
+            return list(dict.fromkeys(commands))
         gates = getattr(self, "execution_grants", None)
         if gates is None:
             gates = execution.grants(self)
@@ -1272,16 +1263,18 @@ class Run:
 
     def missing_execution(self, validated=()):
         head = self.head()
-        # Private worker observations/candidates do not establish settled command
-        # completion. Only results returned by the leased validator count here.
+        # Self-reports never establish completion. Repository-CI results stay
+        # distinct from driver results and explicitly leased caller receipts.
         proven = {r["cmd"] for r in [*validated, *getattr(self, "execution_results", [])]
                   if r["sha"] == head and type(r["exit"]) is int and r["exit"] == 0}
+        if execution.ci_mode(self) and getattr(self, "ci_execution_head", None) == head:
+            proven.update(self.ci_execution_commands)
         return [cmd for cmd in self.required_execution() if cmd not in proven]
 
     def validation_commands(self):
         """Approval comes from the invoking binding, never from a BUILD-edited branch binding."""
         here = not self.env.pr_checks()  # no workflow names pull_request: the BUILD brief grants every selected gate
-        return acceptance_commands(acceptance_source(self)) + [run for run, g in self.area_gates(tree=False) if g.get("cheap") is True
+        return acceptance_commands(acceptance_source(self)) + sorted(execution.ci_commands(self, selected=False)) + [run for run, g in self.area_gates(tree=False) if g.get("cheap") is True
                 or (here or not self.notice(g)) and (here or self.locally_run(run, g) or g.get("paths"))]
 
     def build(self, findings=None, threads=None, track=True, record_ok=False):
@@ -1299,7 +1292,7 @@ class Run:
                 previous = list(self.area_gates(tree=False))
         self.execution_grants = list({json.dumps(row, sort_keys=True): row
                                       for row in [*(previous or []), *self.area_gates()]}.values())
-        if not self.in_lane and not gates:
+        if not self.in_lane and not gates and not execution.ci_commands(self, selected=False):
             self.stop_issue("gate uncovered", empty_list(self.body), 3)
         contract = briefs.contract_sections(e, (4, 7))
         prompt = briefs.render("build", number=self.n, title=self.title, body=self.body, part=self.part_scope("build"),
@@ -1372,7 +1365,7 @@ class Run:
         if self.size == "S":
             numstat = self.wt_git("diff", "--numstat", "--no-renames", "-z", f"origin/{e.default}...HEAD").out
             lines = sum(int(a) + int(d) for a, d, _ in (x.split("\t", 2) for x in numstat.split("\0") if x) if a.isdigit() and d.isdigit())
-            size, why = derive_size(self.changed_paths(), lines)
+            size, why = derive_size(self.changed_paths(), lines, e.lookup("repo.release_notes", RELEASE_NOTES))
             if size != "S":
                 self.add_note(f"Size tightened from S to {size}: the diff has {why}.")
                 self.size = size
@@ -1450,7 +1443,8 @@ class Run:
         chosen, skipped = [], []
         for run, g in self.area_gates():
             gp = g.get("paths")
-            if gp and not self.touches(gp):
+            if gp and not self.touches(gp) and not (execution.ci_mode(self)
+                    and g.get("cheap") is True and self.locally_run(run, g)):
                 skipped.append(run)
             elif self.runs_here(run, g, flow):
                 chosen.append((run, g))
@@ -1468,28 +1462,45 @@ class Run:
 
     def run_gates(self, head):
         chosen, skipped = self.select_gates(self.flow)
-        if not getattr(self, "in_lane", False):
+        ci = execution.ci_mode(self)
+        if not getattr(self, "in_lane", False) and not ci:
             return self.settled_gates(head, chosen, skipped)
-        # The direct lane retains its existing driver gates and does not accept
-        # worker/caller execution evidence for the normal BUILD proof barrier.
+        return self.portable_gates(head, chosen, skipped, ci=ci)
+
+    def portable_gates(self, head, chosen, skipped, *, ci):
+        """Run existing driver-owned gates, including the local part of a direct PR."""
+        # Binding-selected local checks use the existing portable driver runner.
+        # They confer no caller-validation receipt or worker admission authority.
         rec_gates = []
         for i, (run, _) in enumerate(chosen):
+            if ci:
+                execution.ci_inputs(self, head)
             argv = shlex.split(run)
             exe = shutil.which(argv[0]) if argv else None
             if not exe:
                 self.stop_issue("gate uncovered", f"The driver cannot run the gate `{run}`: `{argv[0] if argv else ''}` is not on PATH.", 3)
             argv[0] = exe
-            r = self.env.run(argv, cwd=self.worktree)
+            r = self.env.run(argv, cwd=self.worktree, **({"timeout": validation.TIMEOUT} if ci else {}))
             log = self.env.scratch / f"gate-{i}.log"
             sh.write_bytes(log, r.out + r.err)
             say(f"[5] gate `{run}`: exit {r.code}")
             rec_gates.append({"cmd": run, "exit": r.code, "sha": head})
+            if ci:
+                execution.ci_inputs(self, head)
             if r.code != 0:
                 self.gate_log = rec_gates
                 return (run, r.code, failure_extract(r.out + r.err))
         self.gate_log = rec_gates
         self.skipped = skipped
+        if ci:
+            self.execution_results = rec_gates
         return None
+
+    def check_inputs(self, head):
+        if execution.ci_mode(self):
+            execution.ci_inputs(self, head)
+            return None
+        return validation.check_inputs(self, head)
 
     def settled_gates(self, head, chosen, skipped):
         """Use the existing bounded validator for every final BUILD execution proof.
@@ -1638,13 +1649,22 @@ class Run:
             for m in x.get("manual") or []:
                 manual[m["path"]] = {"path": m["path"], "edit": str(m.get("edit") or "") or manual.get(m["path"], {}).get("edit", "")}
         requested = list(pending.values())
+        covered = execution.ci_commands(self)
+        caller = [p for p in requested if p["cmd"] not in covered]
         return {"door": str(f.get("door") or "") or "unstated", "blast": str(f.get("blast_radius") or "") or "unstated",
                 "summary": without_build_lines(self.wt_git("log", "-1", "--format=%b", sha).out),
                 "residue": [str(x) for x in f.get("residue") or []], "build_gates": f.get("gates_run") or [], "manual": list(manual.values()),
-                "validation_pending": requested, "validation_results": validation.receipt(self, requested) if requested and evidence else [],
-                "validation_attempts": validation.attempts(self) if requested and evidence else [],
+                "validation_pending": requested, "validation_results": validation.receipt(self, caller) if caller and evidence else [],
+                "validation_attempts": validation.attempts(self) if caller and evidence else [],
                 "execution_commands": sorted(execution.proven(self)) if evidence else [],
                 "execution_head": shas[0], "execution_evidence": str(execution.directory(self) / (shas[0] + ".json")) if evidence else ""}
+
+    def evidence_lines(self):
+        """The validation and CI evidence a reviewer reads, from one fingerprint."""
+        facts = self.build_facts()
+        return ("\nDriver validation evidence: " + json.dumps(facts["validation_results"])
+                + "\nHistorical validation attempts (each at its own head): " + json.dumps(facts["validation_attempts"])
+                + "\nRepository CI validation evidence: " + json.dumps(getattr(self, "ci_execution_checks", [])))
 
     def first_commit(self):
         return self.wt_git("rev-list", "--reverse", f"origin/{self.env.default}..HEAD").out.split()[0]
@@ -1660,6 +1680,7 @@ class Run:
         rec["skipped"], rec["checked"] = getattr(self, "skipped", rec.get("skipped", [])), self.checked_gates()
         rec["changes"] = self.wt_git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines()
         rec["flow"] = self.flow
+        rec["ci_validation"] = getattr(self, "ci_execution_checks", [])
         rec["usage"] = node.usage_table() or rec.get("usage", "")
         rec["note"] = " ".join([rec.get("note", "")] + [s for s in self.notes if s not in rec.get("note", "")]).strip()
         f = e.body_file("pr-body.md", drawn_body(rec, review_line(records, bool(self.primary)), body))
@@ -1673,8 +1694,8 @@ class Run:
         if ans is None:
             ans = self.node_review(pr, head, records, rnd)
         self.acceptance_answer(ans, "REVIEW")
-        ans["validation_results"] = self.build_facts()["validation_results"]
-        ans["validation_attempts"] = self.build_facts()["validation_attempts"]
+        facts = self.build_facts()
+        ans["validation_results"], ans["validation_attempts"] = facts["validation_results"], facts["validation_attempts"]
         body = review_comment(rnd, ans, head)
         rec = {"round": rnd, "verdict": body.split("\n", 1)[0].split(": ")[1].split(" ")[0], "sha": head, "body": body,
                "findings": ans.get("findings") or [], "false": ans.get("false_record_sentences"), "reader": ans.get("reader")}
@@ -1710,12 +1731,12 @@ class Run:
             diff = diff[:150000] + "\n(diff cut at 150000 characters; read the rest from the worktree)"
         rp = briefs.PROMPTS / "REVIEWER-PROMPT.md"
         record = (e.gh_json("pr", "view", str(pr["number"]), "--json", "body")["body"] if pr else "(no pull request yet)")
-        record += "\nDriver validation evidence: " + json.dumps(self.build_facts()["validation_results"])
-        record += "\nHistorical validation attempts (each at its own head): " + json.dumps(self.build_facts()["validation_attempts"])
+        record += self.evidence_lines()
         prior = self.verification(records, head)
         prompt = briefs.render("review", mode=MODE.get(self.flow, "sized"), number=self.n, head=head, title=self.title, part=self.part_scope("review"),
                                range=f"origin/{e.default}...{head}", diff=diff, body=self.body, comments=self.spec_comments(), record=record,
                                verification=prior,
+                               release_notes=", ".join(f"`{p}`" for p in release_notes(self.changed_paths(), e.lookup("repo.release_notes", RELEASE_NOTES))) or "none",
                                reviewer_prompt=rp.read_text(encoding="utf-8") if rp.is_file() else "(REVIEWER-PROMPT.md is not in this tree)",
                                contract=briefs.contract_sections(e, (7,)))
         model = node.model(e, "reviewer", "opus")
@@ -1744,9 +1765,7 @@ class Run:
         if len(spent) >= 2:
             self.add_note("The external reader's two rounds are spent, so the REVIEW node verified the later fixes.")
             return None
-        args = ["--cli", cli, "--range", f"origin/{e.default}...{head}", "--goal", self.reader_goal()
-                + "\nDriver validation evidence: " + json.dumps(self.build_facts()["validation_results"])
-                + "\nHistorical validation attempts (each at its own head): " + json.dumps(self.build_facts()["validation_attempts"])]
+        args = ["--cli", cli, "--range", f"origin/{e.default}...{head}", "--goal", self.reader_goal() + self.evidence_lines()]
         if e.lookup("ship.external_model"):
             args += ["--model", e.lookup("ship.external_model")]
         if e.lookup("ship.external_effort"):
@@ -1995,6 +2014,8 @@ class Run:
     def decide(self, pr, head, records):
         e = self.env
         n = pr["number"]
+        if execution.ci_mode(self) and not execution.check_ci(self, pr, head):
+            return 0
         policy = e.lookup("ship.policy")
         classes = e.lookup("ship.unattended_classes")
         view = e.gh_json("pr", "view", str(n), "--json", "reviewDecision,headRefOid" + ("" if e.pr_checks() else ",mergeable"))
@@ -2046,7 +2067,7 @@ class Run:
         attempt. A second failure quotes both."""
         first = ""
         for attempt in (1, 2):
-            r = self.env.run(script("Merge-PullRequest.ps1", "-Pr", str(n), "-Subject", subject, "-BodyFile", body_file, "-Linear", "no"), cwd=cwd)
+            r = self.env.run(script("Merge-PullRequest.ps1", "-Pr", str(n), "-Subject", subject, "-BodyFile", body_file, "-Linear", "no", "-ExpectedHead", head), cwd=cwd)
             if r.code == 0:
                 break
             if "'CONFLICTING " in r.text:
@@ -2234,30 +2255,43 @@ class Run:
         e = self.env
         say("[2a] direct: every path sits inside [ship].direct")
         ahead = e.git("rev-parse", "HEAD").out.strip() != e.git("rev-parse", f"origin/{e.default}").out.strip()
+        overlap = caller_source_writable(e.main)
         if e.dry:
+            if overlap:
+                say(f"  would: use the ordinary PR flow before BUILD: {overlap}")
+                return 0
             say(("  would: no BUILD, the main checkout already holds this issue's unpushed commit(s); gates the diff selects, "
                  if ahead else f"  would: BUILD node in the main checkout, gates the diff selects, commit with Fixes #{self.n} on {e.default}, ")
                 + f"{sh.cmdline(script('Push-Direct.ps1', '-Issue', str(self.n)))}, watch the default branch's run")
             return 0
         self.in_lane, self.worktree = True, e.main
         before = e.git("rev-parse", f"origin/{e.default}").out.strip()
+        if overlap:
+            say(f"[2a] direct: {overlap}; using the ordinary PR flow before BUILD")
+            return self.lane_fallback(self.head())
         if ahead:
             say("[2a] direct: the main checkout holds this issue's unpushed commit(s): shipped without a build")
         else:
+            try:
+                validation.check_platform()
+            except DriverError as error:
+                say(f"[2a] direct: inline caller execution is unproved ({error}); using the ordinary PR flow before BUILD")
+                return self.lane_fallback(before)
             self.lane_build_record = self.lane_record("parent", None)
-            self.build(track=False)
+            built = self.build(track=False)
             if self.build_facts(evidence=False)["manual"]:
                 say("[2a] direct: the build has manual steps, which the lane cannot carry")
-                return self.lane_fallback()
+                return self.lane_fallback(built)
         trace = dict(stage="parent", parent=None)
         if ahead and (self.lane_coordinated() or self.lane_is_revert("HEAD")
                       or "Ouro-Direct: " in e.git("log", "-1", "--format=%B").out):
             trace = self.lane_provenance("HEAD")
-        sha = self.lane_ship(before, gates=trace["stage"] != "revert", stage=trace["stage"])
+        publication_head = self.head()
+        sha = self.lane_ship(before, stage=trace["stage"])
         if trace["stage"] == "revert":
             return self.lane_revert_stop(sha, trace["parent"])
         if sha is None:
-            return self.lane_fallback()
+            return self.lane_fallback(publication_head)
         return self.lane_after(sha, trace["parent"], trace["stage"])
 
     def lane_resume(self, pr):
@@ -2291,6 +2325,8 @@ class Run:
         if state != "red":
             self.claim.update(f"landed: {sha}" if state == "green" else f"direct: {sha}; waiting on checks", close=state == "green")
             return 0
+        if overlap := caller_source_writable(e.main):
+            raise Refused(f"direct repair is unsafe: {overlap}; preserve the publication and execution chain for an isolated PR repair")
         self.claim.update(f"direct checks red: {sha}")
         head = e.git("rev-parse", "HEAD").out.strip()
         if (head != e.git("rev-parse", f"origin/{e.default}").out.strip()
@@ -2299,7 +2335,7 @@ class Run:
             trace = self.lane_provenance(head)
             if trace["parent"] != sha or self.direct_blocked():
                 raise DriverError("the unpushed direct revert cannot be reconciled; claim retained")
-            pushed = self.lane_ship(e.git("rev-parse", f"{head}^").out.strip(), gates=False, stage="revert")
+            pushed = self.lane_ship(e.git("rev-parse", f"{head}^").out.strip(), stage="revert")
             return self.lane_revert_stop(pushed, sha)
         # A published head can be watched from an older checkout. Repair alone needs
         # a clean default checkout at origin, after claim admission in go().
@@ -2334,9 +2370,10 @@ class Run:
             self.lane_build = ("fix", sha)
             self.lane_build_record = self.lane_record("fix", sha)
             self.build(findings=f"the default branch's run {url} is red at {sha[:7]}; the failure in its log:\n{tail}", track=False)
+        publication_head = self.head()
         fix = self.lane_ship(publication_base, stage="fix")
         if fix is None:
-            return self.lane_fallback()
+            return self.lane_fallback(publication_head)
         state, url2, tail = self.lane_watch(fix)
         if state != "red":
             self.claim.update(f"landed: {fix}" if state == "green" else f"direct: {fix}; waiting on checks", close=state == "green")
@@ -2403,7 +2440,7 @@ class Run:
                     or sha == head or sha not in first_parent or len(publications[head]) != 1):
                 continue
             parents = e.git("rev-list", "--parents", "-n", "1", sha, check=False).out.split()
-            lines = re.findall(r"(?m)^Ouro-Direct: (.+)$", e.git("log", "-1", "--format=%B", head, check=False).out)
+            lines = re.findall(r"(?m)^Ouro-Direct: (.+)$", self.message(head, check=False))
             if len(lines) != 1 or len(parents) not in (2, 3):
                 continue
             if len(parents) == 3:
@@ -2422,7 +2459,7 @@ class Run:
                 continue
             parent = parents[1]
             if (e.git("merge-base", parent, head, check=False).out.strip() != base
-                    or e.git("merge-base", "--is-ancestor", head, parent, check=False).code == 0):
+                    or self.is_ancestor(head, parent) == 0):
                 continue
             # Compare the actual clean merge result, not patch/blob identities:
             # disjoint upstream edits in the same file change both blob IDs.
@@ -2439,8 +2476,7 @@ class Run:
         """Git/merge-body evidence scopes the one fix to one execution, never a board cache."""
         e = self.env
         def read(sha):
-            msg = e.git("log", "-1", "--format=%B", sha).out
-            lines = re.findall(r"(?m)^Ouro-Direct: (.+)$", msg)
+            lines = re.findall(r"(?m)^Ouro-Direct: (.+)$", self.message(sha))
             if not lines:
                 source = self.lane_merged_direct().get(e.git("rev-parse", sha).out.strip())
                 if source:
@@ -2450,7 +2486,7 @@ class Run:
                 if (record["issue"] != self.n or not re.fullmatch(r"[0-9a-f]{32}", record["execution"])
                         or record["stage"] not in ("parent", "fix", "revert")
                         or not re.fullmatch(r"[0-9a-f]{40}", record["base"])
-                        or e.git("merge-base", "--is-ancestor", record["base"], sha, check=False).code != 0):
+                        or self.is_ancestor(record["base"], sha) != 0):
                     raise ValueError()
                 return record
             except (KeyError, TypeError, ValueError):
@@ -2464,12 +2500,30 @@ class Run:
                 raise DriverError("invalid direct parent provenance; claim retained")
             prior = read(parent)
             if (prior["stage"] != expected[current["stage"]] or prior["execution"] != record["execution"]
-                    or e.git("merge-base", "--is-ancestor", parent, sha, check=False).code != 0):
+                    or self.is_ancestor(parent, sha) != 0):
                 raise DriverError("direct execution chain cannot be reconciled; claim retained")
             sha, current = parent, prior
         if current.get("parent") is not None:
             raise DriverError("direct parent exceeds the one-fix limit; claim retained")
         return record
+
+    def message(self, sha, check=True):
+        """A commit's message, read once per full commit id."""
+        if sha in self.messages:
+            return self.messages[sha]
+        r = self.env.git("log", "-1", "--format=%B", sha, check=check)
+        if r.code == 0 and re.fullmatch(r"[0-9a-f]{40}", sha):
+            self.messages[sha] = r.out
+        return r.out
+
+    def is_ancestor(self, a, b):
+        """`merge-base --is-ancestor`'s exit; a definite answer for two full commit ids is kept."""
+        if (a, b) in self.ancestry:
+            return self.ancestry[(a, b)]
+        code = self.env.git("merge-base", "--is-ancestor", a, b, check=False).code
+        if code in (0, 1) and all(re.fullmatch(r"[0-9a-f]{40}", x) for x in (a, b)):
+            self.ancestry[(a, b)] = code
+        return code
 
     def lane_parent(self, head):
         return self.lane_provenance(head)["parent"]
@@ -2489,30 +2543,55 @@ class Run:
                 areas.update(a for a in gate["areas"] if a != "*")
         self.claim.prepare(base, head, paths, areas, stage, check=check)
 
-    def lane_ship(self, prev, gates=True, stage="parent"):
-        """Gates, then Push-Direct.ps1 and its vehicle, for the commits past `prev`: the sha now on the default branch, or None when nothing was pushed."""
+    def lane_ship(self, prev, stage="parent"):
+        """The public publisher checks the whole range, then ships or selects the existing PR fallback."""
+        if overlap := caller_source_writable(self.env.main):
+            raise Refused(f"direct publication is unsafe: {overlap}; use an isolated PR flow")
         e = self.env
         if self.build_facts(evidence=False)["validation_pending"]:
             raise DriverError("direct lane does not support pending validation; nothing pushed")
         head = e.git("rev-parse", "HEAD").out.strip()
-        paths = [x for x in e.git("diff", "--no-renames", "--name-only", "-z", f"{prev}..HEAD").out.split("\0") if x]
-        if self.env.run(script("ouro-binding.py", "direct", *paths, "--binding", str(e.main / ".claude" / "ouro.toml")), cwd=e.main).code != 0:
-            say("[2a] direct: the diff reaches a path outside [ship].direct")
-            return None
-        red = self.run_gates(head) if gates else None
-        if red:
-            say(f"[2a] direct: gate `{red[0]}` exited {red[1]}; nothing is pushed")
-            return None
+        required = set(acceptance_commands(acceptance_source(self)))
+        expected_base = None
+        if required:
+            expected_base = e.git("rev-parse", f"origin/{e.default}").out.strip()
+            planned = e.run(script("ouro-direct.py", "--repo", str(e.main), "--base", expected_base, "--head", head), cwd=e.main)
+            try:
+                plan = json.loads(planned.out)
+                root = Path(e.ob.plugin_root() or sh.PLUGIN).as_posix()
+                floor = {row["run"].replace(e.ob.OURO_TOKEN, root) for row in plan["commands"]}
+                if (planned.code != 0 or plan["eligible"] is not True or plan["kind"] != "plan"
+                        or plan["base"] != expected_base or plan["head"] != head or not required <= floor):
+                    say("[2a] direct: explicit acceptance is outside the trusted mandatory floor; using the ordinary PR flow")
+                    return None
+            except (ValueError, KeyError, TypeError):
+                raise DriverError("the direct policy returned no structural acceptance obligations; nothing pushed") from None
+        # The public publisher owns the trusted whole-range policy and mandatory
+        # local floor. A typed PR refusal reaches the ordinary worktree flow.
         self.lane_prepare(prev, head, stage)
-        p = self.env.run(script("Push-Direct.ps1", "-Issue", str(self.n)), cwd=e.main)
+        p = self.env.run(script("Push-Direct.ps1", "-Issue", str(self.n), "-ExpectedHead", head,
+                               *(["-ExpectedBase", expected_base] if expected_base else [])), cwd=e.main)
         out = parse_direct(p.out)
+        packets = re.findall(r"(?m)^direct-checks: (.+)$", p.out)
+        if packets:
+            try:
+                rows = json.loads(packets[0]) if len(packets) == 1 else None
+                if (not isinstance(rows, list) or not rows or any(not isinstance(row, dict)
+                        or not isinstance(row.get("cmd"), str) or not row["cmd"]
+                        or type(row.get("exit")) is not int or row["exit"] != 0 or row.get("sha") != head for row in rows)):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise DriverError("the direct publisher returned malformed current-head check results") from None
+            self.gate_log, self.skipped = rows, []  # Ordinary direct results, never caller receipts.
+            for row in rows:
+                say(f"[5] gate `{row['cmd']}`: exit {row['exit']}")
         if p.code != 0 and not out["pushed"]:
             self.claim.update("direct push failed; nothing pushed")
             say(f"[2a] direct: Push-Direct.ps1 stopped before a push: {p.text.splitlines()[-1] if p.text else p.code}")
             return None
         if p.code != 0:
             e.git("fetch", "origin", check=False)
-            say("[2a] direct: the read-back after the push failed; origin is fetched and the run goes on")
+            say("[2a] direct: post-push follow-up failed; origin is fetched and local state is preserved")
         elif out["vehicle"] not in ("push", "pr"):
             raise DriverError(f"{sh.cmdline(p.argv)} exited 0 without a vehicle line: {p.text}")
         self.claim.update("direct pushed; waiting on merge/checks")
@@ -2532,9 +2611,129 @@ class Run:
         pr = self.find_pr(branch)
         if pr is None:
             raise DriverError(f"gh pr create ran but no pull request reads back for {branch}")
-        if e.git("rev-parse", "HEAD").out.strip() != e.git("rev-parse", f"origin/{e.default}").out.strip():
-            e.git("reset", "-q", "--hard", f"origin/{e.default}")
         return self.lane_finish(pr, subject, body)
+
+    def lane_check_pr(self, n, head):
+        """A resumed vehicle proves its mandatory obligations at the actual PR head."""
+        e, branch = self.env, f"direct/{self.n}"
+        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise DriverError("the direct PR has no exact immutable head; nothing merged")
+        e.git("fetch", "origin", f"+refs/heads/{e.default}:refs/remotes/origin/{e.default}",
+              f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+        base = e.git("rev-parse", f"origin/{e.default}").out.strip()
+        policy = e.ob.tomllib.loads(e.git("show", f"{base}:.claude/ouro.toml").out)
+        def authority(data):
+            return {**data, "repo": {k: v for k, v in data["repo"].items() if k != "checkout"}}
+        if authority(policy) != authority(e.data):
+            raise DriverError("direct resume binding differs from the trusted base; nothing merged")
+        def unchanged():
+            view = e.gh_json("pr", "view", str(n), "--json", "headRefOid,headRefName,baseRefName")
+            if (view.get("headRefOid") != head or view.get("headRefName") != branch
+                    or view.get("baseRefName") != e.default):
+                raise DriverError("the direct PR identity changed before merge; nothing merged")
+            for name, expected in ((e.default, base), (branch, head)):
+                rows = e.git("ls-remote", "--heads", "origin", f"refs/heads/{name}").out.splitlines()
+                if len(rows) != 1 or rows[0].split() != [expected, f"refs/heads/{name}"]:
+                    raise DriverError("the direct PR head or trusted base changed before merge; nothing merged")
+        unchanged()
+        if e.git("merge-base", "--is-ancestor", base, head, check=False).code != 0:
+            raise DriverError("the direct PR is not based on the current trusted default; reconcile it manually, nothing merged")
+        # Relocating an absolute checkout-owned operand would execute main's bytes.
+        try:
+            commands = [policy.get("repo", {}).get("setup") or ""] + [
+                gate.get(field) or "" for gate in policy.get("gate", []) for field in ("run", "ci")]
+            for command in commands:
+                for token in shlex.split(command):
+                    path = Path(token.split("=", 1)[1] if token.startswith("-") and "=" in token else token)
+                    if path.is_absolute() and path.resolve().is_relative_to(e.main.resolve()):
+                        raise ValueError("absolute original-checkout command operand")
+        except (ValueError, OSError) as error:
+            raise DriverError(f"direct resume command relocation is unproved ({error}); nothing merged") from error
+        copy = e.scratch / ("direct-check-" + uuid.uuid4().hex)
+        preserve, original = getattr(e, "preserve_scratch", False), self.worktree
+        e.preserve_scratch = True
+        def directory(path, expected=None):
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT or getattr(info, "st_reparse_tag", 0)
+                    or expected is not None and not os.path.samestat(info, expected)):
+                raise DriverError(f"direct-check directory identity is unproved: {path}")
+            return info
+        try:
+            parent_identity = directory(e.scratch)
+            node.worktree_readiness(e.runtime, e.main, copy, None, head, scratch=e.scratch)
+            directory(e.scratch, parent_identity)
+            e.git("worktree", "add", "--detach", str(copy), head)
+            directory(e.scratch, parent_identity)
+            identity = directory(copy)
+        except (OSError, DriverError) as error:
+            raise DriverError(f"direct-check creation is unproved; preserved {e.scratch}: {error}") from error
+        settled = False
+        try:
+            if policy.get("repo", {}).get("setup"):
+                self.setup_tree(copy)
+            self.worktree = copy
+            checked = e.run(script("ouro-direct.py", "--repo", str(copy), "--base", base, "--head", head), cwd=copy)
+            try:
+                plan = json.loads(checked.out)
+                if (checked.code != 0 or plan["kind"] != "plan" or plan["base"] != base or plan["head"] != head
+                        or plan["eligible"] is not True or plan["route"] != "direct"
+                        or plan["execution_proof"] is not False or not plan["commands"]):
+                    raise ValueError()
+                floor = {row["run"] for row in plan["commands"]}
+                root = Path(e.ob.plugin_root() or sh.PLUGIN).as_posix()
+                if not set(acceptance_commands(acceptance_source(self))) <= {cmd.replace(e.ob.OURO_TOKEN, root) for cmd in floor}:
+                    raise ValueError()
+                gates = []
+                for row in plan["commands"]:
+                    owned = [policy["gate"][i - 1] for i in row["gates"] if type(i) is int and 1 <= i <= len(policy["gate"])]
+                    if (not owned or len(owned) != len(row["gates"]) or any(g["run"] != row["run"] for g in owned)
+                            or len({self.locally_run(row["run"], g) for g in owned}) != 1):
+                        raise ValueError()
+                    gates.append((row["run"].replace(e.ob.OURO_TOKEN, root), owned[0]))
+            except (ValueError, KeyError, TypeError, IndexError):
+                raise DriverError("direct PR has no complete trusted structural mandatory-check plan; nothing merged") from None
+            if e.lookup("ship.validation") == "ci":
+                if any(not self.locally_run(cmd, gate) and gate.get("paths") and not self.touches(gate["paths"])
+                       for cmd, gate in gates):
+                    raise DriverError("direct PR CI coverage is unproved: a mandatory historical gate is not selected by the final diff; nothing merged")
+                if self.portable_gates(head, [(cmd, g) for cmd, g in gates if self.locally_run(cmd, g)], [], ci=True):
+                    raise DriverError("direct PR local mandatory check failed; nothing merged")
+                execution.ci_inputs(self, head)
+                settled = True
+                if not execution.check_ci(self, {"number": n}, head, direct_gates=gates):
+                    raise Stopped(0)
+                execution.ci_inputs(self, head)
+            else:
+                checked = e.run(script("ouro-direct.py", "--repo", str(copy), "--base", base, "--head", head, "--check"), cwd=copy)
+                try:
+                    data = json.loads(checked.out)
+                    rows = data["checks"]
+                    if (checked.code != 0 or data["kind"] != "checked-plan" or data["eligible"] is not True
+                            or data["route"] != "direct" or data["base"] != base or data["head"] != head
+                            or data["execution_proof"] is not False or data["commands"] != plan["commands"]
+                            or len(rows) != len(floor) or {r["cmd"] for r in rows} != floor
+                            or any(type(r["exit"]) is not int or r["exit"] != 0 or r["sha"] != head for r in rows)):
+                        raise ValueError()
+                except (ValueError, KeyError, TypeError):
+                    raise DriverError("direct PR returned no complete current-head mandatory checks; nothing merged") from None
+                self.gate_log, self.skipped = rows, []
+                settled = True
+            unchanged()
+            say(f"[2a] direct: resumed mandatory checks passed at {head[:7]}")
+        finally:
+            self.worktree = original
+            if not settled:
+                say(f"[2a] direct: incomplete checks; preserved {copy}")
+            else:
+                try:
+                    directory(e.scratch, parent_identity)
+                    directory(copy, identity)
+                    if e.git("worktree", "remove", "--force", str(copy), check=False).code != 0:
+                        raise DriverError("Git could not remove the owned direct-check worktree")
+                except (OSError, DriverError) as error:
+                    raise DriverError(f"direct-check cleanup is unproved; preserved {e.scratch}: {error}") from error
+                e.preserve_scratch = preserve
 
     def lane_finish(self, pr, subject, body):
         """The open pull request's checks, then its merge: the merge commit's sha."""
@@ -2551,13 +2750,14 @@ class Run:
             raise Stopped(0)
         if w.code != 0:
             raise DriverError(f"the checks on #{n} are not green: {w.text}")
+        self.lane_check_pr(n, head)
         sha = self.merge_pr(n, f"{subject} (#{n})", body, e.main, head)
         if sha is None:
             raise DriverError(f"#{n} conflicts with {e.default}: sync the direct/{self.n} branch by hand, then invoke `run {self.n}` again")
         e.git("fetch", "origin", check=False)
         if e.git("rev-parse", "--abbrev-ref", "HEAD").out.strip() == e.default:
             e.git("merge", "-q", "--ff-only", f"origin/{e.default}", check=False)
-        e.git("branch", "-D", branch, check=False)
+        e.git("branch", "-d", branch, check=False)
         say(f"[2a] direct: #{n} merged as {sha}")
         return sha
 
@@ -2589,7 +2789,7 @@ class Run:
             raise DriverError(f"cannot revert {' '.join(s[:7] for s in shas)}: {r.text}")
         tip = e.git("rev-parse", "HEAD").out.strip()
         e.git("commit", "-q", "-F", e.body_file("revert-msg.txt", f"Revert the direct commits for #{self.n}\n\nThe default branch's runs on both were red: {urls[0]} and {urls[1]}.\n" + record))
-        pushed = self.lane_ship(tip, gates=False, stage="revert")
+        pushed = self.lane_ship(tip, stage="revert")
         return self.lane_revert_stop(pushed, shas[0], urls, parent=shas[1])
 
     def lane_stop_complete(self, pushed):
@@ -2634,20 +2834,56 @@ class Run:
         say("stopped: open decision")
         raise Stopped(3)
 
-    def lane_fallback(self):
+    def lane_fallback(self, expected_head=None):
         """Nothing was pushed: the commit moves to a worktree branch, the main checkout goes back to origin's tip, the run goes on as express or tighter."""
         e = self.env
         say("[2a] direct: the commit moves to a worktree and the run continues as express")
         target = e.main / ".claude" / "worktrees" / self.dirname
         node.worktree_readiness(e.runtime, e.main, target, self.branch, "HEAD")
+        base = e.git("rev-parse", f"origin/{e.default}").out.strip()
+        if (not expected_head or e.git("rev-parse", "HEAD").out.strip() != expected_head
+                or e.git("status", "--porcelain", "-z", "--untracked-files=all").out):
+            raise Refused("direct fallback inputs changed or are dirty; preserve and reconcile the main checkout before resuming")
+        flags = e.git("ls-files", "-v", "-z").out.split("\0")
+        restore = e.git("diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
+                        expected_head, base).out.split("\0")
+        ignored = e.git("ls-files", "--others", "--ignored", "--exclude-standard", "-z").out.split("\0")
+        if (any(row[:1].islower() or row.startswith("S ") for row in flags)
+                or any(a and b and (a == b or a.startswith(b + "/") or b.startswith(a + "/"))
+                       for a in ignored for b in restore)):
+            raise Refused("direct fallback has hidden or overlapping ignored inputs; preserve and reconcile the main checkout")
         inputs = execution.fingerprint(self.worktree)
         observations = [{"tool": "run", "command": cmd, "exit": 0, "inputs": inputs}
                         for cmd in execution.proven(self)]
-        e.git("branch", self.branch, "HEAD")
+        # The existing issue branch preserves H before leaving the default
+        # checkout. Ordinary checkouts preserve late edits/ignored collisions;
+        # the expected-old update cannot erase a concurrent default-branch H2.
+        e.git("branch", self.branch, expected_head)
+        try:
+            e.git("checkout", "-q", "--no-overwrite-ignore", self.branch)
+            if f"branch refs/heads/{e.default}" in e.git("worktree", "list", "--porcelain", "-z").out.split("\0"):
+                raise Refused("the default branch is now held by another worktree")
+            e.git("update-ref", f"refs/heads/{e.default}", base, expected_head)
+            e.git("checkout", "-q", "--no-overwrite-ignore", e.default)
+            flags = e.git("ls-files", "-v", "-z").out.split("\0")
+            if (e.git("rev-parse", self.branch).out.strip() != expected_head
+                    or e.git("rev-parse", "HEAD").out.strip() != base
+                    or e.git("rev-parse", f"origin/{e.default}").out.strip() != base
+                    or e.git("symbolic-ref", "--short", "HEAD").out.strip() != e.default
+                    or e.git("status", "--porcelain", "-z", "--untracked-files=all").out
+                    or any(row[:1].islower() or row.startswith("S ") for row in flags)):
+                raise Refused("the fallback issue branch or main checkout changed during handoff")
+        except DriverError as error:
+            raise Refused(f"direct fallback handoff is incomplete; preserve {self.branch} and the main checkout: {error}") from error
+        finally:
+            try:
+                if e.git("symbolic-ref", "--quiet", "--short", "HEAD", check=False).out.strip() == self.branch:
+                    e.git("checkout", "-q", "--no-overwrite-ignore", e.default, check=False)
+            except (DriverError, OSError):
+                pass  # No forced return/cleanup can discard the owner's late work.
         self.in_lane = False
         self.claim.prepared = None  # direct trace remains on the board; subsequent PR records use their own head
         self.worktree = e.main / ".claude" / "worktrees" / self.dirname
-        e.git("reset", "-q", "--hard", f"origin/{e.default}")  # before the worktree: a setup stop there leaves the main checkout clean
         self.ensure_worktree()
         execution.retain(self, observations)
         self.flow = "express"
@@ -2695,6 +2931,7 @@ def main(env, n, part):
         code = run.go()
         if code == 0:
             run.claim.update("waiting; resume reads GitHub/git")
+            env._worktrees_settled = True
         return code
     except Stopped as ex:
         if not run.claim.terminal:

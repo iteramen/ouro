@@ -205,6 +205,118 @@ class GitCapabilityTests(unittest.TestCase):
         self.assertNotIn(str(target), git("worktree", "list", "--porcelain"))
 
 
+    def parent_alias_fixture(self, name="alias-repo"):
+        repo = self.root / name
+        repo.mkdir()
+        def git(*args, cwd=repo):
+            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=cwd)
+            self.assertEqual(result.code, 0, result.text)
+            return result.out.strip()
+        git("init", "-q", "--template=")
+        (repo / "tracked-config").write_text("[ouro]\n parentAlias = active\n", encoding="utf-8")
+        (repo / ".gitignore").write_text(".worktrees.noindex/\n.claude/\n", encoding="utf-8")
+        git("add", "tracked-config", ".gitignore")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "base")
+        (repo / ".claude").mkdir()
+        physical = repo / ".worktrees.noindex"
+        physical.mkdir()
+        alias = repo / ".claude/worktrees"
+        try:
+            alias.symlink_to(pathlib.Path("..") / ".worktrees.noindex", target_is_directory=True)
+        except OSError as error:
+            if os.name == "nt" and error.winerror == 1314:
+                self.skipTest("Windows symlink privilege unavailable")
+            raise
+        self.assertTrue(alias.is_dir(), "configured parent alias fixture must resolve to a directory")
+        self.assertTrue(alias.samefile(physical))
+        return repo, git, alias, physical
+
+    def test_parent_alias_support_does_not_admit_chains_or_intermediate_aliases(self):
+        for mode in ("chain", "intermediate"):
+            with self.subTest(mode=mode):
+                repo, git, alias, physical = self.parent_alias_fixture(mode)
+                if mode == "chain":
+                    chain = repo / "chain"
+                    chain.symlink_to(physical, target_is_directory=True)
+                    alias.unlink()
+                    alias.symlink_to(chain, target_is_directory=True)
+                else:
+                    (repo / ".claude").rename(repo / ".claude-saved")
+                    (repo / ".claude").symlink_to(".claude-saved", target_is_directory=True)
+                refs = git("show-ref")
+                with self.assertRaisesRegex(sh.DriverError, "unproved probe parent directory"):
+                    git_capabilities.worktree_readiness(developer.Settings("codex"), repo,
+                        alias / "prospective", "ouro/probe", "HEAD")
+                self.assertFalse((physical / "prospective").exists())
+                self.assertEqual(git("show-ref"), refs)
+                registrations = repo / ".git/worktrees"
+                self.assertFalse(registrations.exists() and any(registrations.iterdir()))
+
+    def test_stable_configured_parent_alias_preserves_git_semantics_and_cleans_owned_probe(self):
+        from ouro.runtime import tools
+        repo, git, alias, physical = self.parent_alias_fixture()
+        target = alias / "prospective"
+        config = self.root / "global"
+        config.write_text('[includeIf "onbranch:ouro/**"]\n path = "' +
+                          (target / "tracked-config").as_posix() + '"\n', encoding="utf-8")
+        before = (git("show-ref"), (repo / ".git/config").read_bytes(), config.read_bytes(), alias.lstat())
+        observed = []
+        def query(argv, **kwargs):
+            self.assertEqual(kwargs["cwd"], target)
+            self.assertEqual(git("config", "--get", "ouro.parentAlias", cwd=target), "active")
+            observed.append(argv)
+            return sh.run(argv, **kwargs)
+        with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}), \
+                patch.object(tools, "sandbox_argv", side_effect=lambda root, argv: argv), \
+                patch.object(process, "run", side_effect=query):
+            git_capabilities.worktree_readiness(developer.Settings("codex"), repo, target, "ouro/probe", "HEAD")
+        self.assertEqual(len(observed), 3)
+        self.assertTrue(os.path.samestat(alias.lstat(), before[3]))
+        self.assertEqual(os.readlink(alias), str(pathlib.Path("..") / ".worktrees.noindex"))
+        self.assertFalse((physical / target.name).exists())
+        self.assertEqual(git("show-ref"), before[0])
+        self.assertEqual((repo / ".git/config").read_bytes(), before[1])
+        self.assertEqual(config.read_bytes(), before[2])
+        self.assertFalse(any((repo / ".git/worktrees").iterdir()))
+        self.assertNotIn(target.name, git("worktree", "list", "--porcelain"))
+
+    def test_retargeted_configured_parent_alias_preserves_checkout_registration_and_other_tree(self):
+        repo, git, alias, physical = self.parent_alias_fixture()
+        target = alias / "prospective"
+        alternative = repo / "alternative"
+        (alternative / target.name).mkdir(parents=True)
+        (alternative / target.name / "keep").write_bytes(b"unrelated retained tree")
+        cleanup = git_capabilities.remove_probe
+        refused = []
+        def interfere(*args):
+            registration = next(iter(args[-2]))
+            owned = physical / target.name
+            before = {path: path.read_bytes() for root in (owned, registration)
+                      for path in root.rglob("*") if path.is_file()}
+            saved = alias.with_name("original-alias")
+            alias.rename(saved)
+            alias.symlink_to(alternative, target_is_directory=True)
+            try:
+                with self.assertRaisesRegex(sh.DriverError, "parent identity changed"):
+                    cleanup(*args)
+                self.assertTrue(owned.is_dir())
+                self.assertTrue(registration.is_dir())
+                self.assertTrue(all(path.read_bytes() == data for path, data in before.items()))
+                self.assertEqual((alternative / target.name / "keep").read_bytes(), b"unrelated retained tree")
+                refused.append(True)
+            finally:
+                alias.unlink()
+                saved.rename(alias)  # Restore the original owned alias inode for fixture-only cleanup.
+                cleanup(*args)
+            raise sh.DriverError("retarget refusal control")
+        with patch.object(git_capabilities, "git_readiness"), \
+                patch.object(git_capabilities, "remove_probe", side_effect=interfere):
+            with self.assertRaisesRegex(sh.DriverError, "cleanup failed: retarget refusal control"):
+                git_capabilities.worktree_readiness(developer.Settings("codex"), repo, target, "ouro/probe", "HEAD")
+        self.assertEqual(refused, [True])
+        self.assertEqual((alternative / target.name / "keep").read_bytes(), b"unrelated retained tree")
+
+
     def test_git_probe_unlinks_tracked_symlink_without_following_its_target(self):
         repo = self.root / "symlink-repo"
         repo.mkdir()
@@ -431,9 +543,10 @@ class GitCapabilityTests(unittest.TestCase):
                 config.write_text('[includeIf "onbranch:ouro/**"]\n path = "' +
                                   (target / "tracked-config").as_posix() + '"\n', encoding="utf-8")
                 env = SimpleNamespace(runtime=developer.Settings("codex"), main=repo,
-                                      default="default", git=git)
+                                      default="default", git=git, dry=False)
                 run = object.__new__(driver.Run)
                 run.env, run.worktree, run.branch = env, target, branch
+                run.n, run.k = 1, None
                 run.setup_tree = Mock()
                 observed = []
                 denied = True
@@ -669,9 +782,10 @@ class GitCapabilityTests(unittest.TestCase):
                     keep.write_bytes(b"developer edit")
                 (target / "untracked").write_bytes(b"preserve")
                 env = SimpleNamespace(runtime=developer.Settings("codex"), main=repo,
-                                      default="default", git=git)
+                                      default="default", git=git, dry=False)
                 run = object.__new__(driver.Run)
                 run.env, run.worktree, run.branch = env, target, branch
+                run.n, run.k = 1, None
                 run.setup_tree = Mock()
                 run.fetch_branch = lambda: True
                 before_refs = git("show-ref").out
@@ -736,13 +850,13 @@ class GitCapabilityTests(unittest.TestCase):
         scratch = pathlib.Path(tempfile.mkdtemp(prefix="ouro-run-")).resolve()
         self.addCleanup(scratch.rmdir)
         env = SimpleNamespace(runtime=cfg, main=self.root, scratch=scratch,
-                              default="fixture", dry=False, trusted=lambda: [])
+                              default="fixture", dry=False, trusted=lambda: [], lookup=lambda key, default=None: default)
         fake = SimpleNamespace(
             env=env, n=1, title="fixture", body="", issue={}, flow="full",
-            worktree=self.root, verify=lambda **kw: None,
+            worktree=self.root, verify=lambda **kw: None, changed_paths=lambda: [],
             build_commands=lambda: ("python3 check.py", ["python3 check.py"]),
             wt_git=lambda *a: sh.R(0, "", "", []), build_facts=lambda: {
-                "validation_results": [], "validation_attempts": []},
+                "validation_results": [], "validation_attempts": []}, evidence_lines=lambda: "",
             verification=lambda *a: "", part_scope=lambda *a: "", spec_comments=lambda: "",
             setup_tree=Mock(side_effect=AssertionError("setup before readiness")))
         for operation, name in ((lambda: driver.Run.checkpoint(fake), "checkpoint"),
@@ -785,7 +899,7 @@ class GitCapabilityTests(unittest.TestCase):
         (target / ".git").write_text("fixture", encoding="utf-8")
         failure = sh.DriverError("Git capability readiness: control")
         # Exercise the real shared-driver seam: refusal must precede catch-up and setup.
-        fake = SimpleNamespace(env=SimpleNamespace(runtime=cfg, main=self.root, default="main"),
+        fake = SimpleNamespace(env=SimpleNamespace(runtime=cfg, main=self.root, default="main", dry=False),
                                worktree=target, branch="ouro/test")
         with patch.object(git_capabilities, "git_readiness", side_effect=failure) as readiness:
             with self.assertRaisesRegex(sh.DriverError, "configuration independent"):
@@ -807,6 +921,7 @@ class GitCapabilityTests(unittest.TestCase):
             readiness.assert_not_called()
 
 
+    @patch.object(codex, 'WINDOWS', False)  # supported-host policy; early Windows refusal has separate controls
     def test_cli_inspect_git_preflight_outside_repository(self):
         from ouro.runtime import tools
         spec = importlib.util.spec_from_file_location('ouro_inspection', BASE / 'bin/ouro-developer.py')

@@ -23,6 +23,9 @@ as success whatever it concluded, `_checks_extra` adds check rows to `pr checks 
 that fails with a job that never started, as an Actions budget leaves it, a `matrix` one a real failure beside a leg its
 fail-fast cancelled while it queued (`api .../runs/<id>/attempts/<n>[/jobs]` answer them). Copilot's review is made on
 the head the pull request has when it first shows, and keeps that commit.
+`statusCheckRollup` defaults to the modeled run on the actual bare PR head. `_rollup` replaces
+only that check list for negative shapes; `_rollup_stale` changes the head in that rollup read
+only. `ci-observations.jsonl` records these fixture responses, never production evidence.
 """
 import fnmatch
 import json
@@ -120,6 +123,15 @@ def pr_view(pr, fields):
     live.setdefault("mergeable", "MERGEABLE")
     live.setdefault("mergeStateStatus", "CLEAN")
     live.setdefault("reviewDecision", "")
+    if "statusCheckRollup" in (fields or "").split(","):
+        row = run_row(run_on(live["headRefOid"])[1])
+        live["statusCheckRollup"] = table.get("_rollup", [{"__typename": "CheckRun", "name": "ci",
+            "status": "COMPLETED" if row["status"] == "completed" else "IN_PROGRESS",
+            "conclusion": row["conclusion"].upper() if row["conclusion"] else None}])
+        if table.get("_rollup_stale"):
+            live["headRefOid"] = STALE_HEAD
+        with (state / "ci-observations.jsonl").open("a", encoding="utf-8") as observed:
+            observed.write(json.dumps({"head": live["headRefOid"], "checks": live["statusCheckRollup"]}) + "\n")
     if tip and origin:
         git("update-ref", f"refs/pull/{pr['number']}/head", tip)
     return {f: live.get(f) for f in (fields or "").split(",") if f}

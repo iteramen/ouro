@@ -100,6 +100,17 @@ try {
     Assert-Line $r.Gh "run list -R o/n --commit $H --event pull_request --json databaseId" 'the runs are counted by commit and event, on the server'
     Assert-Match '^api graphql --paginate --slurp -F number=7 -f owner=o -f name=n -f query=' (@($r.Gh | Where-Object { $_ -like 'api graphql*' })[0]) 'the threads are read through GraphQL, every page, with the repository as variables'
 
+    Write-Host 'the caller checked H: a later H2 read cannot be merged instead'
+    Set-Gh (Table)
+    $r = Invoke-Step { Invoke-MergePullRequest -Pr 7 -Subject 'fix(x): y (#7)' -BodyFile $Body -Linear no -ExpectedHead $H }
+    Assert-Equal '' $r.Stop 'the exact checked head still merges'
+    Assert-Line $r.Gh "pr merge 7 -R o/n --squash --match-head-commit $H --delete-branch --subject fix(x): y (#7) --body-file $Body" 'the caller head remains pinned at publication'
+    Set-Gh (Table @{ 'pr view 7' = Answer (View $H8) })
+    $r = Invoke-Step { Invoke-MergePullRequest -Pr 7 -Subject 'fix(x): y (#7)' -BodyFile $Body -Linear no -ExpectedHead $H }
+    Assert-Equal "#7's head moved from the checked $H to $H8 - nothing is merged" $r.Stop 'a different real commit after checking H is refused'
+    Assert-Equal 0 @($r.Gh | Where-Object { $_ -like 'pr merge*' }).Count 'the unchecked H2 never reaches gh merge'
+    Assert-Equal 1 $r.Gh.Count 'head mismatch stops before later merge guards can authorize H2'
+
     Write-Host 'the merge answer: -Merge, else the binding''s preset'
     Set-Gh (Table)
     $r = Invoke-Step { Invoke-MergePullRequest -Pr 7 -Subject 'fix(x): y (#7)' -BodyFile $Body -Linear no -Merge merge }
@@ -239,6 +250,11 @@ Set-Gh (Table)
 $c = Invoke-Child $Script @('-Pr', '7', '-Subject', 'fix(x): y (#7)', '-BodyFile', $Body, '-Linear', 'no') $m
 Assert-Equal 0 $c.Code 'the happy path exits 0'
 Assert-Line $c.Lines "#7 merged as $Merged" 'and prints the verdict'
+Set-Gh (Table @{ 'pr view 7' = Answer (View $H8) })
+$c = Invoke-Child $Script @('-Pr', '7', '-Subject', 'fix(x): y (#7)', '-BodyFile', $Body, '-Linear', 'no', '-ExpectedHead', $H) $m
+Assert-Equal 1 $c.Code 'the public caller-head parameter refuses a changed head'
+Assert-Line $c.Lines "STOP: #7's head moved from the checked $H to $H8 - nothing is merged" 'the public entry keeps the same head guard'
+Assert-Equal 0 @((Get-GhLog) | Where-Object { $_ -like 'pr merge*' }).Count 'the public mismatch never calls gh merge'
 $c = Invoke-Child $Script @() $m
 Assert-Equal 1 $c.Code 'no parameter exits 1'
 Assert-Equal 'STOP: -Pr <number> is required' ($c.Lines -join ';') 'with the STOP line alone'

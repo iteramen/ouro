@@ -136,6 +136,8 @@ def selftest():
         ("a byte-order mark on known_marketplaces.json", dict(registry=reg(user("0.1.82")), marketplaces="\ufeff" + known, manifest=man("0.1.90")),
          "ouro 0.1.82 (stale)\n"),
         ("1.0 against 1.0.0 is not stale", dict(registry=reg(user("1.0")), marketplaces=known, manifest=man("1.0.0")), "ouro 1.0\n"),
+        ("installed trailing zeros compare equal to the shorter clone version",
+         dict(registry=reg(user("1.0.0")), marketplaces=known, manifest=man("1.0")), "ouro 1.0.0\n"),
         ("a clone version that is not dotted numbers: alone", dict(registry=reg(user("0.1.82")), marketplaces=known, manifest=man("0.1.8_3")),
          "ouro 0.1.82\n"),
         ("a clone version in non-ASCII digits: alone", dict(registry=reg(user("0.1.82")), marketplaces=known, manifest=man("0.1.\u0669\u0660")),

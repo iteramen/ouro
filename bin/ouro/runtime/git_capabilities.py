@@ -1,11 +1,12 @@
 """Codex Git capability proof for prospective and occupied worktrees."""
 import os
+import stat
 import tempfile
 from pathlib import Path
 
 from .. import sh
 from ..coordination import worker_env
-from .git_probe import remove_probe
+from .git_probe import ProbeParent, remove_probe
 from .tools import git_environment, git_readiness
 
 
@@ -58,7 +59,7 @@ def occupied_inputs(target, base, env):
                 root = Path(path.anchor)
                 info = root.lstat()
                 if (not stat.S_ISDIR(info.st_mode) or os.path.samestat(info, tree_info)
-                        or getattr(info, "st_file_attributes", 0) & 0x400
+                        or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
                         or getattr(info, "st_reparse_tag", 0)):
                     refuse()  # A reparsed filesystem root has no proved parent semantics.
                 return root
@@ -82,7 +83,7 @@ def occupied_inputs(target, base, env):
                 if stat.S_ISDIR(info.st_mode) and os.path.samestat(info, tree_info):
                     refuse()  # Also recognize Windows short-name/case aliases of the tree.
                 tag = getattr(info, "st_reparse_tag", 0)
-                reparse = getattr(info, "st_file_attributes", 0) & 0x400
+                reparse = getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
                 if (reparse or tag) and tag not in (0xA000000C, 0xA0000003):
                     refuse()  # Only symbolic links and directory junctions are understood.
                 if stat.S_ISLNK(info.st_mode) or reparse or tag:
@@ -204,10 +205,15 @@ def worktree_readiness(settings, main, target, branch, base, *, scratch=None):
     if target.exists() or target.is_symlink():
         raise sh.DriverError(f"Git capability readiness: preserving existing target: {target}")
 
+    parent_identity = None
     def git(*args, cwd=main):
+        if parent_identity is not None:
+            parent_identity.check()
         with tempfile.TemporaryDirectory(prefix="ouro-no-hooks-") as hooks:
             result = sh.run(sh.argv_for("git", "-c", "core.hooksPath=" + hooks, *map(str, args)),
                             cwd=cwd, env=env, timeout=30)
+        if parent_identity is not None:
+            parent_identity.check()
         if result.code != 0:
             raise sh.DriverError(f"Git capability readiness: disposable probe failed: {result.text}")
         return result
@@ -225,14 +231,17 @@ def worktree_readiness(settings, main, target, branch, base, *, scratch=None):
     common_identity = common.stat()
     registrations = common / "worktrees"
     if registrations.is_symlink() or (registrations.exists() and
-            (getattr(registrations.lstat(), "st_file_attributes", 0) & 0x400
+            (getattr(registrations.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
              or getattr(registrations.lstat(), "st_reparse_tag", 0))):
         raise sh.DriverError("Git capability readiness: aliased worktree registration directory")
     previous = set(registrations.iterdir()) if registrations.exists() else set()
     target.parent.mkdir(parents=True, exist_ok=True)
-    parent_identity = target.parent.stat()
-    target.mkdir()
-    target_identity = target.stat()
+    parent_identity = ProbeParent(target.parent)
+    owned_target = parent_identity.resolved / target.name
+    if not owned_target.is_relative_to(main) and not (owned_detached and owned_target.parent == Path(scratch).resolve()):
+        raise sh.DriverError(f"Git capability readiness: target leaves repository: {target}")
+    owned_target.mkdir()
+    target_identity = owned_target.stat()
     created, marker_identity = {}, None
     try:
         try:
@@ -240,8 +249,8 @@ def worktree_readiness(settings, main, target, branch, base, *, scratch=None):
         finally:
             # Capture identities even if add fails after writing its marker.
             created = {p: p.lstat() for p in registrations.iterdir() if p not in previous} if registrations.exists() else {}
-            if (target / ".git").exists() or (target / ".git").is_symlink():
-                marker_identity = (target / ".git").lstat()
+            if (owned_target / ".git").exists() or (owned_target / ".git").is_symlink():
+                marker_identity = (owned_target / ".git").lstat()
         if branch is not None:
             git("symbolic-ref", "HEAD", "refs/heads/" + branch, cwd=target)
         # Git materializes tracked include dependencies with normal checkout/filter semantics.

@@ -46,6 +46,12 @@ STUB = pathlib.Path(__file__).resolve().parent / "gh_stub.py"
 sys.path.insert(0, str(BASE / "tests" / "runtime"))
 from owned_children import reap_fixture_children
 TMP = pathlib.Path(tempfile.mkdtemp(prefix="driver-test-run-"))
+# Parallel section processes own separate temporary roots; keep their writable
+# PowerShell startup caches separate too, without changing the runtime or host.
+if os.name == "posix":
+    cache = TMP / "powershell-cache"
+    cache.mkdir()
+    os.environ["XDG_CACHE_HOME"] = str(cache)
 # A developer's installed worker preferences must never change fixture expectations.
 (TMP / "developer.toml").write_text('[runtime]\nbackend = "claude"\n', encoding="utf-8")
 os.environ["OURO_DEVELOPER_CONFIG"] = str(TMP / "developer.toml")
@@ -142,6 +148,11 @@ EMPTYCFG = TMP / "gitconfig"
 EMPTYCFG.write_text("", encoding="utf-8")
 GITENV = {"GIT_CONFIG_GLOBAL": str(EMPTYCFG), "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+# These scratch repositories have their own Git identity/configuration. Managed
+# caller redirects must not secretly substitute the candidate's Git inputs.
+for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_COUNT"):
+    os.environ.pop(key, None)
 os.environ.update(GITENV)
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 os.environ["PATH"] = str(STUBDIR) + os.pathsep + os.environ["PATH"]
@@ -386,10 +397,12 @@ def sec_pure():
     workflow_executor_tests.exercise(sys.modules[__name__])
     gates = [("python3 n.py", {"ci": "echo another workflow runs this gate"}), ("python3 p.py", {})]
     vr = types.SimpleNamespace(body="", locally_run=runmod.Run.locally_run, notice=runmod.Run.notice,
-                               area_gates=lambda tree=True: gates, env=types.SimpleNamespace(pr_checks=lambda: False))
+                               area_gates=lambda tree=True: gates, env=types.SimpleNamespace(pr_checks=lambda: False,
+                                   lookup=lambda key, default=None: "local" if key == "ship.validation" else default))
     check("with no workflow naming pull_request, validation may run every selected gate, as the BUILD brief grants them",
           runmod.Run.validation_commands(vr) == ["python3 n.py", "python3 p.py"])
-    vr.env = types.SimpleNamespace(pr_checks=lambda: True)
+    vr.env = types.SimpleNamespace(pr_checks=lambda: True,
+                                   lookup=lambda key, default=None: "local" if key == "ship.validation" else default)
     check("with one, validation keeps the narrower grant: a notice gate or a plain one is the checks'", runmod.Run.validation_commands(vr) == [])
     check("the validation key is 16 hex digits of the head and the ordered commands",
           re.fullmatch(r"[0-9a-f]{16}", runmod.validation.key("a" * 40, ["x", "y"])) is not None
@@ -590,6 +603,8 @@ def sec_labels():
     check("SPLIT labels the umbrella and clears the state it held", t.label_moves("SPLIT", "L", ["needs-ruling", "gates"]) == (["umbrella"], ["needs-ruling"]))
     check("a re-triage never clears umbrella: its children closing do", t.label_moves("PROMOTE", "S", ["umbrella", "needs-triage"]) == (["agent-ready"], ["needs-triage"]))
     check("STALE still moves nothing", t.label_moves("STALE", "S", ["needs-triage"]) == ([], []))
+    check("PROMOTE exits checkpoint routing", t.label_moves("PROMOTE", "S", ["agent-ready", "checkpoint", "gates"]) == ([], ["checkpoint"]))
+    check("STALE retires checkpoint routing without admitting BUILD", t.label_moves("STALE", "S", ["agent-ready", "checkpoint", "gates"]) == ([], ["agent-ready", "checkpoint"]))
     for text in ("Verdict: PROMOTE (size S, flow express). Anchors resolve.", "Verdict: PROMOTE \u2014 Anchors resolve.", "Verdict: PROMOTE - Anchors resolve.",
                  "Verdict: **PROMOTE**\n\nAnchors resolve.", "**Verdict:** PROMOTE\n\nAnchors resolve.", "**Verdict: PROMOTE**\n\nAnchors resolve.",
                  "verdict: promote. Anchors resolve.", "**Triage**\nVerdict: PROMOTE: Anchors resolve.", "Verdict: NEEDS-RULING, Anchors resolve."):
@@ -927,6 +942,42 @@ def sec_dry_run():
     check("the shape check ran without -Demote", not any("issue edit" in s for s in c.sigs()))
 
 
+def sec_worktree_cleanup():
+    """Actual CLI creation followed by unrelated startup; no executor admission model."""
+    binding = BINDING.format(policy="stop-at-pr", review="adversarial-review")
+    binding = binding.replace('[ship]\n', '[ship]\nvalidation="ci"\nvalidation_checks=["ci"]\n')
+    binding = binding.replace('ci = "echo SKIP: the checks cannot run this gate"', 'ci = "echo repository CI owns this gate"')
+    branch = "gates/1-fix-the-total"
+    for resumed in (False, True):
+        c = happy_case("cleanup-" + str(resumed), binding=binding)
+        c.real_executor = True
+        code, out, err = c.ouro("run", "1")
+        wt = c.main / ".claude" / "worktrees" / "1-fix-the-total"
+        records = list((c.main / ".git" / "ouro-worktrees").glob("*.json"))
+        check("actual successful driver add records private settled provenance", code == 0 and wt.is_dir()
+              and len(records) == 1 and json.loads(records[0].read_text())["settled"] is True)
+        head = git(c.origin, "rev-parse", "refs/heads/" + branch)
+        pr = c.pr()
+        check("the ordinary first run reaches its real Ready PR", pr is not None and c.prompts("REVIEW"))
+        if not pr:
+            continue
+        pr["state"] = "CLOSED"
+        (c.state / "pr.json").write_text(json.dumps(pr), encoding="utf-8")
+        discovery = [{"state": "CLOSED", "headRefOid": head, "headRefName": branch,
+                      "headRepository": {"name": "n", "nameWithOwner": ""}, "headRepositoryOwner": {"login": "o"}}]
+        c.set_table({"_issue_1": issue(), "_issue_2": issue(n=2, labels=()),
+                     "pr list --head * --state all --limit 1000 --json *": {"Out": discovery}})
+        c.clear_prompts()
+        code, out, err = c.ouro("run", "1" if resumed else "2")
+        check("next actual CLI startup removes closed driver's tree and local branch", not wt.exists()
+              and "deleted local branch" in out and not records[0].exists()
+              and sh("git", "show-ref", "--verify", "refs/heads/" + branch, cwd=c.main)[0] != 0)
+        check("cleanup never deletes or moves the remote branch", git(c.origin, "rev-parse", "refs/heads/" + branch) == head)
+        check("closed discovery needs no coordination; unrelated run still reaches its own refusal",
+              code == (0 if resumed else 2) and ("pull request closed externally" in out if resumed else "not agent-ready" in out + err)
+              and not c.prompts("BUILD"))
+
+
 def sec_happy():
     c = happy_case("happy")
     code, out, err = c.ouro("run", "1")
@@ -953,6 +1004,7 @@ def sec_happy():
     review_brief = open(c.nodes / "REVIEW.1.prompt.txt", encoding="utf-8").read()
     check("the REVIEW brief holds the diff and the quoted contract", "compute_total" in review_brief and "## 7." in review_brief)
     check("the REVIEW brief holds the reviewer prompt, read where it is", "# Reviewer prompt template" in review_brief)
+    check("the REVIEW brief names no release note when the range changes none", "matches): none\n" in review_brief)
     call = c.node_call("REVIEW")
     check("under standard the sized REVIEW node probes only its detached copy with publishing denied",
           call["tools"] == ["Read", "Grep", "Glob", "Bash"]
@@ -1786,11 +1838,29 @@ def sec_no_pr_workflow():
                  "api repos/o/n/branches/master/protection": {"Exit": 1, "Out": "Branch not protected"}}
     v = lane_case("noprworkflowlane", protection=protected, files={".github/workflows/ci.yml": None})
     code, out, err = v.ouro("run", "1")
-    check("the direct lane's pull-request vehicle with no workflow: exit 0, the pull request on direct/1 waits for the owner's merge, nothing watched or merged",
-          code == 0 and "gets no check: it waits for the owner's merge on GitHub" in out and any(s.startswith("pr create") and "--head direct/1" in s for s in v.sigs())
-          and not any(s.startswith(("run list", "pr checks", "pr merge")) for s in v.sigs()))
+    try:
+        runmod.validation.check_platform()
+        inline_supported = True
+    except shmod.DriverError:
+        inline_supported = False
+    if inline_supported:
+        check("the direct PR without a workflow waits for owner merge on direct/1",
+              code == 0 and "gets no check: it waits for the owner's merge on GitHub" in out
+              and any(s.startswith("pr create") and "--head direct/1" in s for s in v.sigs()))
+    else:
+        head = git(v.origin, "rev-parse", "refs/heads/gates/1-fix-the-total")
+        v_ready = [row["body"] for row in v.pr_comments() if row["body"].startswith("**Ready for merge**")]
+        check("unsupported inline execution uses a checked ordinary PR without a workflow",
+              code == 0 and "continues as express" in out and len(v_ready) == 1
+              and "gate `python3 gates/doc_gate.py`: exit 0" in out
+              and head in v_ready[0] and v.pr()["head"] == "gates/1-fix-the-total"
+              and git(v.origin, "rev-list", "--count", "master") == "1")
+    check("no-workflow delivery never watches or merges either PR vehicle",
+          not any(s.startswith(("run list", "pr checks", "pr merge")) for s in v.sigs()))
     code, out, err = v.ouro("run", "1", "--dry-run")
-    check("its resume's dry run says the owner merges it", code == 0 and "would: leave it to the owner's merge, since no workflow at origin/master names pull_request" in out)
+    check("its resume's dry run retains owner merge",
+          code == 0 and ("would: leave it to the owner's merge, since no workflow at origin/master names pull_request" in out
+                         if inline_supported else "would post **Ready for merge** and exit 0" in out))
 
 
 def sec_check_flake():
@@ -2070,17 +2140,38 @@ def sec_direct():
     notice = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('ci = "echo SKIP: the checks cannot run this gate"', 'ci = "echo another workflow runs this gate"')
     code, out, err = Case("directnotice", binding=notice, table={"_issue_1": issue(body=body)}).ouro("run", "1", "--dry-run")
     check("the direct lane runs every selected gate itself, so a BUILD list that would be empty does not stop it", code == 0 and "[2a] direct" in out and "gate uncovered" not in out)
-    direct_binding = notice + ('[[gate]]\nareas = ["*"]\nrun = "python3 gates/doc_gate.py"\n'
+    direct_binding = notice + ('[[gate]]\nareas = ["*"]\ncheap = true\nrun = "python3 gates/doc_gate.py"\n'
                                'ci = "echo another workflow runs this gate"\npaths = ["docs/"]\n')
+    direct_binding = direct_binding.replace('[ship]\n', '[ship]\nvalidation="ci"\nvalidation_checks=["ci"]\n')
+    doc_gate = ("import pathlib,subprocess\n"
+                "assert pathlib.Path('docs/note.md').read_text(encoding='utf-8') == 'note, edited\\n'\n"
+                "git=lambda *a:subprocess.check_output(['git',*a],encoding='utf-8').strip()\n"
+                "pathlib.Path(git('rev-parse','--path-format=absolute','--git-common-dir'),'direct-notice-ran').write_text(git('rev-parse','HEAD'))\n"
+                "print('direct gate ran')\n")
     actual = Case("directnoticeactual", binding=direct_binding,
                   table={"_issue_1": issue(body=body), **UNPROTECTED},
-                  files={"gates/doc_gate.py": "print('direct gate ran')\n", "docs/note.md": "note\n"})
+                  files={"gates/doc_gate.py": doc_gate, "docs/note.md": "note\n"})
     actual.node("BUILD", NOTE_BUILD)
+    actual.node("REVIEW", CLEAN)
     code, out, err = actual.ouro("run", "1")
-    check("the actual direct BUILD keeps its empty test grant and the driver executes the selected gate before landing",
-          code == 0 and actual.pr() is None and "[2a]" in out
-          and "gate `python3 gates/doc_gate.py`: exit 0" in out
-          and not any(t.startswith("Bash(python3") for t in actual.node_call("BUILD")["tools"]))
+    try:
+        runmod.validation.check_platform()
+        inline_supported = True
+    except shmod.DriverError:
+        inline_supported = False
+    marker = actual.main / '.git/direct-notice-ran'
+    if inline_supported:
+        head = git(actual.main, 'rev-parse', 'HEAD')
+        check("direct treats a CI notice as no local proof and really checks its mandatory cheap floor at H",
+              code == 0 and actual.pr() is None and '[2a]' in out
+              and marker.is_file() and marker.read_text() == head
+              and git(actual.origin, 'rev-parse', 'master') == head
+              and any('gates/doc_gate.py' in t for t in actual.node_call('BUILD')['tools']))
+    else:
+        check("unsupported inline execution uses the declared ordinary CI route without running a CI-owned gate locally",
+              code == 0 and actual.pr() is not None and not marker.exists()
+              and any(row['body'].startswith('**Ready for merge**') for row in actual.pr_comments())
+              and not any(t.startswith('Bash(python3') for t in actual.node_call('BUILD')['tools']))
     code, out, err = Case("directoutsidenotice", binding=notice, table={"_issue_1": issue(body=body2)}).ouro("run", "1", "--dry-run")
     check("one that falls back to a worktree does stop", code == 3 and "stopped: gate uncovered" in out)
 
@@ -2114,7 +2205,63 @@ def sec_triage_anchor_preflight():
     triage_anchor_cases.exercise(sys.modules[__name__])
 
 
+def sec_triage_publication():
+    answer = {"verdict": "PROMOTE", "size": "S", "flow": "express", "doc_impact": "none", "comment": "Anchors resolve; one deliverable."}
+    body = '## What\nthing\n\n- `src/app.py` -- x -- "def compute_total(items):"\n'
+    for name, failure in (("success", {}),
+                          ("labels", {"issue edit 1 --remove-label *": {"Exit": 1, "Out": "GraphQL: Something went wrong"}}),
+                          ("comment", {"issue comment 1 *": {"Exit": 1, "Out": "HTTP 503"}})):
+        c = Case("triagePublication" + name, table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body, comments=[]), **failure})
+        c.node("TRIAGE", answer)
+        code, out, err = c.ouro("triage", "1")
+        state, calls = c.issue_state() or {}, c.wrote()
+        comments = [s for s in calls if s.startswith("issue comment ")]
+        edits = [s for s in calls if "--add-label" in s]
+        if name == "success":
+            check("triage publishes its verdict only after applying its label moves", code == 0 and len(comments) == 1
+                  and len(edits) == 1 and calls.index(edits[0]) < calls.index(comments[0])
+                  and "agent-ready" in labels_of(c) and len(state["comments"]) == 1)
+        elif name == "labels":
+            check("a failed label edit leaves no published or attempted verdict", code != 0 and not comments
+                  and not state.get("comments") and "needs-triage" in labels_of(c) and "agent-ready" not in labels_of(c)
+                  and "set the labels failed" in out + err and "GraphQL: Something went wrong" in out + err)
+        else:
+            check("a failed comment reports that failure after successful label changes", code != 0
+                  and "agent-ready" in labels_of(c) and "needs-triage" not in labels_of(c) and not state.get("comments")
+                  and len(edits) == 1 and len(comments) == 1 and calls.index(edits[0]) < calls.index(comments[0])
+                  and "comment on #1 failed" in out + err and "HTTP 503" in out + err)
+
+
+def sec_triage_checkpoint_exit():
+    body = '## What\nthing\n\n- `src/app.py` -- x -- "def compute_total(items):"\n\nSize: S\nFlow: express\nDoc impact on close: none\n'
+    for verdict in ("PROMOTE", "STALE"):
+        c = Case("triageCheckpointExit" + verdict, table={"_issue_1": issue(
+            labels=("agent-ready", "checkpoint", "gates", "bug"), body=body, comments=[])})
+        c.node("TRIAGE", {"verdict": verdict, "size": "S", "flow": "express", "doc_impact": "none", "comment": "The measurement is answered."})
+        code, out, err = c.ouro("triage", "1")
+        check(verdict + " removes checkpoint and preserves unrelated labels", code == 0 and "checkpoint" not in labels_of(c)
+              and {"gates", "bug"} <= set(labels_of(c)))
+        code, out, err = c.ouro("run", "1", "--dry-run")
+        if verdict == "PROMOTE":
+            check("an answered checkpoint plans BUILD rather than repeating its measurement", code == 0
+                  and "agent-ready" in labels_of(c) and "[4] BUILD:" in out and "[4] CHECKPOINT:" not in out)
+        else:
+            check("a stale checkpoint cannot start a BUILD or another checkpoint", code == 2 and "agent-ready" not in labels_of(c)
+                  and "not agent-ready" in err and "[4] BUILD:" not in out and "[4] CHECKPOINT:" not in out)
+
+
 def sec_triage():
+    from unittest.mock import Mock, call, patch
+    runtime = object()
+    env = types.SimpleNamespace(runtime=runtime, gh_json=Mock(side_effect=shmod.DriverError("after preflight")))
+    with patch.object(nodemod, "preflight") as preflight:
+        stopped = False
+        try:
+            triagemod.triage(env, 1, True)
+        except shmod.DriverError as exc:
+            stopped = str(exc) == "after preflight"
+        check("TRIAGE alone selects READ before tracker access", stopped
+              and preflight.call_args_list == [call(runtime, capabilities=nodemod.READ)])
     answer = {"verdict": "PROMOTE", "size": "S", "flow": "express", "doc_impact": "none", "comment": "Anchors resolve; one deliverable."}
     body = "## What\nthing\n\n- `src/app.py` -- x -- \"def compute_total(items):\"\n"
     c = Case("triage", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
@@ -2433,6 +2580,11 @@ def sec_review_plan():
     check("a fourth file makes it M", ds(["a", "b", "c", "d"], 5)[0] == "M")
     check("a changelog mirrored beside three files does not count toward the files", ds(["a", "b", "c", "CHANGELOG.md"], 5) == ("S", ""))
     check("a changelog still counts toward the lines", ds(["a", "CHANGELOG.md"], 61)[0] == "M")
+    check("no repo.release_notes: the default is the CHANGELOG.md basename, case and all",
+          runmod.release_notes(["d/CHANGELOG.md", "CHANGELOG.md", "CHANGELOG.zh-CN.md", "changelog.md", "XCHANGELOG.md"]) == ["d/CHANGELOG.md", "CHANGELOG.md"])
+    fragment = ["a", "b", "c", "changes/app/fix.md"]
+    check("a repo.release_notes pattern keeps three files and a fragment at S", ds(fragment, 20, [r"^changes/"]) == ("S", "") and ds(fragment, 20)[0] == "M")
+    check("a set repo.release_notes replaces the default", ds(["a", "b", "c", "CHANGELOG.md"], 5, [r"^changes/"])[0] == "M")
     check("sixty-one changed lines make it M", ds(["a"], 61)[0] == "M")
     check("a workflow path makes it M whatever its size", ds([".github/workflows/ci.yml"], 1)[0] == "M")
     check("parse_direct reads the vehicle and whether a push happened", runmod.parse_direct("vehicle: pr\npushed direct/1 to origin at abc\n") == {"vehicle": "pr", "pushed": True}
@@ -2465,6 +2617,13 @@ def sec_review_none():
     c.node("REVIEW", {"_raw": "no json here"})
     code, out, err = c.ouro("run", "1")
     check("the tightening sentence is in the body the draft opens with, before any later refresh", code == 1 and "Size tightened from S to M" in c.pr()["body"])
+    notes = BINDING.replace('protected_branch_prefixes = ["release/"]', 'protected_branch_prefixes = ["release/"]\nrelease_notes = ["^changes/"]')
+    c = happy_case("relnotes", binding=notes.format(policy="stop-at-pr", review="adversarial-review"))
+    c.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], "docs/a.md": "a\n", "docs/b.md": "b\n", "changes/app/fix.md": "Fixed the total.\n"}})
+    code, out, err = c.ouro("run", "1")
+    brief = (c.nodes / "REVIEW.1.prompt.txt").read_text(encoding="utf-8")
+    check("three files and a fragment repo.release_notes matches stay S, and the REVIEW brief names the fragment as the release note",
+          code == 0 and "Size tightened" not in c.pr()["body"] and "matches): `changes/app/fix.md`\n" in brief)
 
 
 COPILOT = BINDING.replace('review = "{review}"', 'review = "{review}"\ncopilot_bot_id = "BOT_ok"')
@@ -2679,11 +2838,11 @@ DIRECT_BODY = "## What\nEdit the note.\n\n## Deliverable\n- `docs/note.md`\n\nDo
 NOTE_BUILD = {**BUILD, "writes": {"docs/note.md": "note, edited\n"}}
 UNPROTECTED = {"api repos/o/n/rules/branches/master": {"Exit": 0, "Out": []},
                "api repos/o/n/branches/master/protection": {"Exit": 1, "Out": "Branch not protected"}}
-LANE_GATES = ('[[gate]]\nareas = ["*"]\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n'
+LANE_GATES = ('[[gate]]\nareas = ["*"]\ncheap = true\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n'
               '[[gate]]\nareas = ["*"]\nrun = "python3 gates/src_gate.py"\npaths = ["src/"]\n')
 
-def lane_case(name, protection=UNPROTECTED, table=None, files=None):
-    c = Case(name, binding=BINDING.format(policy="stop-at-pr", review="adversarial-review") + LANE_GATES, table={"_issue_1": issue(body=DIRECT_BODY), **protection, **(table or {})},
+def lane_case(name, protection=UNPROTECTED, table=None, files=None, binding=None):
+    c = Case(name, binding=binding or BINDING.format(policy="stop-at-pr", review="adversarial-review") + LANE_GATES, table={"_issue_1": issue(body=DIRECT_BODY), **protection, **(table or {})},
              files={"gates/doc_gate.py": "print('doc gate ran')\n", "gates/src_gate.py": "print('src gate ran')\n", **(files or {})})
     c.node("BUILD", NOTE_BUILD)
     c.node("REVIEW", CLEAN)
@@ -2695,12 +2854,577 @@ def run_rows(*rows):
     return {"_runs": [[r] for r in rows]}
 
 
+def sec_lane_source_guard():
+    """Actual bridge/caller effects; modeled lifecycle ordering grants no host admission."""
+    from unittest.mock import patch
+    from ouro import developer
+    from ouro.runtime.tools import Bridge, caller_source_writable
+    c = Case("direct-source-guard")
+    ob = shmod.load_binding_module()
+    env = shmod.Env(c.main, ob, ob.load(c.main / ".claude/ouro.toml"), False, runtime=developer.Settings())
+    r = runmod.Run(env, 1, None)
+    r.body, r.worktree = "Generated source guard fixture.", c.main
+    r.spec_amendments = lambda: []
+    r.build_facts = lambda **kw: {"validation_pending": []}
+    bridge = Bridge({"root": str(c.main), "edit": True, "commands": [], "probe": False})
+    try:
+        with patch.object(shmod, "PLUGIN", c.main), patch.object(shmod, "BIN", c.main / "bin"):
+            for name in ("Push-Direct.ps1", "ouro-direct.py"):
+                marker = c.root / (name + "-outside-marker")
+                denied = False
+                try:
+                    bridge.call("write", {"path": str(marker), "content": "forbidden"})
+                except ValueError:
+                    denied = True
+                check(name + ": the actual bridge refuses the outside sentinel", denied and not marker.exists())
+                if name.endswith("ps1"):
+                    payload = ("param([int]$Issue,[string]$ExpectedHead,[string]$ExpectedBase)\n"
+                               "[IO.File]::WriteAllText('" + str(marker).replace("'", "''") + "','escaped caller')\nexit 7\n")
+                    r.body = "Generated source guard fixture."
+                else:
+                    payload = "from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('escaped caller')\nraise SystemExit(7)\n"
+                    r.body = "## Acceptance\n`python3 check.py`\n"
+                bridge.call("write", {"path": "bin/" + name, "content": payload})
+                git(c.main, "add", "bin/" + name); git(c.main, "commit", "-qm", "generated worker edit")
+                head = git(c.main, "rev-parse", "HEAD")
+                error = ""
+                try:
+                    r.lane_ship(git(c.main, "rev-parse", "origin/master"))
+                except (shmod.Refused, shmod.DriverError) as ex:
+                    error = str(ex)
+                check(name + ": publication refuses before the mutable first enforcer executes",
+                      "installed runtime or instruction sources" in error and not marker.exists()
+                      and git(c.main, "rev-parse", "HEAD") == head and not git(c.main, "status", "--porcelain"))
+            # A fresh entry must take the existing fallback before even asking for
+            # inline platform admission. This models ordering, not Windows permission.
+            git(c.main, "push", "-q", "origin", "master")
+            r.body = "Generated source guard fixture."
+            phases = []
+            r.lane_fallback = lambda head: phases.append(("fallback", head)) or 0
+            r.build = lambda **kw: (_ for _ in ()).throw(AssertionError("unsafe BUILD reached"))
+            with patch.object(runmod.validation, "check_platform", side_effect=AssertionError("inline admission reached")) as admission:
+                error, result = "", None
+                try:
+                    result = r.direct()
+                except AssertionError as ex:
+                    error = str(ex)
+                check("fresh source overlap chooses ordinary PR before BUILD or inline admission",
+                      result == 0 and phases == [("fallback", head)] and not error and not admission.called)
+            r.lane_watch = lambda sha: ("red", "generated failure", "generated failure log")
+            r.lane_revert = lambda *args: (_ for _ in ()).throw(AssertionError("unsafe revert reached"))
+            for parent in (None, head):
+                error = ""
+                try:
+                    r.lane_after(head, parent=parent)
+                except (shmod.Refused, shmod.DriverError, AssertionError) as ex:
+                    error = str(ex)
+                check("red source-overlap resume retains the existing fix/revert allowance: " + str(parent is not None),
+                      "direct repair is unsafe" in error and git(c.main, "rev-parse", "HEAD") == head
+                      and not git(c.main, "status", "--porcelain"))
+        outside = c.root / "installed-plugin"
+        (outside / "bin").mkdir(parents=True)
+        for description, root, plugin, unsafe in (
+                ("ordinary consumer", c.main, outside, False),
+                ("plugin ancestor alone", outside / ".claude/worktrees/child", outside, False),
+                ("same root", c.main, c.main, True),
+                ("unprotected nested install", c.main, c.main / "TestResults/plugin", True),
+                ("protected peer install", c.main, c.main / ".claude/worktrees/peer", False),
+                ("worker inside executable tree", outside / "bin/worker", outside, True)):
+            root.mkdir(parents=True, exist_ok=True)
+            check(description + ": source separation uses executable trees and actual write scope",
+                  bool(caller_source_writable(root, plugin)) == unsafe)
+        target = c.main / "ordinary-source.py"
+        target.write_text("generated source\n", encoding="utf-8")
+        alias = outside / "bin/source-alias.py"
+        try:
+            alias.symlink_to(target)
+        except (OSError, NotImplementedError) as ex:
+            print(f"  SKIP: source-file symlink unavailable: {getattr(ex, 'winerror', None)}")
+        else:
+            lexical_denied = False
+            try:
+                bridge.path(str(alias), write=True)
+            except ValueError:
+                lexical_denied = True
+            check("external lexical alias cannot hide a worker-writable physical caller source",
+                  lexical_denied and bool(caller_source_writable(c.main, outside)))
+            peer = c.main / ".claude/worktrees/peer"
+            (peer / "bin").mkdir(parents=True, exist_ok=True)
+            (peer / "bin/source-alias.py").symlink_to(target)
+            check("protected source directories still inspect internal writable-target aliases",
+                  bool(caller_source_writable(c.main, peer)))
+        real_resolve = pathlib.Path.resolve
+        def unavailable(path, *args, **kwargs):
+            if path == outside / "hooks":
+                raise OSError("generated unavailable source identity")
+            return real_resolve(path, *args, **kwargs)
+        with patch.object(pathlib.Path, "resolve", unavailable):
+            check("unknown source identity remains an explicit unsafe separation", bool(caller_source_writable(c.main, outside)))
+    finally:
+        env.close()
+
+
+def sec_lane_pr_authority():
+    """Real public controller: portable fallback and exact-head resumed PR proof."""
+    absent = "ouro-fixture-ci-only-tool validate"
+    local = "python3 gates/forbidden-tokens.py"
+    binding = (BINDING.format(policy="stop-at-pr", review="adversarial-review") +
+               f'\n[[gate]]\nareas=["*"]\ncheap=true\npaths=["docs/"]\nrun="{absent}"\nci="echo external build workflow"\n'
+               f'\n[[gate]]\nareas=["*"]\ncheap=true\nrun="{local}"\nci="echo SKIP: private token list"\n')
+    binding = binding.replace("[ship]\n", '[ship]\nvalidation="ci"\nvalidation_checks=["ci"]\n')
+    program = ("import pathlib,subprocess\n"
+               "def git(*a): return subprocess.check_output(['git',*a],encoding='utf-8').strip()\n"
+               "p=pathlib.Path(git('rev-parse','--git-common-dir'))/'direct-local-heads'\n"
+               "with p.open('a',encoding='utf-8') as f:f.write(git('rev-parse','HEAD')+'\\n')\n")
+    check("resumed CI-owned toolchain is actually unavailable locally", shutil.which(absent.split()[0]) is None)
+    for fault in ("good", "pending", "stale", "local-fail", "advance-head", "advance-base", "no-cheap", "uncovered-code", "acceptance", "setup-absolute", "transient-history"):
+        selected = binding.replace("cheap=true", "cheap=false") if fault == "no-cheap" else binding
+        if fault in ("uncovered-code", "transient-history"):
+            selected = selected.replace('direct = ["docs/*.md"]', 'direct = ["docs/*.md", "src/*.py"]')
+        if fault == "transient-history":
+            selected += f'\n[[gate]]\nareas=["*"]\npaths=["src/"]\ndirect_code_check=true\nrun="{absent}-code"\nci="echo external code workflow"\n'
+        setup_marker = TMP / ("direct-pr-authority-" + fault) / "main/.git/setup-should-not-execute"
+        setup = TMP / ("direct-pr-authority-" + fault) / "main/gates/setup.py"
+        if fault == "setup-absolute":
+            selected = selected.replace("[repo]\n", '[repo]\nsetup=' + json.dumps(f'python3 "{setup.as_posix()}"') + '\n')
+        body = DIRECT_BODY + ("\n## Acceptance\n`python3 gates/unapproved.py` passes.\n" if fault == "acceptance" else "")
+        extra = "raise SystemExit(9)\n" if fault == "local-fail" else ""
+        if fault in ("advance-head", "advance-base"):
+            target = "direct/1" if fault == "advance-head" else "master"
+            value = "HEAD~1" if fault == "advance-head" else "HEAD"
+            extra = f"subprocess.check_call(['git','--git-dir',git('remote','get-url','origin'),'update-ref','refs/heads/{target}',git('rev-parse','{value}')])\n"
+        c = Case("direct-pr-authority-" + fault, binding=selected,
+                 files={"gates/forbidden-tokens.py": program + extra, "gates/setup.py": "print('tracked setup')\n"}, table={"_issue_1": issue(body=body)})
+        c.real_executor = True
+        base = git(c.main, "rev-parse", "HEAD")
+        git(c.main, "checkout", "-qb", "direct/1")
+        c.write("docs/note.md", "note, updated\n")
+        if fault == "uncovered-code":
+            c.write("src/tiny.py", "pass\n")
+        if fault == "transient-history":
+            c.write("src/transient.py", "pass\n")
+            git(c.main, "add", "-A")
+            git(c.main, "commit", "-qm", "temporary source change")
+            (c.main / "src/transient.py").unlink()
+        git(c.main, "add", "-A")
+        git(c.main, "commit", "-qm", "prepared direct PR\n\nFixes #1")
+        head = git(c.main, "rev-parse", "HEAD")
+        git(c.main, "push", "-q", "origin", "direct/1")
+        git(c.main, "checkout", "-q", "master")
+        c.write("owner-wip.txt", "preserve owner work\n")
+        if fault == "setup-absolute":
+            c.write("gates/setup.py", f"from pathlib import Path\nPath({str(setup_marker)!r}).write_text('owner bytes executed')\n")
+        table = {"_issue_1": issue(body=body), "_pr": dict(number=7, head="direct/1", state="OPEN", title="prepared direct PR",
+                  body="Fixes #1\n", isDraft=False, url="https://x/pull/7")}
+        if fault == "pending":
+            table["_rollup"] = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]
+        if fault == "stale":
+            table["_rollup_stale"] = True
+        c.set_table(table)
+        code, out, err = c.ouro("run", "1")
+        merged = any(sig.startswith("pr merge") for sig in c.sigs())
+        marker = c.main / ".git/direct-local-heads"
+        observed = marker.read_text(encoding="utf-8").splitlines() if marker.is_file() else []
+        if fault == "good":
+            check("actual resumed CI vehicle merges with absent toolchain and genuine local checks at H",
+                  code == 0 and merged and observed == [head] and "resumed mandatory checks passed" in out)
+        elif fault in ("pending", "stale"):
+            check(f"{fault}: green watcher alone cannot replace fresh exact named CI proof",
+                  code == 0 and not merged and observed == [head] and "waiting for CI validation" in out)
+        else:
+            check(f"{fault}: resumed green PR cannot bypass its structural/local/freshness obligations",
+                  (code == 0 and "pull request head changed" in out if fault == "advance-head" else code == 1) and not merged)
+            if fault in ("local-fail", "advance-head", "advance-base"):
+                check(f"{fault}: refusal follows the genuine mandatory local command at H", observed == [head])
+            else:
+                check(f"{fault}: structural refusal precedes any mandatory local execution", observed == [])
+            if fault == "setup-absolute":
+                check("absolute setup relocation refuses before dirty original setup can execute",
+                      "command relocation is unproved" in err and not setup_marker.exists()
+                      and "owner bytes executed" in setup.read_text(encoding="utf-8"))
+            if fault == "transient-history":
+                check("net CI selection cannot certify the public floor's transient code obligation",
+                      "CI coverage is unproved" in err and "historical gate" in err
+                      and git(c.main, "diff", "--name-only", f"{base}..{head}") == "docs/note.md")
+        check(f"{fault}: owner edits survive and no BUILD or caller receipt is invented",
+              (c.main / "owner-wip.txt").read_text(encoding="utf-8") == "preserve owner work\n"
+              and not c.prompts("BUILD") and not list((c.main / ".git").rglob("ouro-validation/*/receipt.json")))
+        if fault not in ("good", "advance-base"):
+            check(f"{fault}: default branch remains at original base", git(c.origin, "rev-parse", "master") == base)
+
+    # Real inline --check must refuse on Windows and route through ordinary CI.
+    # A no-cheap policy exercises the same existing fallback on every platform.
+    for reason in ("no-cheap", "platform", "acceptance"):
+        if reason == "platform":
+            try:
+                runmod.validation.check_platform()
+                continue
+            except shmod.DriverError:
+                pass
+        selected = binding.replace("cheap=true", "cheap=false") if reason == "no-cheap" else binding.replace(
+            f'run="{absent}"', 'run="python3 gates/ci-owned.py"')
+        c = Case("direct-fallback-ci-" + reason, binding=selected,
+                 files={"gates/forbidden-tokens.py": program, "gates/ci-owned.py": "raise SystemExit('must not run inline here')\n"},
+                 table={"_issue_1": issue(body=DIRECT_BODY + ("\n## Acceptance\n`python3 gates/check.py` passes.\n" if reason == "acceptance" else ""))})
+        c.real_executor = True
+        if reason == "acceptance":
+            c.write("docs/note.md", "prepared note\n")
+            git(c.main, "commit", "-qam", "prepared direct note\n\nFixes #1")
+        answer = NOTE_BUILD
+        if reason == "platform":
+            answer = {**answer, "validation_pending": [{"cmd": "python3 gates/ci-owned.py", "reason": "CI-only toolchain"}]}
+        c.node("BUILD", answer)
+        c.node("REVIEW", CLEAN)
+        code, out, err = c.ouro("run", "1")
+        check(f"{reason}: actual inline refusal reaches ordinary CI PR delivery without caller validation",
+              code == 0 and c.pr() is not None and c.pr()["head"] != "direct/1"
+              and ("stopped before a push" in out or "ordinary PR flow before BUILD" in out
+                   or "explicit acceptance is outside the trusted mandatory floor" in out) and "CI validation @" in c.pr()["body"]
+              and git(c.origin, "rev-list", "--count", "master") == "1" and c.prompts("REVIEW")
+              and not list((c.main / ".git").rglob("ouro-validation/*/receipt.json")))
+        if reason == "platform":
+            prompt = (c.nodes / "BUILD.1.prompt.txt").read_text(encoding="utf-8")
+            check("fresh unsupported inline run selects CI ownership before its only BUILD; pending CI is not a lane trap",
+                  "ordinary PR flow before BUILD" in out and len(c.prompts("BUILD")) == 1
+                  and "CI-owned" in prompt and "python3 gates/ci-owned.py" in prompt
+                  and "python3 gates/ci-owned.py" not in "\n".join(c.node_call("BUILD")["tools"]))
+        if reason == "acceptance":
+            check("prepared inline head cannot publish while explicit acceptance lies outside its floor",
+                  "explicit acceptance is outside the trusted mandatory floor" in out and not c.prompts("BUILD"))
+
+
+def sec_lane_resume_copy_guards():
+    """Model the helper result; exercise real owned directory identity and Env.close behavior."""
+    from unittest import mock
+    for fault in ("none", "checkout-only", "ship-policy", "gate-policy", "partial-add", "copy-reparse", "copy-stat", "parent-stat", "replace-copy", "cleanup", "execution-error"):
+        root = TMP / ("resume-copy-guard-" + fault)
+        root.mkdir()
+        main, scratch = root / "main", root / "scratch"
+        main.mkdir(); scratch.mkdir()
+        policy = {"repo": {"slug": "o/n", "default_branch": "master", "setup": "owned fixture setup", "checkout": "/shared/example"},
+                  "ship": {"direct": ["docs/*"], "policy": "stop-at-pr"},
+                  "gate": [{"areas": ["*"], "cheap": True, "run": "python3 checks/reviewed.py"}]}
+        env = shmod.Env.__new__(shmod.Env)
+        loaded = json.loads(json.dumps(policy))
+        if fault == "checkout-only":
+            loaded["repo"]["checkout"] = str(main)
+        if fault == "ship-policy":
+            loaded["ship"]["policy"] = "trivial-merge"
+        if fault == "gate-policy":
+            loaded["gate"][0]["run"] = "python3 checks/unreviewed.py"
+        env.main, env.scratch, env.default, env.runtime, env.data = main, scratch, "master", None, loaded
+        env.lookup = lambda key: policy["repo"].get(key.removeprefix("repo."))
+        env.ob = types.SimpleNamespace(tomllib=types.SimpleNamespace(loads=lambda text: policy), plugin_root=lambda: None, OURO_TOKEN="<ouro>")
+        base, head = "a" * 40, "b" * 40
+        seen = {"setup": 0, "check": 0, "remove": 0, "copy": None}
+
+        def git(*args, **kwargs):
+            text = ""
+            if args[0] == "rev-parse":
+                text = base
+            elif args[0] == "ls-remote":
+                name = args[-1]
+                text = (base if name == "refs/heads/master" else head) + "\t" + name
+            elif args[:2] == ("worktree", "add"):
+                copy = pathlib.Path(args[-2]); seen["copy"] = copy
+                copy.mkdir()
+                (copy / "owned-marker").write_text("preserve me", encoding="utf-8")
+                if fault == "partial-add":
+                    raise shmod.DriverError("modeled partial Git add")
+            elif args[:2] == ("worktree", "remove"):
+                seen["remove"] += 1
+                if fault == "cleanup":
+                    return shmod.R(1, "", "modeled cleanup failure", args)
+                # This test created this exact plain directory; no external path is removed.
+                shutil.rmtree(seen["copy"])
+            return shmod.R(0, text, "", args)
+
+        env.git = git
+        env.gh_json = lambda *args: dict(headRefOid=head, headRefName="direct/1", baseRefName="master")
+        command = policy["gate"][0]["run"]
+
+        def checked(*args, **kwargs):
+            seen["check"] += 1
+            if fault == "execution-error" and "--check" in args[0]:
+                return shmod.R(1, "", "modeled uncertain executor failure", args)
+            if fault == "replace-copy" and seen["check"] == 1:
+                seen["copy"].rename(scratch / "original-owned-copy")
+                seen["copy"].mkdir()
+            data = dict(kind="checked-plan" if "--check" in args[0] else "plan", base=base, head=head, eligible=True, route="direct", execution_proof=False,
+                        commands=[dict(run=command, gates=[1])], checks=[dict(cmd=command, exit=0, sha=head)])
+            return shmod.R(0, json.dumps(data), "", args)
+
+        env.run = checked
+        run = runmod.Run.__new__(runmod.Run)
+        run.env, run.n, run.body, run.worktree = env, 1, "", main
+        run.spec_amendments = lambda: []
+        run.claim = types.SimpleNamespace(prepared=None)
+        if fault in ("ship-policy", "gate-policy"):
+            run.lane_checked = (base, head)  # Even this invocation's prior pair cannot authorize different policy.
+        run.lane_prepare = lambda *args: None
+        run.setup_tree = lambda copy: seen.__setitem__("setup", seen["setup"] + 1)
+        original_lstat = pathlib.Path.lstat
+
+        def lstat(path, *args, **kwargs):
+            if fault == "parent-stat" and path == scratch:
+                raise PermissionError("modeled parent visibility loss")
+            if seen["copy"] is not None and path == seen["copy"]:
+                if fault == "copy-stat":
+                    raise PermissionError("modeled copy visibility loss")
+                if fault == "copy-reparse":
+                    info = original_lstat(path, *args, **kwargs)
+                    return types.SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400, st_reparse_tag=1)
+            return original_lstat(path, *args, **kwargs)
+
+        error = None
+        with mock.patch.object(pathlib.Path, "lstat", lstat), mock.patch.object(runmod.node, "worktree_readiness", lambda *a, **k: None):
+            try:
+                run.lane_check_pr(7, head)
+            except shmod.DriverError as exc:
+                error = str(exc)
+        env.close()  # The real outer CLI cleanup, not a mocked deletion.
+        if fault in ("none", "checkout-only"):
+            check(f"{fault}: owned plain copy settles and cleans normally", error is None and seen["setup"] == seen["remove"] == 1 and seen["check"] == 2 and not scratch.exists())
+        elif fault in ("ship-policy", "gate-policy"):
+            check(f"{fault}: invocation cannot replace trusted BASE authority",
+                  error is not None and "binding differs from the trusted base" in error
+                  and seen["copy"] is None and seen["setup"] == seen["check"] == seen["remove"] == 0
+                  and not scratch.exists())
+        else:
+            check(f"{fault}: outer Env.close retains unproved owned scratch", error is not None and env.preserve_scratch and scratch.is_dir())
+            if fault in ("partial-add", "copy-reparse", "copy-stat", "parent-stat"):
+                check(f"{fault}: setup/checks never start before copy admission", seen["setup"] == seen["check"] == seen["remove"] == 0)
+            if fault == "replace-copy":
+                check("changed copy identity never reaches worktree removal", seen["remove"] == 0 and (scratch / "original-owned-copy" / "owned-marker").is_file())
+            if fault == "cleanup":
+                marker = seen["copy"] / "owned-marker"
+                check("failed owned cleanup preserves the exact evidence directory", seen["remove"] == 1 and marker.is_file() and marker.read_text(encoding="utf-8") == "preserve me")
+            if fault == "execution-error":
+                check("an unproved executor never triggers worktree deletion", seen["remove"] == 0 and (seen["copy"] / "owned-marker").is_file())
+            # Every directory here is created by this control, with no actual links.
+            env.preserve_scratch = False
+            env.close()
+
+    real_git = globals()["git"]  # The preceding modeled Env has a file-local Git stub.
+    for fault in ("dirty", "new-head", "hidden", "ignored-overlap"):
+        c = Case("direct-fallback-input-" + fault)
+        expected = real_git(c.main, "rev-parse", "HEAD")
+        if fault == "dirty":
+            c.write("owner.txt", "owner work\n")
+        elif fault == "new-head":
+            c.write("docs/note.md", "new owner commit\n")
+            real_git(c.main, "commit", "-qam", "owner advanced HEAD")
+        elif fault == "hidden":
+            c.write("src/app.py", "owner hidden changes\n")
+            real_git(c.main, "update-index", "--assume-unchanged", "src/app.py")
+        else:
+            c.write(".gitignore", ".claude/worktrees/\ndocs/note.md\n")
+            real_git(c.main, "commit", "-qam", "ignore a removed note")
+            real_git(c.main, "push", "-q", "origin", "master")
+            (c.main / "docs/note.md").unlink()
+            real_git(c.main, "commit", "-qam", "prepared removal")
+            expected = real_git(c.main, "rev-parse", "HEAD")
+            c.write("docs/note.md", "owner ignored replacement\n")
+        refs, status = real_git(c.main, "show-ref"), real_git(c.main, "status", "--porcelain")
+        files = {p.relative_to(c.main): p.read_bytes() for p in (c.main / "src/app.py", c.main / "docs/note.md") if p.exists()}
+        run = runmod.Run.__new__(runmod.Run)
+        run.env = types.SimpleNamespace(main=c.main, runtime=None, default="master",
+            git=lambda *args, **kw: shmod.run(shmod.argv_for("git", *args), cwd=c.main, **kw))
+        run.branch, run.dirname, run.worktree = "gates/fallback", "fallback", c.main
+        with mock.patch.object(runmod.node, "worktree_readiness", lambda *a, **k: None):
+            try:
+                run.lane_fallback(expected)
+                refused = False
+            except shmod.Refused:
+                refused = True
+        check(f"{fault}: actual fallback refuses before branch/reset and preserves unknown inputs",
+              refused and real_git(c.main, "show-ref") == refs and real_git(c.main, "status", "--porcelain") == status
+              and all((c.main / name).read_bytes() == data for name, data in files.items())
+              and not (c.main / ".claude/worktrees/fallback").exists())
+        if not refused:
+            print(f"    diagnostic: {fault} did not return the expected typed input refusal")
+        if real_git(c.main, "show-ref") != refs or real_git(c.main, "status", "--porcelain") != status:
+            print(f"    diagnostic: {fault} refs/status changed")
+        if not all((c.main / name).read_bytes() == data for name, data in files.items()):
+            print(f"    diagnostic: {fault} source bytes changed")
+        if (c.main / ".claude/worktrees/fallback").exists():
+            print(f"    diagnostic: {fault} target exists")
+
+    # Model only the two process boundaries; real Git establishes that the
+    # caller's historical parent differs from the current origin policy base.
+    c = Case("direct-acceptance-base-pin")
+    old = real_git(c.main, "rev-parse", "HEAD")
+    c.write("docs/note.md", "upstream note\n")
+    real_git(c.main, "commit", "-qam", "upstream advanced")
+    real_git(c.main, "push", "-q", "origin", "master")
+    base = real_git(c.main, "rev-parse", "HEAD")
+    c.write("docs/note.md", "prepared note\n")
+    real_git(c.main, "commit", "-qam", "prepared direct change\n\nFixes #1")
+    head = real_git(c.main, "rev-parse", "HEAD")
+    command, calls = "python3 gates/check.py", []
+    def boundary(argv, **kw):
+        calls.append([str(arg) for arg in argv])
+        if any(str(arg).endswith("ouro-direct.py") for arg in argv):
+            packet = dict(kind="plan", eligible=True, route="direct", base=base, head=head,
+                          commands=[{"run": command}], execution_proof=False)
+            return shmod.R(0, json.dumps(packet), "", argv)
+        return shmod.R(3, "fallback: express\n", "modeled publisher refusal, nothing published", argv)
+    run = runmod.Run.__new__(runmod.Run)
+    run.env = types.SimpleNamespace(main=c.main, default="master", run=boundary,
+        git=lambda *args, **kw: shmod.run(shmod.argv_for("git", *args), cwd=c.main, **kw),
+        ob=types.SimpleNamespace(plugin_root=lambda: None, OURO_TOKEN="<ouro>"))
+    run.n, run.body = 1, DIRECT_BODY + f"\n## Acceptance\n`{command}` passes.\n"
+    run.spec_amendments, run.build_facts = lambda: [], lambda **kw: {"validation_pending": []}
+    run.lane_prepare = lambda *a, **kw: None
+    run.claim = types.SimpleNamespace(update=lambda *a, **kw: None)
+    result = run.lane_ship(old)
+    check("acceptance planning uses current origin, and the real publisher must pin exactly that base",
+          result is None and old != base and len(calls) == 2
+          and calls[0][calls[0].index("--base") + 1] == base
+          and calls[1][calls[1].index("-ExpectedBase") + 1] == base
+          and calls[1][calls[1].index("-ExpectedHead") + 1] == head
+          and real_git(c.origin, "rev-parse", "master") == base)
+
+    for fault in ("none", "late-edit", "late-default-head", "late-ignored", "late-issue-head", "other-default-worktree"):
+        c = Case("direct-fallback-interleaving-" + fault)
+        if fault == "late-ignored":
+            c.write(".gitignore", ".claude/worktrees/\ndocs/note.md\n")
+            real_git(c.main, "commit", "-qam", "ignore removed note")
+            real_git(c.main, "push", "-q", "origin", "master")
+        base = real_git(c.origin, "rev-parse", "master")
+        if fault == "late-ignored":
+            (c.main / "docs/note.md").unlink()
+        else:
+            c.write("docs/note.md", "prepared note\n")
+        real_git(c.main, "commit", "-qam", "prepared direct head\n\nFixes #1")
+        head = real_git(c.main, "rev-parse", "HEAD")
+        seen = {"injected": False, "ensure": 0, "drive": 0, "late_head": None}
+        payload = "late owner bytes\n"
+        owner = c.main / ("owner.txt" if fault in ("late-default-head", "late-issue-head") else "docs/note.md")
+        run = runmod.Run.__new__(runmod.Run)
+        run.branch, run.dirname, run.worktree, run.in_lane = "gates/fallback", "fallback", c.main, True
+        def actual_git(*args, check=True, **kw):
+            result = shmod.run(shmod.argv_for("git", *args), cwd=c.main, **kw)
+            if check and result.code != 0:
+                raise shmod.DriverError(f"fixture Git failed: {result.text}")
+            after_branch = args[:2] == ("branch", run.branch) and fault in ("late-edit", "late-default-head", "late-ignored")
+            after_checkout = args[:1] == ("checkout",) and args[-1] == run.branch and fault in ("late-issue-head", "other-default-worktree")
+            if result.code == 0 and (after_branch or after_checkout) and not seen["injected"]:
+                seen["injected"] = True
+                if fault == "other-default-worktree":
+                    real_git(c.main, "worktree", "add", str(c.root / "other-default"), "master")
+                else:
+                    owner.write_text(payload, encoding="utf-8")
+                if fault in ("late-default-head", "late-issue-head"):
+                    real_git(c.main, "add", "owner.txt")
+                    real_git(c.main, "commit", "-qm", "owner advanced default after guard")
+                    seen["late_head"] = real_git(c.main, "rev-parse", "HEAD")
+            return result
+        run.env = types.SimpleNamespace(main=c.main, runtime=None, default="master", git=actual_git)
+        run.claim = types.SimpleNamespace(prepared=None)
+        run.ensure_worktree = lambda: seen.__setitem__("ensure", seen["ensure"] + 1)
+        run.rederive = lambda: None
+        def drive(pr):
+            seen["drive"] += 1
+            return 0
+        run.drive = drive
+        with mock.patch.object(runmod.node, "worktree_readiness", lambda *a, **k: None), \
+                mock.patch.object(runmod.execution, "fingerprint", return_value=None), \
+                mock.patch.object(runmod.execution, "proven", return_value=set()), \
+                mock.patch.object(runmod.execution, "retain", return_value=None):
+            try:
+                result, refused = run.lane_fallback(head), False
+            except (shmod.DriverError, shmod.Refused):
+                result, refused = None, True
+        if fault == "none":
+            check("clean fallback still hands H to its issue branch and restores B before ordinary drive",
+                  result == 0 and seen["ensure"] == seen["drive"] == 1
+                  and real_git(c.main, "rev-parse", "HEAD") == base
+                  and real_git(c.main, "rev-parse", run.branch) == head)
+        elif fault == "late-issue-head":
+            check("an owner H2 on the issue safety branch stays named and is never included in ordinary drive",
+                  seen["injected"] and refused and seen["ensure"] == seen["drive"] == 0
+                  and real_git(c.main, "rev-parse", run.branch) == seen["late_head"]
+                  and real_git(c.main, "show", f"{run.branch}:owner.txt") == payload.strip())
+        elif fault == "other-default-worktree":
+            check("a new default-branch worktree refuses the ref update and preserves its checkout",
+                  seen["injected"] and refused and seen["ensure"] == seen["drive"] == 0
+                  and real_git(c.main, "rev-parse", "master") == head
+                  and real_git(c.root / "other-default", "rev-parse", "HEAD") == head)
+        else:
+            check(f"{fault}: actual mutation after the early guard is preserved and never adopted by ordinary drive",
+                  seen["injected"] and refused and seen["ensure"] == seen["drive"] == 0
+                  and owner.is_file() and owner.read_text(encoding="utf-8") == payload
+                  and real_git(c.main, "rev-parse", run.branch) == head)
+            if fault == "late-default-head":
+                check("late H2 remains named by the default branch, beyond a reflog-only recovery",
+                      real_git(c.main, "rev-parse", "master") == seen["late_head"])
+
+    # Model the already-established proof/GitHub merge boundaries; exercise the
+    # controller's actual post-merge Git cleanup against an unpublished H2.
+    c = Case("direct-local-cleanup-retains-owner")
+    base = real_git(c.main, "rev-parse", "HEAD")
+    real_git(c.main, "checkout", "-qb", "direct/1")
+    c.write("docs/note.md", "reviewed note\n")
+    real_git(c.main, "commit", "-qam", "reviewed head")
+    head = real_git(c.main, "rev-parse", "HEAD")
+    real_git(c.main, "push", "-qu", "origin", "direct/1")
+    real_git(c.main, "checkout", "-q", "master")
+    seen = {}
+    def query(*args, check=True):
+        result = shmod.run(shmod.argv_for("git", *args), cwd=c.main)
+        if check and result.code:
+            raise shmod.DriverError(result.text)
+        return result
+    def merge(*args):
+        real_git(c.origin, "update-ref", "refs/heads/master", head, base)
+        real_git(c.main, "checkout", "-q", "direct/1")
+        c.write("owner.txt", "unpublished owner commit\n")
+        real_git(c.main, "add", "owner.txt")
+        real_git(c.main, "commit", "-qm", "owner H2")
+        seen["head"] = real_git(c.main, "rev-parse", "HEAD")
+        real_git(c.main, "checkout", "-q", "master")
+        return head
+    run = runmod.Run.__new__(runmod.Run)
+    run.env = types.SimpleNamespace(main=c.main, default="master", git=query, pr_checks=lambda: True,
+                                   gh_json=lambda *args: {"headRefOid": head})
+    run.n, run.merge_pr = 1, merge
+    run.watch_pr, run.lane_check_pr = lambda *args: shmod.R(0, "", "", []), lambda *args: None
+    merged = run.lane_finish({"number": 7}, "reviewed head", "modeled merge body")
+    retained = query("rev-parse", "refs/heads/direct/1", check=False)
+    check("post-merge cleanup retains a late unpublished local direct-branch H2 by Git ancestry",
+          merged == head and retained.code == 0 and retained.out.strip() == seen["head"]
+          and real_git(c.main, "show", "direct/1:owner.txt") == "unpublished owner commit"
+          and real_git(c.origin, "rev-parse", "master") == head)
+
+
 def sec_lane():
     try:
         runmod.validation.check_platform()
         caller_supported = True
     except shmod.DriverError:
         caller_supported = False
+    if not caller_supported:
+        # Actual inline checks retain caller admission. The portable normal PR
+        # fallback and resumed CI vehicle are exercised below, without a bypass.
+        c = lane_case("lane-unsupported", files={"gates/doc_gate.py": "raise SystemExit('must not execute inline')\n"})
+        code, out, err = c.ouro("run", "1")
+        check("unsupported inline delivery publishes nothing to the default branch",
+              git(c.origin, "rev-list", "--count", "master") == "1" and "ordinary PR flow before BUILD" in out)
+        for kind in ("other-branch", "unrelated-ahead", "closed"):
+            c = lane_case("lane-portable-" + kind, table={"_issue_1": issue(body=DIRECT_BODY, state="CLOSED" if kind == "closed" else "OPEN")})
+            if kind == "other-branch":
+                git(c.main, "checkout", "-qb", "owner-feature")
+            if kind == "unrelated-ahead":
+                c.write("docs/note.md", "owner work\n")
+                git(c.main, "commit", "-qam", "owner change\n\nFixes #2")
+            before = git(c.main, "rev-parse", "HEAD")
+            code, out, err = c.ouro("run", "1", "--dry-run")
+            check(f"{kind}: platform-independent direct exclusion is preserved before BUILD",
+                  code == 0 and ("not taken" in out if kind != "closed" else "is closed" in out)
+                  and not c.prompts("BUILD") and git(c.main, "rev-parse", "HEAD") == before)
+        print("INFO: genuine inline publication/fix/revert controls require admitted caller execution; portable PR controls remain active")
+        return
     c = lane_case("lanepush")
     code, out, err = c.ouro("run", "1")
     tip = git(c.origin, "rev-parse", "refs/heads/master")
@@ -2709,6 +3433,9 @@ def sec_lane():
     check("the commit message carries Fixes #1", re.search(r"(?m)^Fixes #1$", msg) is not None)
     check("no branch, no pull request, no worktree, no reviewer", c.branches() == ["master"] and not any(s.startswith("pr create") for s in c.sigs()) and not (c.main / ".claude" / "worktrees").exists() and c.prompts("REVIEW") == [])
     check("the BUILD node ran in the main checkout", pathlib.Path(c.node_call("BUILD")["cwd"]).resolve() == c.main.resolve())
+    tools = "\n".join(c.node_call("BUILD")["tools"])
+    check("native inline BUILD grants the cheap floor without the unrelated heavy suite",
+          "gates/doc_gate.py" in tools and "gates/src_gate.py" not in tools and "gates/check.py" not in tools)
     check("the default branch's run on the commit was watched (--sha)", any(s.startswith("run list") and f"--commit {tip}" in s and "--branch master" in s for s in c.sigs()))
     check("gates run in the lane: the one whose paths the diff touches ran, the other did not", "gate `python3 gates/doc_gate.py`: exit 0" in out and "src_gate" not in out)
     check("the main checkout is clean and at origin's tip", git(c.main, "status", "--porcelain") == "" and git(c.main, "rev-parse", "HEAD") == tip)
@@ -2785,27 +3512,59 @@ def sec_lane():
               and c.branches() == ['master'])
     check("fallback: the main checkout is back at origin's tip and clean", git(c.main, "rev-parse", "HEAD") == git(c.origin, "rev-parse", "refs/heads/master") and git(c.main, "status", "--porcelain") == "")
     check("fallback: the worktree is the branch's", git(c.main, "worktree", "list", "--porcelain").count("worktrees/1-fix-the-total") == 1)
-    c = lane_case("laneoutside")
-    c.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"]})
+    source_gate = ("import pathlib,subprocess\n"
+                   "def git(*a): return subprocess.check_output(['git',*a],encoding='utf-8').strip()\n"
+                   "assert pathlib.Path('src/app.py').read_text(encoding='utf-8') == 'def compute_total(items):\\n    return sum(items) + 1\\n'\n"
+                   "p=pathlib.Path(git('rev-parse','--path-format=absolute','--git-common-dir'))/'outside-source-heads'\n"
+                   "with p.open('a',encoding='utf-8') as f:f.write(git('rev-parse','HEAD')+'\\n')\n")
+    c = lane_case("laneoutside", files={"gates/src_gate.py": source_gate})
+    c.node("BUILD", {**BUILD, "_run": ["python3 gates/doc_gate.py"]}, 1)
+    c.node("BUILD", {**BUILD, "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"},
+                     "_run": ["python3 gates/doc_gate.py", "python3 gates/src_gate.py"]}, 2)
+    outside, paths, _ = sh(sys.executable, BIN / "ouro-binding.py", "direct", "src/app.py",
+                           "--binding", c.main / ".claude/ouro.toml", cwd=c.main)
     code, out, err = c.ouro("run", "1", "--validate")
-    check("a diff outside [ship].direct pushes nothing and continues from a worktree", code == 0 and "outside [ship].direct" in out and git(c.origin, "rev-list", "--count", "master") == "1"
+    check("a diff outside [ship].direct pushes nothing and continues from a worktree", code == 0
+          and outside == 1 and paths.strip() == "src/app.py" and "stopped before a push" in out
+          and "the commit moves to a worktree" in out and git(c.origin, "rev-list", "--count", "master") == "1"
           and (c.pr() is not None if caller_supported else 'waiting for validation' in out and c.pr() is None and not c.prompts('REVIEW'))
           and git(c.main, "rev-parse", "HEAD") == git(c.origin, "rev-parse", "refs/heads/master"))
+    worktree = pathlib.Path(c.node_call("BUILD", 2)["cwd"])
+    final_head = git(worktree, "rev-parse", "HEAD")
+    marker = c.main / ".git/outside-source-heads"
+    evidence = pathlib.Path(git(worktree, "rev-parse", "--absolute-git-dir")) / "ouro-validation"
+    receipts = [json.loads(path.read_text(encoding="utf-8")) for path in evidence.glob("*/receipt.json")]
+    ready = [row["body"] for row in c.pr_comments() if row["body"].startswith("**Ready for merge**")]
+    check("the ungranted source gate waits for the normal BUILD and genuine final-head validation before Ready",
+          "gates/src_gate.py" not in "\n".join(c.node_call("BUILD", 1)["tools"])
+          and "gates/src_gate.py" in "\n".join(c.node_call("BUILD", 2)["tools"])
+          and pathlib.Path(c.node_call("BUILD", 1)["cwd"]).resolve() == c.main.resolve()
+          and worktree.resolve() != c.main.resolve() and ready and all(final_head in body for body in ready)
+          and marker.is_file() and final_head in marker.read_text(encoding="utf-8").splitlines()
+          and any(row["sha"] == final_head and "python3 gates/src_gate.py" in row["commands"]
+                  and any(result["cmd"] == "python3 gates/src_gate.py" and result["sha"] == final_head
+                          and result["exit"] == 0 for result in row["results"]) for row in receipts))
     c = lane_case("lanestop", files={"gates/doc_gate.py": "open('junk.txt', 'w').write('x')\n"})
     c.node("BUILD", {**NOTE_BUILD, "_run": ["python3 gates/doc_gate.py"]}, 2)
     c.node("BUILD", {**NOTE_BUILD, "_run": ["python3 gates/doc_gate.py"]}, 3)
     code, out, err = c.ouro("run", "1", "--validate")
-    check("a stop before a push (Push-Direct finds the tree dirty) takes the same worktree recovery: exit 0", code == 0 and "stopped before a push" in out
-          and (c.pr() is not None if caller_supported else 'waiting for validation' in out and c.pr() is None and not c.prompts('REVIEW'))
-          and git(c.origin, "rev-list", "--count", "master") == "1" and git(c.main, "rev-parse", "HEAD") == git(c.origin, "rev-parse", "refs/heads/master"))
+    check("a mandatory check leaving unknown dirty inputs refuses fallback without discarding them",
+          code == 2 and "stopped before a push" in out and "preserve and reconcile" in err
+          and (c.main / "junk.txt").read_text(encoding="utf-8") == "x" and c.pr() is None
+          and git(c.origin, "rev-list", "--count", "master") == "1")
     c = lane_case("lanereadback")
     hook = c.origin / "hooks" / "post-receive"
     hook.parent.mkdir(exist_ok=True)
     hook.write_bytes(b"#!/bin/sh\nn=$(git commit-tree master^{tree} -p master -m 'pushed after')\ngit update-ref refs/heads/master $n\n")
     hook.chmod(0o755)
     code, out, err = c.ouro("run", "1")
-    check("a failed read-back after the push fetches and goes on to the watch of the pushed commit: exit 0", code == 0 and "the read-back after the push failed" in out
-          and c.pr() is None and any(s.startswith("run list") and "--commit " + git(c.origin, "rev-parse", "master~1") in s for s in c.sigs()))
+    published = git(c.origin, "rev-parse", "master~1")
+    check("a failed post-push follow-up fetches and watches the actual published H: exit 0",
+          code == 0 and "post-push follow-up failed; origin is fetched and local state is preserved" in out
+          and c.pr() is None and any(s.startswith("run list") and "--commit " + published in s for s in c.sigs())
+          and git(c.main, "rev-parse", "origin/master") == git(c.origin, "rev-parse", "master")
+          and git(c.main, "rev-parse", "HEAD") == published
+          and git(c.origin, "log", "-1", "--format=%s", "master") == "pushed after")
     c = lane_case("lanegreen", table=run_rows("failure", "success"))
     c.node("BUILD", {**NOTE_BUILD, "subject": "fix(note): second try", "writes": {"docs/note.md": "note, again\n"}}, 2)
     code, out, err = c.ouro("run", "1")
@@ -2948,6 +3707,11 @@ def sec_live():
 
 def sec_lane_moved_main():
     """A lane resumed at its pull request after the owner moved the main checkout: no fix is built there."""
+    try:
+        runmod.validation.check_platform()
+    except shmod.DriverError:
+        print("INFO: inline repair lifecycle requires admitted caller execution; dirty-main CI resume is covered separately")
+        return
     protected = {"api repos/o/n/rules/branches/master": {"Exit": 0, "Out": [{"type": "required_status_checks"}]},
                  "api repos/o/n/branches/master/protection": {"Exit": 1, "Out": "Branch not protected"}}
 
@@ -3130,7 +3894,8 @@ def sec_uncovered_commands():
     c4.node("BUILD", {**BUILD, "_run": ["python3 gates/check.py"]})
     c4.ouro("run", "1")
     check("and validation may run it as any approved command", "python3 gates/check.py" in runmod.Run.validation_commands(types.SimpleNamespace(
-        body="", env=types.SimpleNamespace(pr_checks=lambda: True), notice=runmod.Run.notice, locally_run=runmod.Run.locally_run,
+        body="", env=types.SimpleNamespace(pr_checks=lambda: True,
+            lookup=lambda key, default=None: "local" if key == "ship.validation" else default), notice=runmod.Run.notice, locally_run=runmod.Run.locally_run,
         area_gates=lambda tree=True: [("python3 gates/check.py", {"run": "python3 gates/check.py", "ci": "echo another workflow runs this gate", "cheap": True})])))
     check("a cheap gate the checks also run is on the BUILD brief and in its granted tools, so the build runs",
           c4.prompts("BUILD") != [] and "Bash(python3 gates/check.py)" in c4.node_call("BUILD")["tools"]
@@ -3153,6 +3918,33 @@ def sec_other_pr():
     c = happy_case("otherprpart", table={"_prs": [{**other, "body": "Part 1/2 of #1\n"}]})
     code, out, err = c.ouro("run", "1")
     check("a Part line alone does not refuse a run that takes the whole issue", code == 0)
+    adopted = {"number": 9, "head": "ci/1-by-hand", "state": "OPEN", "isDraft": False, "title": "hand-built fix",
+               "body": other["body"], "url": "https://x/pull/9", "mergeCommit": None}
+    c = happy_case("adoptpr", table={"_pr": adopted})
+    git(c.main, "checkout", "-qb", "ci/1-by-hand")
+    c.write("src/app.py", BUILD["writes"]["src/app.py"])
+    git(c.main, "commit", "-qam", "fix(app): by hand")
+    git(c.main, "push", "-q", "origin", "ci/1-by-hand")
+    git(c.main, "checkout", "-q", "master")
+    code, out, err = c.ouro("run", "1", "--pr", "9")
+    check("--pr adopts the open pull request's branch: nothing built, it is reviewed, its body left as written, and the run waits for the owner",
+          code == 0 and c.prompts("BUILD") == [] and c.prompts("REVIEW") != [] and "adopting pull request #9 from ci/1-by-hand" in out
+          and not any(s.startswith("pr edit") for s in c.sigs()) and c.branches() == ["ci/1-by-hand", "master"]
+          and (c.main / ".claude/worktrees/1-pr9").is_dir() and not (c.main / ".claude/worktrees/1-fix-the-total").exists())
+    tip = git(c.main, "rev-parse", "ci/1-by-hand")
+    git(c.main, "push", "-q", "origin", f"{tip}:refs/heads/master")
+    c.set_table({**json.loads((c.root / "gh-table.json").read_text(encoding="utf-8")), "_pr": {**adopted, "state": "MERGED", "mergeCommit": {"oid": tip}}})
+    code, out, err = c.ouro("run", "1", "--pr", "9")
+    check("--pr on the adopted pull request after the owner's merge finishes the landing: nothing built, its branch cleaned up",
+          code == 0 and c.prompts("BUILD") == [] and "ci/1-by-hand" not in c.branches() and not (c.main / ".claude/worktrees/1-pr9").exists())
+    parts = issue(body="## Deliverable\n- [ ] 1. **First (Flow: standard).** a\n- [ ] 2. **Second (Flow: standard).** b\n\n"
+                       "- `src/app.py` -- compute_total -- \"def compute_total(items):\"\n\nDoc impact on close: none\n\nSize: S\nFlow: standard\n")
+    for name, pr, more in (("adoptnofix", {**adopted, "body": "hand-built\n"}, {}), ("adoptclosed", {**adopted, "state": "CLOSED"}, {}),
+                           ("adoptfork", {**adopted, "isCrossRepository": True}, {}), ("adoptbase", {**adopted, "baseRefName": "release"}, {}),
+                           ("adoptpartfix", adopted, {"_issue_1": parts})):
+        c = happy_case(name, table={"_pr": pr, **more})
+        code, out, err = c.ouro("run", "1", "--pr", "9")
+        check(f"{name}: --pr refuses a pull request it may not adopt: exit 2, nothing built", code == 2 and "--pr 9" in err and c.prompts("BUILD") == [])
 
 
 def sec_manual():
@@ -3832,21 +4624,234 @@ def sec_execution_evidence():
     execution_cases.exercise(sys.modules[__name__])
 
 
-SECTIONS = [("run: execution evidence", sec_execution_evidence), ("run: BUILD recovery", sec_build_recovery), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: executable acceptance", sec_executable_acceptance), ("run: validation driver death", sec_validation_driver_death), ("run: validation locks", sec_validation_locks), ("run: coordination resume controls", sec_coordination_resume), ("run: issue coordination", sec_coordination), ("run: validation inheritance", sec_validation_inheritance), ("run: validation handoff", sec_validation_handoff), ("may_merge: the merge decision", sec_may_merge), ("pure: parsers, markers, the Review line", sec_pure),
-                 ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node),
-                 ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof),
-                 ("run: no binding", sec_no_binding), ("run: a binding the reader refuses", sec_bad_binding),
-                 ("run: not agent-ready", sec_not_ready), ("run: shape finding", sec_shape), ("run: dead anchor", sec_dead_anchor),
-                 ("run: --dry-run", sec_dry_run), ("run: symlinked worktrees directory", sec_worktree_symlink), ("run: branch_prefix", sec_branch_prefix), ("run: parts", sec_parts), ("run: direct lane", sec_direct),
-                 ("run: BUILD stop", sec_build_stop), ("run: a reused worktree catches up", sec_catch_up), ("run: preflight", sec_preflight), ("run: node garbage", sec_node_garbage), ("run: gate uncovered", sec_gate_uncovered), ("run: the BUILD brief's commands", sec_brief),
-                 ("run: happy path, resume, owner merge", sec_happy), ("run: trivial-merge", sec_trivial_merge),
-                 ("run: review findings and the fix round", sec_findings_fix), ("run: repo.setup in each new worktree", sec_setup), ("run: the builder default", sec_builder_default), ("run: developer runtime", sec_developer_runtime), ("run: an unmoved finding", sec_unchanged_finding), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: review cap", sec_review_cap), ("run: a conflict with the base", sec_conflict),
-                 ("run: red gate", sec_gate_red), ("run: full class gates by paths", sec_full_paths), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: checks still running", sec_checks_running), ("run: a pull request head GitHub serves late", sec_head_lag),("run: flake and real check failure", sec_check_flake), ("run: no pull_request workflow", sec_no_pr_workflow),
-                 ("run: merge refused", sec_merge_refused), ("run: express", sec_express), ("run: flow tightens", sec_flow_tighten), ("run: express base moves", sec_express_base_moves),
-                 ("run: sync conflict", sec_sync_conflict), ("run: spec trust", sec_spec_trust), ("review table: plan and size", sec_review_plan),
-                 ("run: review none and size tightening", sec_review_none), ("run: Copilot", sec_copilot), ("run: resume from the tracker", sec_resume), ("run: external reader", sec_external),
-                 ("run: lane outcomes", sec_lane), ("run: lane resumed in a moved main checkout", sec_lane_moved_main), ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("triage: the TRIAGE node", sec_triage), ("ops: weekly and compile", sec_ops),
-                 ("run: another branch's pull request", sec_other_pr), ("run: manual steps", sec_manual), ("live: one real claude -p call", sec_live)]
+def sec_ci_validation():
+    """Two real CLI worlds plus an API matrix; never model the caller platform/executor."""
+    from ouro import execution
+    windows = "ouro-fixture-windows-toolchain build"
+    local = "python3 gates/forbidden-tokens.py"
+    check("the CI-only toolchain really is unavailable here", shutil.which(windows.split()[0]) is None)
+
+    def ready(c):
+        return any(row["body"].startswith("**Ready for merge**") for row in c.pr_comments())
+
+    def observations(c):
+        path = c.state / "ci-observations.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []
+
+    def receipts(c):
+        return list(c.main.rglob("ouro-validation/*/receipt.json"))
+
+    def case(name, *, token=False, scoped=False, merge=False, flow="standard", table=None, acceptance=None, answer=None):
+        binding = BINDING.format(policy="merge-on-green" if merge else "stop-at-pr", review="adversarial-review")
+        binding = binding.replace('run = "python3 gates/check.py"\nci = "echo SKIP: the checks cannot run this gate"',
+                                  f'run = "{windows}"\nci = "echo external Windows build workflow"\n'
+                                  + ('paths = ["src/"]' if scoped else 'cheap = true'))
+        binding = binding.replace("[ship]\n", '[ship]\nvalidation = "ci"\nvalidation_checks = ["ci"]\n')
+        files = {}
+        if token:
+            binding += f'\n[[gate]]\nareas=["*"]\nrun="{local}"\nci="echo SKIP: private token list"\n'
+            files["gates/forbidden-tokens.py"] = (
+                "import pathlib,subprocess\n"
+                "def git(*args): return subprocess.check_output(['git',*args],encoding='utf-8').strip()\n"
+                "private=pathlib.Path(git('rev-parse','--absolute-git-dir'))\n"
+                "with (private/'local-token-heads').open('a',encoding='utf-8') as f: f.write(git('rev-parse','HEAD')+'\\n')\n"
+                "assert 'return sum(items)' in pathlib.Path('src/app.py').read_text(encoding='utf-8')\n"
+                "print('real local private gate ran')\n")
+        body = ISSUE_BODY.replace("Flow: standard", f"Flow: {flow}")
+        if acceptance:
+            body += "\n## Acceptance\n`" + acceptance + "` passes.\n"
+        c = happy_case("ci-authority-" + name, binding=binding, files=files,
+                       table={"_issue_1": issue(body=body), **(table or {})})
+        c.real_executor = True
+        c.node("BUILD", {**BUILD, **(answer or {})})
+        return c
+
+    c = case("ci-only", scoped=True, merge=True, flow="express")
+    code, out, err = c.ouro("run", "1")
+    check("real CLI lands a fresh scoped CI-only change without a local Windows toolchain/caller validator",
+          code == 0 and "done: #1 landed" in out and any(sig.startswith("pr merge") for sig in c.sigs())
+          and len(c.prompts("BUILD")) == 1 and c.prompts("REVIEW") and not receipts(c))
+    prompt = (c.nodes / "BUILD.1.prompt.txt").read_text(encoding="utf-8")
+    check("before the first scoped edit, CI ownership is named without granting the absent command",
+          "CI-owned" in prompt and windows in prompt and windows not in "\n".join(c.node_call("BUILD")["tools"]))
+    check("the PR records CI authority, not a local execution receipt",
+          "- CI validation @ " in (c.pr() or {}).get("body", "") and observations(c) and not receipts(c))
+    sigs = c.sigs()
+    check("express opens a draft before the first exact-head CI query",
+          next(i for i, sig in enumerate(sigs) if sig.startswith("pr create"))
+          < next(i for i, sig in enumerate(sigs) if "statusCheckRollup" in sig))
+
+    success = {"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+    c = case("local-resume", token=True, table={"_rollup": [{**success, "status": "IN_PROGRESS", "conclusion": None}]},
+             answer={"gates_run": [{"cmd": windows, "exit": 0}]})
+    code, out, err = c.ouro("run", "1")
+    wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+    old = git(wt, "rev-parse", "HEAD")
+    marker = pathlib.Path(git(wt, "rev-parse", "--absolute-git-dir")) / "local-token-heads"
+    check("pending CI blocks review/Ready despite a notice and worker self-report, while the real private local gate runs",
+          code == 0 and "waiting for CI validation" in out and c.pr() and c.pr()["isDraft"]
+          and not ready(c) and not c.prompts("REVIEW") and marker.is_file()
+          and set(marker.read_text(encoding="utf-8").splitlines()) == {old} and not receipts(c))
+    (wt / "src/app.py").write_text("def compute_total(items):\n    return sum(items) + 1\n", encoding="utf-8")
+    git(wt, "commit", "-qam", "owner: advance the prepared PR")
+    new = git(wt, "rev-parse", "HEAD")
+    git(wt, "push", "-q", "origin", "HEAD")
+    c.clear_prompts()
+    c.set_table({"_issue_1": issue(), "_rollup_stale": True})
+    code, out, err = c.ouro("run", "1")
+    check("changed-head resume cannot reuse stale CI", code == 0 and not ready(c) and not c.prompts("REVIEW")
+          and c.prompts("BUILD") == [] and old != new and not any(sig.startswith("pr merge") for sig in c.sigs()))
+    c.set_table({"_issue_1": issue()})
+    code, out, err = c.ouro("run", "1")
+    check("fresh success at H2 permits real mixed local/CI readiness without rebuilding or caller receipts",
+          code == 0 and ready(c) and c.prompts("BUILD") == [] and c.prompts("REVIEW")
+          and any(row["head"] == new for row in observations(c)) and new in c.pr()["body"]
+          and set(marker.read_text(encoding="utf-8").splitlines()) == {old, new} and not receipts(c))
+
+    # Compact API matrix: real committed fixture/Git/Run, only remote GitHub responses modeled.
+    c = case("api", token=True)
+    c.write("src/app.py", BUILD["writes"]["src/app.py"])
+    git(c.main, "checkout", "-qb", "feature/ci-api")
+    git(c.main, "commit", "-qam", "prepared API controls")
+    git(c.main, "push", "-q", "origin", "HEAD")
+    ob = shmod.load_binding_module()
+    env = shmod.Env(c.main, ob, ob.load(c.main / ".claude/ouro.toml"), False)
+    env._pr_checks = True
+    r = runmod.Run(env, 1, None)
+    r.worktree, r.flow, r.body, r.areas, r.labels = c.main, "standard", ISSUE_BODY, ["gates"], ["agent-ready"]
+    r.spec_amendments = lambda: []
+    head = git(c.origin, "rev-parse", "feature/ci-api")
+    response = {"headRefOid": head, "statusCheckRollup": [success]}
+    env.gh_json = lambda *args: response
+    try:
+        negative = {
+            "missing": [], "wrong-name": [{**success, "name": "unrelated-green"}],
+            "pending": [{**success, "status": "IN_PROGRESS", "conclusion": None}],
+            "failed": [{**success, "conclusion": "FAILURE"}], "skipped": [{**success, "conclusion": "SKIPPED"}],
+            "neutral": [{**success, "conclusion": "NEUTRAL"}], "unknown-type": [{**success, "__typename": "Unknown"}],
+            "duplicate-non-success": [success, {**success, "conclusion": "SKIPPED"}],
+            "malformed-success": [{"__typename": "StatusContext", "name": "ci", "state": "SUCCESS"}],
+            "malformed-list": {"name": "ci", "state": "SUCCESS"}, "stale-head": [success],
+        }
+        for name, rows in negative.items():
+            response = {"headRefOid": head, "statusCheckRollup": [success]}
+            check(name + ": positive calibration establishes only CI proof", execution.check_ci(r, {"number": 7}, head))
+            response = {"headRefOid": "d" * 40 if name == "stale-head" else head, "statusCheckRollup": rows}
+            try:
+                accepted = execution.check_ci(r, {"number": 7}, head)
+            except shmod.DriverError:
+                accepted = False
+            check(name + ": invalid remote data clears previous proof and cannot satisfy required execution",
+                  not accepted and r.ci_execution_head is None and not r.ci_execution_commands and not r.ci_execution_checks
+                  and windows in r.missing_execution())
+        response = {"headRefOid": head, "statusCheckRollup": [{"__typename": "StatusContext", "context": "ci", "state": "SUCCESS"}]}
+        check("successful named commit status works at the exact fixture head", execution.check_ci(r, {"number": 7}, head))
+        cheap_local = "python3 gates/cheap-local.py"
+        recognized = "pwsh -NoProfile -File gates/windows-only-build.ps1"
+        binding_path = c.main / ".claude/ouro.toml"
+        binding_path.write_text(binding_path.read_text(encoding="utf-8")
+            + f'\n[[gate]]\nareas=["*"]\ncheap=true\npaths=["docs/"]\nrun="{cheap_local}"\nci="echo SKIP: local private check"\n'
+            + f'\n[[gate]]\nareas=["*"]\npaths=["src/"]\nrun="{recognized}"\nci="echo Windows build runs in the configured CI"\n', encoding="utf-8")
+        c.write("gates/cheap-local.py", "import pathlib,subprocess\n"
+            "def git(*args): return subprocess.check_output(['git',*args],encoding='utf-8').strip()\n"
+            "p=pathlib.Path(git('rev-parse','--absolute-git-dir'))/'cheap-local-heads'\n"
+            "p.write_text(git('rev-parse','HEAD'),encoding='utf-8')\n")
+        git(c.main, "add", "-A"); git(c.main, "commit", "-qm", "reviewed API gate obligations")
+        env.data = ob.load(binding_path)  # Explicitly refreshed owner invocation, never BUILD authorization.
+        head = git(c.main, "rev-parse", "HEAD")
+        check("the cheap local control really misses the changed paths", not r.touches(["docs/"]))
+        check("the missing-path cheap local gate remains a required driver obligation",
+              cheap_local in r.required_execution() and cheap_local in [cmd for cmd, _ in r.select_gates(r.flow)[0]])
+        red = r.run_gates(head)
+        cheap_marker = pathlib.Path(git(c.main, "rev-parse", "--absolute-git-dir")) / "cheap-local-heads"
+        check("the real driver executes cheap local gates despite unmatched paths",
+              red is None and cheap_marker.is_file() and cheap_marker.read_text(encoding="utf-8") == head)
+        r.body = ISSUE_BODY + "\n## Acceptance\n`" + recognized + "` passes.\n"
+        check("the exact CI acceptance command is actually recognized, with its Windows input absent locally",
+              recognized in runmod.acceptance_commands(runmod.acceptance_source(r))
+              and not (c.main / "gates/windows-only-build.ps1").exists())
+        stops = []
+        original_stop = r.stop_issue
+        def observed_stop(reason, content, code):
+            stops.append((reason, content))  # Observe the tracker stop; executor/platform remain real.
+            raise shmod.Stopped(code)
+        r.stop_issue = observed_stop
+        r.ci_execution_head, r.ci_execution_commands, r.ci_execution_checks = None, set(), []
+        try:
+            r.acceptance_answer({"_denied": [{"tool_input": {"command": recognized}}]}, "BUILD")
+        except shmod.Stopped:
+            pass
+        check("local denial of declared CI acceptance is not an owner stop", not stops)
+        check("local denial never supplies CI proof", recognized in r.missing_execution()
+              and r.ci_execution_head is None and not r.ci_execution_checks)
+        try:
+            r.acceptance_answer({"stop": {"reason": "open decision", "question": "fixture genuine design ruling"},
+                                 "_denied": [{"tool_input": {"command": recognized}}]}, "BUILD")
+        except shmod.Stopped:
+            pass
+        check("a genuine model stop still wins over CI-owned denial", stops[-1:] == [("open decision", "fixture genuine design ruling")])
+        response = {"headRefOid": head, "statusCheckRollup": [success]}
+        check("exact gate.run acceptance is covered by CI plus genuine local gate results",
+              execution.check_ci(r, {"number": 7}, head) and r.missing_execution() == []
+              and not any(row["cmd"] == recognized for row in r.execution_results))
+        alias = "pwsh -NoProfile -File gates/alias-build.ps1"
+        r.body += "`" + alias + "` passes too.\n"
+        check("a recognized but undeclared acceptance alias remains uncovered",
+              alias in runmod.acceptance_commands(runmod.acceptance_source(r))
+              and r.missing_execution() == [alias])
+        stops.clear()
+        try:
+            r.acceptance_answer({"_denied": [{"tool_input": {"command": alias}}]}, "BUILD")
+        except shmod.Stopped:
+            pass
+        check("local denial of uncovered acceptance still requires the existing ruling",
+              len(stops) == 1 and stops[0][0] == "acceptance unrunnable" and alias in stops[0][1])
+        r.stop_issue = original_stop
+        r.body = ISSUE_BODY
+        c.write("gates/forbidden-tokens.py", "print('real local private gate failed')\nraise SystemExit(9)\n")
+        git(c.main, "commit", "-qam", "actual local failure")
+        head = git(c.main, "rev-parse", "HEAD")
+        red = r.run_gates(head)
+        check("actual local exit9 remains blocking independently of successful CI",
+              red and red[0] == local and red[1] == 9 and "real local private gate failed" in red[2])
+        check("plain committed inputs pass the real portable input guard", r.check_inputs(head) is None)
+        for flag, undo in (("--assume-unchanged", "--no-assume-unchanged"), ("--skip-worktree", "--no-skip-worktree")):
+            git(c.main, "update-index", flag, "src/app.py")
+            c.write("src/app.py", "different hidden local bytes\n")
+            error = ""
+            try:
+                r.check_inputs(head)
+            except (shmod.DriverError, shmod.Refused) as exc:
+                error = str(exc)
+            finally:
+                git(c.main, "update-index", undo, "src/app.py")
+                git(c.main, "checkout", "--", "src/app.py")
+            check(flag + ": hidden tracked bytes cannot authorize a local-only check", bool(error)
+                  and any(word in error.lower() for word in ("index", "assume", "skip-worktree")))
+    finally:
+        env.close()
+
+    c = case("uncovered-caller", acceptance="python3 gates/acceptance.py",
+             answer={"validation_pending": [{"cmd": "python3 gates/acceptance.py", "reason": "explicit extra caller environment"}]})
+    c.write("gates/acceptance.py", "print('real explicit caller acceptance')\n")
+    git(c.main, "add", "-A"); git(c.main, "commit", "-qm", "fixture explicit acceptance"); git(c.main, "push", "-q", "origin", "master")
+    code, out, err = c.ouro("run", "1", "--validate")
+    try:
+        runmod.validation.check_platform()
+        caller_supported = True
+    except shmod.DriverError:
+        caller_supported = False
+    check("an uncovered acceptance keeps the real caller platform boundary", code == 0
+          and (ready(c) and receipts(c) if caller_supported else "waiting for validation" in out
+               and not ready(c) and not c.prompts("REVIEW") and not receipts(c)))
+
+
+# Heaviest first, by the slower CI leg's section time: the pool starts sections in this order.
+SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("run: full class gates by paths", sec_full_paths),
+            ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: the builder default", sec_builder_default), ("run: BUILD recovery", sec_build_recovery), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
+            ("run: lane resumed in a moved main checkout", sec_lane_moved_main), ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
+            ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct PR copy guards", sec_lane_resume_copy_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("run: validation driver death", sec_validation_driver_death), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
+            ("run: node garbage", sec_node_garbage), ("run: validation locks", sec_validation_locks), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("may_merge: the merge decision", sec_may_merge), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("review table: plan and size", sec_review_plan), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
 INDEX = os.environ.get("OURO_TEST_INDEX")
 WORKERS = int(os.environ.get("OURO_TEST_WORKERS") or min(8, os.cpu_count() or 1))
 

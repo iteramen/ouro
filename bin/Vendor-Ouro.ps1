@@ -8,11 +8,13 @@
       agents/*          -> <repo>/.claude/agents/
       bin/*.ps1         -> <repo>/<ScriptsDir>/           (default scripts)
       bin/ouro-binding.py -> <repo>/<ScriptsDir>/         (the gates read the binding through it)
+      bin/ouro-direct.py -> <repo>/<ScriptsDir>/          (direct policy and caller checks)
+      bin/ouro/runtime/process.py -> <repo>/<ScriptsDir>/ouro-process.py (the identical stdlib core)
       bin/external-audit.py -> <repo>/<ScriptsDir>/       (the external-audit skill runs it)
       bin/forbidden-tokens.py -> <repo>/<ScriptsDir>/     (checks text against the private token list)
       (not copied: bin/loop-outcomes.py, which the driver's weekly runs from the plugin;
        bin/ouro-version.py reads the user-scope plugin install, never a copy)
-      tests/*           -> <repo>/<ScriptsDir>/tests/     (the fixture suites find the scripts there)
+      tests/*           -> <repo>/<ScriptsDir>/tests/     (except plugin-only driver/ and runtime/)
       docs/contract.md  -> <repo>/docs/ouro-contract.md
       docs/docs-governance.md         -> <repo>/docs/ouro-docs-governance.md
       docs/binding.md   -> <repo>/docs/ouro-binding.md   (vendored skills and the contract cite it)
@@ -21,6 +23,8 @@
     Refuses unless -Into is a git work-tree root and -ScriptsDir is repo-relative and resolves
     inside it, before a single file is written, so -WhatIf refuses what a run refuses. Prints
     every file it copies.
+    Existing files under the omitted tests/driver/ and tests/runtime/ roots are not pruned;
+    removing legacy copies is optional manual maintenance. The plugin export keeps both roots.
     Never touches the target's workflows or settings; it ends with the list of what the human
     must edit by hand, the two .gitignore entries the installer would have appended among them.
     A destination that is a symbolic link, whether or not its target exists, or that lies under a
@@ -203,6 +207,12 @@ if (Test-Path -LiteralPath $binding) {
     $plan += , @($binding, (Join-Path $ScriptsDir 'ouro-binding.py'))
 }
 else { Write-Warning "bin/ouro-binding.py not found in the plugin at $Plugin - skipped" }
+$direct = Join-Path $Plugin 'bin/ouro-direct.py'
+if (Test-Path -LiteralPath $direct) { $plan += , @($direct, (Join-Path $ScriptsDir 'ouro-direct.py')) }
+else { Write-Warning "bin/ouro-direct.py not found in the plugin at $Plugin - skipped" }
+$executor = Join-Path $Plugin 'bin/ouro/runtime/process.py'
+if (Test-Path -LiteralPath $executor) { $plan += , @($executor, (Join-Path $ScriptsDir 'ouro-process.py')) }
+else { Write-Warning "bin/ouro/runtime/process.py not found in the plugin at $Plugin - skipped" }
 # The external-audit skill runs the driver by name, and its suite is vendored with it -- a tree
 # told to run a file the copy leaves out carries a gate that cannot pass.
 $externalAuditor = Join-Path $Plugin 'bin/external-audit.py'
@@ -220,6 +230,8 @@ $testsRoot = Join-Path $Plugin 'tests'
 $testFiles = @(if ([System.IO.Directory]::Exists($testsRoot)) { Get-PluginFiles $testsRoot })
 foreach ($f in $testFiles) {
     $rel = $f.Substring($testsRoot.Length).TrimStart('\', '/')
+    $normalized = $rel.Replace('\', '/')
+    if ($normalized.StartsWith('driver/', [StringComparison]::Ordinal) -or $normalized.StartsWith('runtime/', [StringComparison]::Ordinal)) { continue }
     $plan += , @($f, (Join-Path $ScriptsDir 'tests' $rel))
 }
 $contract = Join-Path $Plugin 'docs/contract.md'

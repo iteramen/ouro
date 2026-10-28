@@ -7,6 +7,7 @@ slug = "owner/name"
 default_branch = "main"
 protected_branch_prefixes = []
 # branch_prefix = "feature"
+# release_notes = ['(^|/)CHANGELOG\.md$', '^changes/']  # regexes; default: a CHANGELOG.md basename
 
 [labels]
 scope = []

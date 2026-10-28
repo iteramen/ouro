@@ -19,14 +19,6 @@ class Transcript:
     error: str | None = None
     count: int = 0
 
-    def metadata(self):
-        rows = []
-        if self.session is not None:
-            rows.append({"type": "thread.started", "thread_id": self.session})
-        if self.completed:
-            rows.append({"type": "turn.completed", "usage": self.usage})
-        return "\n".join(map(json.dumps, rows))
-
 
 def scan(output):
     result = Transcript()

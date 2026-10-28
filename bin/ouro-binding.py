@@ -88,7 +88,9 @@ FORBIDDEN_CHECKS = ("required", "off")
 DIRECT_PROBES = (".github/workflows/x.yml", ".github/workflows/x.yaml", ".github/actions/x/action.yml",
                  ".github/actions/x/action.yaml", "actions/x/action.yml", "hooks/hooks.json", "hooks/x.py",
                  "hooks/x.sh", "release/x.py", "release/x.ps1", ".claude/ouro.toml",
-                 ".claude/ouro.local.toml", ".claude/settings.json")
+                 ".claude/ouro.local.toml", ".claude/settings.json",
+                 *(prefix + name for prefix in ("", "bin/") for name in
+                   ("ouro-direct.py", "ouro-process.py", "ouro-binding.py", "Push-Direct.ps1", "Push-Branch.ps1", "Get-LandBinding.ps1")))
 DIRECT_PREFIXES = (".github/", "actions/", "hooks/", "release/", ".claude/")
 
 
@@ -121,13 +123,13 @@ OURO_TOKEN = "<ouro>"
 # table -> {key: expected type}. Lists are checked for element type str; a dict-typed key is a
 # free-key sub-table whose keys are data (not schema) and whose values must be strings.
 SCHEMA = {
-    "repo": {"slug": str, "default_branch": str, "protected_branch_prefixes": list, "branch_prefix": str, "checkout": str, "setup": str},
+    "repo": {"slug": str, "default_branch": str, "protected_branch_prefixes": list, "branch_prefix": str, "checkout": str, "setup": str, "release_notes": list},
     "labels": {"scope": list, "area": list, "type": list},
-    "gate": {"areas": list, "run": str, "ci": str, "paths": list, "cheap": bool},
+    "gate": {"areas": list, "run": str, "ci": str, "paths": list, "cheap": bool, "direct_code_check": bool},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
              "external_effort": str, "test_first_for_bugs": bool, "forbidden_check": str, "direct": list,
-             "unattended_classes": list},
+             "unattended_classes": list, "validation": str, "validation_checks": list, "direct_max_lines": int, "direct_max_files": int},
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
     "models": {role: str for role in MODEL_ROLES},
@@ -154,9 +156,9 @@ SCHEMA = {
 REQUIRED = ("schema", "repo.slug", "repo.default_branch", "ship.policy", "ship.review", "owner.ruling_approvers")
 
 # Lists whose entries are regexes, not literals. An invalid pattern is a configuration error the
-# consumer can fix here; `check` catches only what Python's re refuses, and the gate matches
-# with .NET.
-REGEX_KEYS = {"docs": ("index_exempt", "planning_paths", "generated_pattern")}
+# consumer can fix here; `check` catches only what Python's re refuses, and the docs gate matches
+# with .NET (the driver reads repo.release_notes with Python's re).
+REGEX_KEYS = {"docs": ("index_exempt", "planning_paths", "generated_pattern"), "repo": ("release_notes",)}
 
 
 def lookup(data, dotted):
@@ -247,6 +249,8 @@ def validate(data):
                         errors.append(f"gate.{i}.paths: must be a non-empty list")
                     elif "" in g["paths"]:
                         errors.append(f"gate.{i}.paths: every entry must be a non-empty pathspec")
+                if g.get("direct_code_check") is True and not g.get("paths"):
+                    errors.append(f"gate.{i}.direct_code_check: requires non-empty paths")
         elif not isinstance(data[name], dict):
             errors.append(f"{name}: must be a table")
         else:
@@ -287,6 +291,19 @@ def validate(data):
         if overlap:
             errors.append(f"labels.area and labels.type must be disjoint (both contain: {', '.join(sorted(overlap))}) - one label would satisfy both of the shape gate's counts")
     ship = data.get("ship") if isinstance(data.get("ship"), dict) else {}
+    if "validation" in ship and ship["validation"] not in ("local", "ci"):
+        errors.append("ship.validation: must be one of local, ci")
+    if ship.get("validation") == "ci" and "validation_checks" not in ship:
+        errors.append("ship.validation_checks: required when ship.validation = \"ci\"")
+    checks = ship.get("validation_checks")
+    if isinstance(checks, list) and all(isinstance(name, str) for name in checks):
+        if not checks:
+            errors.append("ship.validation_checks: must be a non-empty list")
+        if any(not name.strip() or len(f".{name}.".splitlines()) > 1
+               or any(ord(char) < 32 or ord(char) == 127 for char in name) for name in checks):
+            errors.append("ship.validation_checks: names must be non-blank single-line strings")
+        if len(set(checks)) != len(checks):
+            errors.append("ship.validation_checks: names must be unique")
     if "policy" in ship and ship["policy"] not in POLICIES:
         errors.append(f"ship.policy: must be one of {', '.join(POLICIES)}")
     if "review" in ship and ship["review"] not in REVIEWS:
@@ -327,8 +344,11 @@ def validate(data):
         errors.append("ship.external_effort: must be a non-empty string")
     if "forbidden_check" in ship and ship["forbidden_check"] not in FORBIDDEN_CHECKS:
         errors.append(f"ship.forbidden_check: must be one of {', '.join(FORBIDDEN_CHECKS)}")
+    for key in ("direct_max_lines", "direct_max_files"):
+        if type(ship.get(key)) is int and ship[key] <= 0:
+            errors.append(f"ship.{key}: must be a positive integer")
     if isinstance(ship.get("direct"), list):
-        probes = DIRECT_PROBES + tuple(gate_paths(data))
+        probes = tuple(gate_paths(data)) + DIRECT_PROBES
         for glob in ship["direct"]:
             if not isinstance(glob, str):
                 continue
@@ -635,6 +655,27 @@ ruling_approvers = ["someone"]
     assert gate_runs(valid, "ui") == ["make test"]
     assert lookup(valid, "gate.1.run") == "make core-test"
 
+    # Validation authority belongs to the repository, not the developer backend.
+    validation_binding = lambda lines: tomllib.loads(base.replace("[ship]\n", "[ship]\n" + lines + "\n"))
+    assert validate(validation_binding('validation = "local"')) == []
+    ci_validation = validation_binding('validation = "ci"\nvalidation_checks = ["gates (windows)", "gates (linux)"]')
+    assert validate(ci_validation) == [], validate(ci_validation)
+    assert lookup(ci_validation, "ship.validation_checks") == ["gates (windows)", "gates (linux)"]
+    assert validate(validation_binding('validation_checks = ["Build", "build"]')) == []  # Exact names, not case-folded.
+    for lines, fragment in (
+        ('validation = "unknown"', "ship.validation:"),
+        ('validation = true', "ship.validation: expected str"),
+        ('validation = "ci"', "ship.validation_checks: required"),
+        ('validation_checks = []', "ship.validation_checks: must be a non-empty list"),
+        ('validation_checks = "Build"', "ship.validation_checks: expected list"),
+        ('validation_checks = [1]', "ship.validation_checks: every entry must be a string"),
+        ('validation_checks = ["Build", "Build"]', "ship.validation_checks: names must be unique"),
+        ('validation_checks = [" "]', "ship.validation_checks: names must be non-blank single-line strings"),
+        ('validation_checks = ["Build\\nother"]', "ship.validation_checks: names must be non-blank single-line strings"),
+    ):
+        errors = validate(validation_binding(lines))
+        assert any(fragment in error for error in errors), (lines, errors)
+
     # review is the reviewer's standards list: a list of strings, like implement. A string entry
     # is accepted and readable through get; a non-string entry and a bare string are refused.
     with_review = tomllib.loads(base + '\n[overlays]\nreview = ["docs/standards.md"]\n')
@@ -688,6 +729,21 @@ ruling_approvers = ["someone"]
     for value, want in (("true", []), ("false", []), ('"yes"', ["gate.2.cheap: expected bool"]), ("1", ["gate.2.cheap: expected bool"])):
         errs = validate(tomllib.loads(base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\ncheap = {value}\n'))
         assert errs == want, (value, errs)
+
+    for value in ("true", "false"):
+        scoped = base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\npaths = ["src/"]\ndirect_code_check = {value}\n'
+        assert validate(tomllib.loads(scoped)) == []
+    assert any("direct_code_check: requires" in e for e in validate(tomllib.loads(
+        base + '\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\ndirect_code_check = true\n')))
+    for value in ('"true"', "1"):
+        assert any("direct_code_check: expected bool" in e for e in validate(tomllib.loads(
+            base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\npaths = ["src/"]\ndirect_code_check = {value}\n')))
+    for key in ("direct_max_lines", "direct_max_files"):
+        for value in ("1", "20"):
+            assert validate(tomllib.loads(base.replace("[ship]\n", f"[ship]\n{key} = {value}\n"))) == []
+        for value in ("true", "0", "-1", '"20"'):
+            assert any(f"ship.{key}:" in e for e in validate(tomllib.loads(
+                base.replace("[ship]\n", f"[ship]\n{key} = {value}\n"))))
 
     # A run may name the plugin root with <ouro>: check accepts it, gates hands out the expansion,
     # and a run without the token is untouched.
@@ -821,6 +877,9 @@ report_only = ["S9"]
     assert validate(bad_regex) and "not a valid regex" in validate(bad_regex)[0], validate(bad_regex)
     bad_planning = tomllib.loads(base + '\n[docs]\nplanning_paths = ["["]\n')
     assert validate(bad_planning) and "not a valid regex" in validate(bad_planning)[0], validate(bad_planning)
+    notes = lambda pats: validate(tomllib.loads(base.replace('default_branch = "main"', f'default_branch = "main"\nrelease_notes = {pats}')))
+    assert notes('["^changes/"]') == [], notes('["^changes/"]')
+    assert notes('["^changes/", "("]') and notes('["^changes/", "("]')[0].startswith("repo.release_notes: '(' is not a valid regex"), notes('["("]')
     empty_key = tomllib.loads(base + '\n[docs.banned]\n"" = "reason"\n')
     assert validate(empty_key) == ["docs.banned: an empty key matches every line; give the substring"], validate(empty_key)
 

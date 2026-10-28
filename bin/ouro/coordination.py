@@ -148,14 +148,7 @@ class Board:
                         or (c["type"] == "text" and not isinstance(c.get("text"), str)) for c in content)
                         or ("structuredContent" in result and not isinstance(result["structuredContent"], dict))):
                     raise Unavailable("malformed reply")
-                payloads = [result.get("structuredContent")]
-                for item in content:
-                    if item["type"] == "text":
-                        try:
-                            payloads.append(json.loads(item["text"]))
-                        except ValueError:
-                            pass
-                if any(isinstance(value, dict) and "error" in value for value in payloads):
+                if any("error" in value for value in values(result)):
                     raise Unavailable("tool failure")
                 results.put(Reply(result))
             except Unavailable as ex:
@@ -291,24 +284,33 @@ class Board:
 MARK = re.compile(r"<!-- ouro-claim: (.*?) -->", re.DOTALL)
 
 
-def payload(reply):
-    if not reply.available:
-        raise Unavailable("transport unavailable")
-    values = []
-    result = reply.value
-    if isinstance(result.get("structuredContent"), dict):
-        values.append(result["structuredContent"])
+def values(result):
+    """The objects a tool result carries: its structured content, then each JSON text item."""
+    found = [result["structuredContent"]] if isinstance(result.get("structuredContent"), dict) else []
     for item in result.get("content", []):
         if item.get("type") == "text":
             try:
                 value = json.loads(item["text"])
-                if isinstance(value, dict):
-                    values.append(value)
             except ValueError:
-                pass
-    if not values or any(v != values[0] for v in values) or "error" in values[0]:
+                continue
+            if isinstance(value, dict):
+                found.append(value)
+    return found
+
+
+def payload(reply):
+    if not reply.available:
+        raise Unavailable("transport unavailable")
+    found = values(reply.value)
+    if not found or any(v != found[0] for v in found) or "error" in found[0]:
         raise Unavailable("malformed tool result")
-    return values[0]
+    return found[0]
+
+
+def cached(data, identity):
+    """A claim cache names this identity and a correlation."""
+    return (isinstance(data, dict) and data.get("identity") == identity
+            and re.fullmatch(r"[a-f0-9]{32}", str(data.get("correlation", ""))))
 
 
 def thread_id(value):
@@ -375,18 +377,20 @@ class Claim:
             raise Unavailable("invalid cache")
         identity = dict(person=self.config.person, platform=e.runtime.backend, session=session,
                         actor=actor, repository=e.slug, issue=r.n, part=r.k)
-        scope = [self.config.endpoint, self.config.forum, identity]
-        self.path = root / (hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest() + ".json")
+        self.path = self.cache(root, identity)
         if self.path.exists():
             if self.path.stat().st_size > 4096:
                 raise Unavailable("invalid cache")
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
-            if (not isinstance(self.data, dict) or self.data.get("identity") != identity
-                    or not re.fullmatch(r"[a-f0-9]{32}", str(self.data.get("correlation", "")))):
+            if not cached(self.data, identity):
                 raise Unavailable("invalid cache")
         else:
             self.data = dict(identity=identity, correlation=uuid.uuid4().hex)
             self.save()  # before create: a lost response can be reconciled on resume
+
+    def cache(self, root, identity):
+        scope = [self.config.endpoint, self.config.forum, identity]
+        return root / (hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest() + ".json")
 
     def metadata(self, detail):
         messages = detail.get("messages")
@@ -423,15 +427,12 @@ class Claim:
         expected = dict(self.data["identity"], part=part)
         if identity != expected or not any(k == part and done for k, done, _ in parse_parts(self.run.body)):
             return False
-        scope = [self.config.endpoint, self.config.forum, expected]
-        path = self.path.parent / (hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest() + ".json")
+        path = self.cache(self.path.parent, expected)
         try:
             if path.stat().st_size > 4096:
                 return False
-            cached = json.loads(path.read_text(encoding="utf-8"))
-            if (not isinstance(cached, dict) or cached.get("identity") != expected
-                    or not re.fullmatch(r"[a-f0-9]{32}", str(cached.get("correlation", "")))
-                    or cached.get("correlation") != data.get("correlation")):
+            own = json.loads(path.read_text(encoding="utf-8"))
+            if not cached(own, expected) or own.get("correlation") != data.get("correlation"):
                 return False
         except (OSError, ValueError, RecursionError):
             return False
@@ -442,13 +443,16 @@ class Claim:
                                **self.author()), deadline)
             if str(result.get("threadId")) != ident or not isinstance(result.get("added"), dict):
                 raise Unavailable("malformed reply")
-            result = self.call("board_update_thread", dict(id=ident, status="closed", waitingOn=[], **self.author()), deadline)
-            updated = result.get("updated")
-            if not isinstance(updated, dict) or thread_id(updated.get("id")) != ident or updated.get("status") != "closed":
-                raise Unavailable("malformed close")
+            self.close(ident, deadline)
         except Unavailable:
             self.notice()
         return True
+
+    def close(self, ident, deadline):
+        result = self.call("board_update_thread", dict(id=ident, status="closed", waitingOn=[], **self.author()), deadline)
+        updated = result.get("updated")
+        if not isinstance(updated, dict) or thread_id(updated.get("id")) != ident or updated.get("status") != "closed":
+            raise Unavailable("malformed close")
 
     def discover(self, deadline, scope=None):
         r, e = self.run, self.env
@@ -541,22 +545,31 @@ class Claim:
     def author(self):
         return dict(author=self.config.person, via=self.env.runtime.backend, session=self.data["identity"]["session"])
 
-    def enter(self, create=True):
+    def ready(self):
         if not self.config or self.env.dry:
-            return
+            return False
         if not os.environ.get(self.config.credential_env):
             self.notice()
+            return False
+        return True
+
+    def survey(self, kind, deadline, scope=None):
+        owned, conflicts, incomplete = self.discover(deadline, scope)
+        if conflicts and not getattr(self.env, "override_claim", False):
+            from .sh import Refused
+            holders = ", ".join(f"{c['holder']} (thread {self.safe(c['thread'])})" for c in conflicts)
+            raise Refused(f"known {kind} claim held by {holders}; the invoking person may use --override-claim")
+        if incomplete:
+            self.notice()
+        return owned, conflicts, incomplete
+
+    def enter(self, create=True):
+        if not self.ready():
             return
         deadline = time.monotonic() + BUDGET
         try:
             self.identity()
-            owned, conflicts, incomplete = self.discover(deadline)
-            if conflicts and not getattr(self.env, "override_claim", False):
-                from .sh import Refused
-                holders = ", ".join(f"{c['holder']} (thread {self.safe(c['thread'])})" for c in conflicts)
-                raise Refused(f"known issue claim held by {holders}; the invoking person may use --override-claim")
-            if incomplete:
-                self.notice()
+            owned, conflicts, incomplete = self.survey("issue", deadline)
             if len(owned) > 1:
                 raise Unavailable("duplicate owned claims")
             self.owned = owned[0] if owned else None
@@ -582,10 +595,7 @@ class Claim:
 
     def prepare(self, base, head, paths, areas, stage, *, check=True):
         """Reusable prepared-change boundary; the caller supplies Git scope and reviewed policy areas."""
-        if not self.config or self.env.dry:
-            return
-        if not os.environ.get(self.config.credential_env):
-            self.notice()
+        if not self.ready():
             return
         self.prepared = dict(base=base, head=head, stage=stage,
                              scope=dict(paths=sorted(set(paths)), areas=sorted(set(areas))))
@@ -595,13 +605,7 @@ class Claim:
         try:
             if self.data is None:
                 self.identity()
-            owned, conflicts, incomplete = self.discover(deadline, self.prepared["scope"])
-            if conflicts and not getattr(self.env, "override_claim", False):
-                from .sh import Refused
-                holders = ", ".join(f"{c['holder']} (thread {self.safe(c['thread'])})" for c in conflicts)
-                raise Refused(f"known prepared-change claim held by {holders}; the invoking person may use --override-claim")
-            if incomplete:
-                self.notice()
+            owned, conflicts, _ = self.survey("prepared-change", deadline, self.prepared["scope"])
             if len(owned) != 1:
                 self.owned = None
                 raise Unavailable("ownership unavailable")
@@ -627,10 +631,7 @@ class Claim:
                     or not isinstance(result["added"].get("body"), str)):
                 raise Unavailable("malformed reply")
             if close:
-                result = self.call("board_update_thread", dict(id=self.owned, status="closed", waitingOn=[], **self.author()), deadline)
-                updated = result.get("updated")
-                if not isinstance(updated, dict) or thread_id(updated.get("id")) != self.owned or updated.get("status") != "closed":
-                    raise Unavailable("malformed close")
+                self.close(self.owned, deadline)
                 self.owned = None
         except (Unavailable, OSError, ValueError, TypeError, RecursionError, DriverError):
             self.notice()

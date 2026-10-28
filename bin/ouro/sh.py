@@ -15,13 +15,13 @@ import tempfile
 import time
 from pathlib import Path
 
+from .runtime.process import DriverError, R, child_env, feed
+
 PLUGIN = Path(__file__).resolve().parents[2]
 BIN = PLUGIN / "bin"
 NO_ANCHOR = "no parseable anchor in the body (a backticked repo path or a quoted code fragment): the shape gate refuses a promotion without one"
 
 
-class DriverError(Exception):
-    """Exit 1: a script failed, a node answered nothing parseable, the platform refused."""
 
 
 class Refused(Exception):
@@ -64,33 +64,85 @@ def script(name, *args):
     return [which("python3"), path, *args]
 
 
-class R:
-    def __init__(self, code, out, err, argv):
-        self.code, self.out, self.err, self.argv = code, out, err, argv
-
-    @property
-    def text(self):
-        return (self.out + self.err).strip()
 
 
-def child_env(overrides=None):
-    """A None override removes an inherited variable, including Windows case aliases."""
-    values = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"}
-    overrides = overrides or {}
-    values.update({key: value for key, value in overrides.items() if value is not None})
-    # Apply removals last so a later Windows case alias cannot restore the key.
-    for key, value in overrides.items():
-        if value is None:
-            for inherited in list(values):
-                if inherited == key or (os.name == "nt" and inherited.casefold() == key.casefold()):
-                    del values[inherited]
-    return values
+
+
+def _timed_windows(argv, cwd, env, timeout, input_text):
+    """Read owned pipes without reader threads; success still requires both EOFs.
+
+    This settles only the original process and capture handles, never arbitrary
+    descendants. Supplied input uses a nonblocking pipe; None inherits stdin.
+    """
+    import _winapi
+
+    pending = None if input_text is None else memoryview(input_text.encode("utf-8"))
+    p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=None if pending is None else subprocess.PIPE,
+                         stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, bufsize=0)
+    pipes, output = (p.stdout, p.stderr), (bytearray(), bytearray())
+    try:
+        for pipe in pipes:
+            os.set_blocking(pipe.fileno(), False)
+        if p.stdin is not None:
+            os.set_blocking(p.stdin.fileno(), False)
+        active = {0, 1}
+        deadline = time.monotonic() + timeout
+        while True:
+            if time.monotonic() >= deadline:
+                return R(None, "", f"timed out after {timeout}s", argv)
+            progressed = False
+            if p.stdin is not None and not p.stdin.closed:
+                before = len(pending)
+                pending = feed(p.stdin, pending)
+                progressed = p.stdin.closed or len(pending) < before
+            if (p.poll() is not None and not active and (p.stdin is None or p.stdin.closed)
+                    and _winapi.WaitForSingleObject(int(p._handle), 0) == _winapi.WAIT_OBJECT_0):
+                return R(p.returncode, *(data.decode("utf-8", "replace") for data in output), argv)
+            for index in tuple(active):
+                try:
+                    data = os.read(pipes[index].fileno(), 65536)
+                except BlockingIOError:
+                    continue  # An open writer with no bytes is not EOF.
+                except OSError as ex:
+                    if getattr(ex, "winerror", None) == 232:
+                        continue  # ERROR_NO_DATA is also not EOF.
+                    raise
+                progressed = True
+                if data:
+                    output[index].extend(data)
+                else:
+                    active.remove(index)
+            if not progressed:
+                time.sleep(.01)
+    except OSError as ex:
+        raise DriverError(f"timed command capture unavailable: {ex}") from ex
+    finally:
+        # Unbuffered reads have no pending reader thread or buffered lock. Closing
+        # our read handles never waits for a descendant's inherited writer EOF.
+        if p.stdin is not None:
+            p.stdin.close()
+        for pipe in pipes:
+            pipe.close()
+        try:
+            if p.poll() is None:
+                p.kill()
+        finally:
+            try:
+                status = _winapi.WaitForSingleObject(int(p._handle), 5000)
+            except OSError as ex:
+                raise DriverError(f"timed command process exit unavailable: {ex}") from ex
+            if status != _winapi.WAIT_OBJECT_0:
+                raise DriverError("timed command original process did not settle within 5000ms")
+            p.wait(timeout=0)
 
 
 def run(argv, cwd=None, input_text=None, env=None, timeout=None):
     """Run a command; output is decoded as UTF-8, never the locale's code page."""
     env = child_env(env)
     try:
+        if os.name == "nt" and timeout is not None:
+            return _timed_windows(argv, cwd, env, timeout, input_text)
         p = subprocess.run(argv, cwd=cwd, input=None if input_text is None else input_text.encode("utf-8"),
                            capture_output=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -130,7 +182,12 @@ class Env:
         self._pr_checks = None
 
     def close(self):
-        shutil.rmtree(self.scratch, ignore_errors=True)
+        from . import worktrees
+        try:
+            worktrees.close(self)
+        finally:
+            if not getattr(self, "preserve_scratch", False):
+                shutil.rmtree(self.scratch, ignore_errors=True)
 
     def lookup(self, dotted, default=None):
         try:

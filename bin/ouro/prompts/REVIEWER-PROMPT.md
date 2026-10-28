@@ -59,8 +59,8 @@ hunk on its own. Where a commit must leave a file untouched,
 not use a range diff for this, which hides a file one commit changed and another changed back.
 
 The claims come first, before the goals below. Verify each against the artifact it describes
-and mark it true, false or unverifiable: {the changelog entry the range adds, or
-"none"}; every sentence the range adds or changes in a docstring, a comment, a help text or a
+and mark it true, false or unverifiable: {the release-note entries the range adds, in the changed
+paths `repo.release_notes` matches, or "none"}; every sentence the range adds or changes in a docstring, a comment, a help text or a
 skill ({the list, or the grep that lists them}); and the session's own record — the squash
 subject and the PR body — {where it exists, the text; else "not yet written: it reaches you with
 the verification message"}. A false claim is a finding at the severity of the behaviour it

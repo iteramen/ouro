@@ -58,6 +58,7 @@
     paths S3 resolves. Empty disables it.
 .PARAMETER IndexPath
     The doc index S4 checks. With -IndexedTrees, arms S4a/S4b.
+    Entries name exact repo-relative paths; backslashes normalize to forward slashes.
 .PARAMETER IndexedTrees
     Path prefixes whose docs must appear in the index.
 .PARAMETER IndexExemptions
@@ -737,7 +738,7 @@ function Get-IndexFindings {
         if ($line -match '^##\s+Excluded from index') { $inExcluded = $true; continue }
         if ($inExcluded) { continue }
         if ($line -match '^- `([^`]+\.(?:md|html))`') {
-            $entries += [PSCustomObject]@{ Path = $Matches[1]; Line = $lineNo }
+            $entries += [PSCustomObject]@{ Path = $Matches[1].Replace('\', '/'); Line = $lineNo }
         }
     }
 
@@ -749,17 +750,18 @@ function Get-IndexFindings {
 
     # S4a -- an index entry that resolves to nothing.
     foreach ($e in $entries) {
-        $hit = $docs | Where-Object { $_.EndsWith($e.Path) } | Select-Object -First 1
+        $hit = $docs | Where-Object { $_ -ceq $e.Path } | Select-Object -First 1
         if (-not $hit) {
+            $reason = if ($e.Path.Contains('/')) { 'index entry resolves to no file' } else { 'index entry is not a repo-relative path to an in-scope file' }
             New-Finding -Signal 'S4a' -File $indexRel -Line $e.Line `
-                -Target $e.Path -Reason 'index entry resolves to no file'
+                -Target $e.Path -Reason $reason
         }
     }
 
     # S4b -- a doc beside code that no index entry covers.
     foreach ($doc in $docs) {
         if (-not (Test-IndexRequired -RelPath $doc -Trees $Trees)) { continue }
-        $covered = $entries | Where-Object { $doc.EndsWith($_.Path) } | Select-Object -First 1
+        $covered = $entries | Where-Object { $doc -ceq $_.Path } | Select-Object -First 1
         if (-not $covered) {
             New-Finding -Signal 'S4b' -File $doc -Line 0 `
                 -Target $indexRel -Reason 'doc beside code is not in the index'

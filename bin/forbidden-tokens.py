@@ -649,6 +649,21 @@ def publishes_unchecked(cwd, command, deadline=None):
     return False, f"{name} is {vis}, not private"
 
 
+def shell_path(path, tool):
+    """A path as the shell resolves it: `~` expanded, and on Windows a Git Bash drive path (`/c/...`)."""
+    path = os.path.expanduser(path)
+    drive = re.fullmatch(r"/([A-Za-z])(/.*)?", path) if os.name == "nt" and tool == "Bash" else None
+    return f"{drive.group(1)}:{drive.group(2) or '/'}" if drive else path
+
+
+def body_paths(value, command, cwd, tool):
+    """Where a body-file argument may point: itself when absolute, else under each directory the call lands in."""
+    value = shell_path(value, tool)
+    if os.path.isabs(value):
+        return [value]
+    return [os.path.join(shell_path(d, tool), value) for d in dict.fromkeys([cwd, *landing_dirs(command, cwd)])]
+
+
 def hook_check(payload):
     """Reasons to block the event, or an empty list. Raises Block for a cause that is not a hit."""
     if not isinstance(payload, dict) or not isinstance(payload.get("tool_name"), str):
@@ -690,18 +705,25 @@ def hook_check(payload):
             if not lone_heredoc(command):
                 raise Block(f"the body of {flag} comes from input the hook cannot see")
             continue
-        try:
-            with open(os.path.join(payload.get("cwd") or os.getcwd(), value), "rb") as f:
-                text = f.read().decode("utf-8-sig")
-        except (OSError, UnicodeDecodeError) as e:
-            raise Block(f"the file {flag} names cannot be read ({type(e).__name__}); the hook reads it before the command runs, so a "
+        texts = []
+        for path in body_paths(value, command, cwd, payload["tool_name"]):
+            try:
+                with open(path, "rb") as f:
+                    texts.append(f.read().decode("utf-8-sig"))
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeDecodeError) as e:
+                raise Block(f"the file {flag} names cannot be read ({type(e).__name__})")
+        if not texts:
+            raise Block(f"the file {flag} names cannot be read (FileNotFoundError); the hook reads it before the command runs, so a "
                         "file the same command writes, or a path given through a shell variable, is not there yet: write the file "
                         "in a command of its own, then post it by its absolute literal path to a UTF-8 file")
-        found = hits(text, entries)
-        for lineno, n in found:
-            reasons.append(f"the file {flag} names, line {lineno}: entry {n}")
-        for n in wrapped(text, entries, found):
-            reasons.append(f"the file {flag} names: entry {n}, across a line break")
+        for text in texts:
+            found = hits(text, entries)
+            for lineno, n in found:
+                reasons.append(f"the file {flag} names, line {lineno}: entry {n}")
+            for n in wrapped(text, entries, found):
+                reasons.append(f"the file {flag} names: entry {n}, across a line break")
     if reasons and all(check_off(d, command, protects, deadline) for d in [cwd] + target_dirs(command, cwd)):
         return []
     return reasons
@@ -1033,6 +1055,13 @@ def selftest():
             blocked(f"gh issue comment 1 --body-file {f}", "cannot be read")
         blocked("gh issue comment 1 --body-file missing.md", "write the file in a command of its own", cwd=os.path.join(work, "dir"))
         blocked("gh issue comment 1 --body-file hit.md", "cannot be read", cwd=os.path.join(work, "dir"))
+        # resolved the way the shell does: a cd before the call, ~, and on Windows a Git Bash drive path
+        blocked(f'cd "{work}" && git commit -F hit.md', "the file -F names, line 2: entry 1", cwd=os.path.join(work, "dir"))
+        blocked("git commit -F ~/hit.md", "the file -F names, line 2: entry 1", env={**hl, "HOME": work, "USERPROFILE": work})
+        if os.name == "nt":
+            posix = os.path.join(work, "hit.md").replace("\\", "/")
+            blocked(f"git commit -F /{posix[0].lower()}{posix[2:]}", "the file -F names, line 2: entry 1")
+            blocked(f"git commit -F /{posix[0].lower()}{posix[2:]}", "cannot be read", tool="PowerShell")
         # flag text outside a publishing command is not acted on
         allowed("cat --body-file missing.md")
         allowed("echo --file missing.md")

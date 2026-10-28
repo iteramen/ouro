@@ -27,6 +27,8 @@ from file_only_tests import FileOnlyReadinessTests
 from validation_tests import ValidationTests
 from execution_tests import ExecutionTests, FingerprintTests
 from execution_lifecycle_tests import GateExecutionTests
+from timed_command_tests import TimedCommandTests
+from worktree_tests import WorktreeCleanupTests
 from owned_children import reap_fixture_children
 
 
@@ -40,6 +42,33 @@ def sample(spec):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_shared_core_aliases_preserve_error_result_environment_and_admission(self):
+        from ouro import validation
+        for name in ("DriverError", "R", "child_env"):
+            self.assertIs(getattr(sh, name), getattr(process, name))
+        for name in ("check_platform", "process_table", "descendants", "terminate_owned"):
+            self.assertIs(getattr(validation, name), getattr(process, name))
+
+    def test_children_run_without_the_shared_multicore_jit_profile(self):
+        r = sh.run([sys.executable, "-c", "import os; print(os.environ.get('DOTNET_MultiCoreJitMinNumCpus'))"])
+        self.assertEqual(r.out.strip(), "65535")
+
+    def test_flat_shared_core_import_needs_no_ouro_package_or_caller_admission(self):
+        target = self.root / "ouro-process.py"
+        target.write_bytes(pathlib.Path(process.__file__).read_bytes())
+        # Isolated Python cannot import this repository's package. Harness calls
+        # still work; only explicit callers request the unchanged admission guard.
+        program = ("import importlib.util,sys\n"
+                   "s=importlib.util.spec_from_file_location('flat_owned_core',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
+                   "assert 'ouro' not in sys.modules\n"
+                   "def refused(): raise AssertionError('harness must not request caller admission')\n"
+                   "m.check_platform=refused\n"
+                   "r=m.run([sys.executable,'-c',\"print('flat shared core')\"],timeout=10)\n"
+                   "assert isinstance(r,m.R) and r.code==0 and r.out.strip()=='flat shared core'\n")
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", program, str(target)],
+                                capture_output=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="ouro-runtime-test-")
         self.addCleanup(self.tmp.cleanup)
@@ -117,7 +146,8 @@ class RuntimeTests(unittest.TestCase):
         b.call("run", {"command": "git mv source.txt moved.txt"})
         self.assertEqual((self.root / "moved.txt").read_text(), "source")
         self.assertFalse((self.root / "source.txt").exists())
-        with patch.object(sh, "run", return_value=sh.R(1, "", "guard crashed", [])), patch.object(process, "run") as launch:
+        crashed = [("guard-delete", lambda *a: (_ for _ in ()).throw(RuntimeError("guard crashed")))]
+        with patch("ouro.runtime.tools.guard_checks", return_value=crashed), patch.object(process, "run") as launch:
             with self.assertRaisesRegex(sh.DriverError, "guard-delete failed"):
                 b.call("run", {"command": "python3 check.py"})
             launch.assert_not_called()
@@ -259,7 +289,8 @@ class RuntimeTests(unittest.TestCase):
             {"id": 2, "method": "tools/call", "params": {"name": "list", "arguments": {}}},
         ]
         output = io.StringIO()
-        with patch.object(sh, "run", return_value=sh.R(1, "", "guard crashed", [])), patch.object(process, "run") as launch, patch.object(sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)))), patch.object(sys, "stdout", output):
+        crashed = [("guard-delete", lambda *a: (_ for _ in ()).throw(RuntimeError("guard crashed")))]
+        with patch.object(bridge_tools, "guard_checks", return_value=crashed), patch.object(process, "run") as launch, patch.object(sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)))), patch.object(sys, "stdout", output):
             bridge_tools.serve(policy)
         launch.assert_not_called()
         calls = [json.loads(line) for line in evidence.read_text().splitlines()]
@@ -501,8 +532,8 @@ class RuntimeTests(unittest.TestCase):
                     diagnostics.transport(row, output, code)
                     if broken_observer:
                         raise ValueError("secondary observer failure")
-                with patch.object(validation, "process_table", side_effect=snapshot), \
-                        patch.object(validation, "terminate_owned", side_effect=cleanup), \
+                with patch.object(process, "process_table", side_effect=snapshot), \
+                        patch.object(process, "terminate_owned", side_effect=cleanup), \
                         self.assertRaisesRegex(sh.DriverError, "cleanup proof unavailable"):
                     with diagnostics.attempt("BUILD", "codex", "fixture") as row:
                         process.run([sys.executable, "-c", script], timeout=5, observe=observe)
@@ -556,6 +587,7 @@ class RuntimeTests(unittest.TestCase):
             launch.assert_not_called()
 
 
+    @patch.object(codex, "WINDOWS", False)
     def test_network_refusal_precedes_model_probe(self):
         result = lambda out: sh.R(0, out, "", [])
         good = [result("codex 0.164.0"), result("Logged in"),
@@ -571,6 +603,7 @@ class RuntimeTests(unittest.TestCase):
             model.assert_not_called()
 
 
+    @patch.object(codex, "WINDOWS", False)
     def test_codex_preflight_checks_auth_models_and_sandbox(self):
 
         def result(out='', code=0):
@@ -592,6 +625,7 @@ class RuntimeTests(unittest.TestCase):
                 codex.preflight(developer.Settings('codex', {'builder': 'unavailable'}))
             launch.assert_not_called()
 
+    @patch.object(codex, "WINDOWS", False)
     def test_unsupported_sandbox_refuses_before_model_probe(self):
         result = lambda out, code=0: sh.R(code, out, 'unsupported sandbox interface', [])
         good = [result('codex 0.163.0'), result('Logged in'), result('--ignore-user-config --ignore-rules --output-schema --output-last-message --ephemeral'), result('{"models":[]}')]

@@ -1098,6 +1098,10 @@ try {
     Set-Content -LiteralPath (Join-Path $IndexRepo 'src/code.cs') -Value '// code' -Encoding utf8
     Set-Content -LiteralPath (Join-Path $IndexRepo 'src/notes.html') -Value '<p>beside code, unindexed</p>' -Encoding utf8
     Set-Content -LiteralPath (Join-Path $IndexRepo 'src/style.css') -Value 'p {}' -Encoding utf8
+    foreach ($rel in @('src/alpha/README.md', 'src/beta/README.md', 'src/Core/Ide.md')) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent (Join-Path $IndexRepo $rel)) | Out-Null
+        Set-Content -LiteralPath (Join-Path $IndexRepo $rel) -Value '# Indexed doc' -Encoding utf8
+    }
     Push-Location -LiteralPath $IndexRepo
     git init -q . 2>$null
     git add -A 2>$null; git -c user.email=t@t -c user.name=t commit -q -m fixture 2>$null
@@ -1126,6 +1130,33 @@ try {
     finally { $ScopeExclusions = $savedExcl }
     Assert-Equal $false ((@($empty) -join ' ') -match '^threw: ') 'an index read against an empty scope runs to the end'
     Assert-Equal 3 @($empty | Where-Object { $_ -isnot [string] -and $_.Signal -eq 'S4a' }).Count 'and every entry resolves to nothing there'
+
+    Set-Content -LiteralPath (Join-Path $IndexRepo 'docs/index.md') -Value "- ${bt}README.md${bt}" -Encoding utf8
+    $short = @(Get-IndexFindings -Root $IndexRepo -Index 'docs/index.md' -Trees @('src/'))
+    Assert-Equal 1 @($short | Where-Object Signal -eq 'S4a').Count 'a basename with no exact root doc is an invalid index entry'
+    Assert-Match 'not a repo-relative path' ($short | Where-Object Signal -eq 'S4a' | ForEach-Object Reason) 'a short index entry explains the required spelling'
+    Assert-Equal 2 @($short | Where-Object { $_.Signal -eq 'S4b' -and $_.File -like '*/README.md' }).Count 'a bare README entry covers neither nested README'
+
+    Set-Content -LiteralPath (Join-Path $IndexRepo 'docs/index.md') -Encoding utf8 -Value @(
+        "- ${bt}src/alpha/README.md${bt}", "- ${bt}de.md${bt}")
+    $exact = @(Get-IndexFindings -Root $IndexRepo -Index 'docs/index.md' -Trees @('src/'))
+    Assert-Equal 'de.md' ($exact | Where-Object Signal -eq 'S4a' | ForEach-Object Target) 'a filename suffix cannot resolve to a differently named doc'
+    $missing = @($exact | Where-Object Signal -eq 'S4b' | ForEach-Object File)
+    Assert-Equal $false ($missing -contains 'src/alpha/README.md') 'an exact entry covers its own README'
+    Assert-Equal $true ($missing -contains 'src/beta/README.md') 'an exact entry does not cover the other README'
+    Assert-Equal $true ($missing -contains 'src/Core/Ide.md') 'the suffix collision leaves the actual doc unindexed'
+
+    Set-Content -LiteralPath (Join-Path $IndexRepo 'docs/index.md') -Encoding utf8 -Value @(
+        "- ${bt}src/alpha/README.md${bt}", "- ${bt}src\beta\README.md${bt}", "- ${bt}src/Core/Ide.md${bt}")
+    Assert-Equal 0 @(Get-IndexFindings -Root $IndexRepo -Index 'docs/index.md' -Trees @('src/')).Count 'full repo-relative entries normalize separators and cover exactly their docs'
+
+    Set-Content -LiteralPath (Join-Path $IndexRepo 'README.md') -Value '# Root doc' -Encoding utf8
+    git -C $IndexRepo add README.md
+    $script:TrackedIndexCache.Clear()
+    Set-Content -LiteralPath (Join-Path $IndexRepo 'docs/index.md') -Value "- ${bt}README.md${bt}" -Encoding utf8
+    $rootEntry = @(Get-IndexFindings -Root $IndexRepo -Index 'docs/index.md' -Trees @('src/'))
+    Assert-Equal 0 @($rootEntry | Where-Object Signal -eq 'S4a').Count 'a real root README is a legitimate exact repo-relative entry'
+    Assert-Equal 2 @($rootEntry | Where-Object { $_.Signal -eq 'S4b' -and $_.File -like '*/README.md' }).Count 'a valid root README entry still covers no nested README'
 }
 finally {
     $HtmlGlobs = $savedGlobs

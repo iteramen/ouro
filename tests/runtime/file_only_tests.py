@@ -6,9 +6,9 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-from ouro import developer, node, run, sh, triage
+from ouro import developer, node, run, sh
 from ouro.runtime import Capabilities, READ, PROBE, builder, codex, diagnostics, process
 from ouro.runtime.tools import Bridge
 
@@ -72,6 +72,23 @@ class FileOnlyReadinessTests(unittest.TestCase):
             with self.assertRaisesRegex(sh.DriverError, "file-only capability contract unavailable"):
                 codex.preflight(self.cfg, capabilities=READ)
 
+    def test_windows_nonread_preflight_refuses_before_cli_or_probe_work(self):
+        for caps in (None, PROBE, builder([]), Capabilities(edit=True),
+                     Capabilities(commands=("python3 check.py",)), Capabilities(commands=("git status *",))):
+            with self.subTest(caps=caps), patch.object(codex, "WINDOWS", True), \
+                    patch.object(sh, "argv_for", side_effect=sh.DriverError("unexpected CLI resolution")) as resolve, patch.object(sh, "run") as metadata, \
+                    patch.object(process, "run") as command, patch.object(codex, "network_readiness") as network, \
+                    patch.object(codex, "git_readiness") as git, patch.object(codex, "execute") as model, \
+                    patch.object(codex.tempfile, "TemporaryDirectory") as workspace:
+                with self.assertRaisesRegex(sh.DriverError, "native Windows Codex supports file-only triage") as caught:
+                    codex.preflight(self.cfg, capabilities=caps)
+                for advice in ("--developer-config", "OURO_DEVELOPER_CONFIG", "Claude", "repository CI validation",
+                               "native Linux Codex", "explicit caller-validation handoffs"):
+                    self.assertIn(advice, str(caught.exception))
+                for unused in (resolve, metadata, command, network, git, model, workspace):
+                    unused.assert_not_called()
+
+    @patch.object(codex, "WINDOWS", False)
     def test_default_and_every_nonread_contract_keep_network_and_git_checks(self):
         for caps in (None, PROBE, builder([]), Capabilities(edit=True), Capabilities(commands=("python3 check.py",))):
             with self.subTest(caps=caps), patch.object(sh, "argv_for", side_effect=lambda *args: list(args)), \
@@ -95,7 +112,7 @@ class FileOnlyReadinessTests(unittest.TestCase):
 
     def test_capability_types_refuse_before_preflight_or_dispatch(self):
         for value in ([], {}, "READ", False):
-            with self.subTest(value=value), patch.object(sh, "run") as metadata, patch.object(process, "run") as command:
+            with self.subTest(value=value), patch.object(codex, "WINDOWS", True), patch.object(sh, "run") as metadata, patch.object(process, "run") as command:
                 with self.assertRaisesRegex(sh.DriverError, "capability contract"):
                     node.preflight(self.cfg, capabilities=value)
                 with self.assertRaisesRegex(sh.DriverError, "capability contract"):
@@ -130,7 +147,7 @@ class FileOnlyReadinessTests(unittest.TestCase):
             git.assert_not_called()
 
     def test_windows_read_success_never_admits_later_commands_probe_or_edits(self):
-        with patch.object(sh, "argv_for", side_effect=lambda *args: list(args)), \
+        with patch.object(codex, "WINDOWS", True), patch.object(sh, "argv_for", side_effect=lambda *args: list(args)), \
                 patch.object(sh, "run", side_effect=self.metadata()), patch.object(codex, "execute", side_effect=self.model_read), \
                 patch.object(process, "run", side_effect=AssertionError("unexpected command execution")):
             codex.preflight(self.cfg, capabilities=READ)
@@ -151,7 +168,7 @@ class FileOnlyReadinessTests(unittest.TestCase):
             git.assert_called_once()
             command.assert_not_called()
 
-    def test_shared_preflight_propagates_scope_and_triage_alone_selects_read(self):
+    def test_shared_preflight_propagates_scope_and_delivery_keeps_full_readiness(self):
         with patch.dict(os.environ, {"OURO_NODE_STUB": ""}), patch.object(codex, "preflight", return_value=[]) as preflight:
             node.preflight(self.cfg, capabilities=READ)
             preflight.assert_called_once_with(self.cfg, capabilities=READ)
@@ -162,12 +179,7 @@ class FileOnlyReadinessTests(unittest.TestCase):
             cfg = developer.Settings("claude")
             node.preflight(cfg, capabilities=READ)
             preflight.assert_called_once_with(cfg)
-        env = SimpleNamespace(runtime=self.cfg, gh_json=Mock(side_effect=sh.DriverError("after preflight")))
         with patch.object(node, "preflight") as preflight:
-            with self.assertRaisesRegex(sh.DriverError, "after preflight"):
-                triage.triage(env, 1, True)
-            preflight.assert_called_once_with(self.cfg, capabilities=READ)
-            preflight.reset_mock()
             runner = object.__new__(run.Run)
             runner.env = SimpleNamespace(runtime=self.cfg, dry=False)
             runner.preflight()

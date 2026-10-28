@@ -74,7 +74,7 @@ def exercise(h):
         'issue comment 1*': {'Exit': 1, 'Out': 'fixture comment service unavailable'}})
     case.node('TRIAGE', answer)
     code, out, err = case.ouro('triage', '1')
-    h.check('a later remote comment failure reports the error and never adds agent-ready',
+    h.check('a later remote comment failure reports the error after applying labels without publishing a verdict',
             code == 1 and 'fixture comment service unavailable' in err
-            and not any('--add-label agent-ready' in sig for sig in case.sigs())
-            and 'agent-ready' not in h.labels_of(case) and 'verdict NEEDS-RULING' not in out)
+            and 'comment on #1 failed' in err and 'agent-ready' in h.labels_of(case)
+            and not case.issue_state()['comments'] and 'verdict NEEDS-RULING' not in out)

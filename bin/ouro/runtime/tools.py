@@ -1,5 +1,7 @@
 """Private stdio MCP bridge. Only declared file operations and sandboxed commands exist."""
 import fnmatch
+import functools
+import importlib.util
 import json
 import os
 import re
@@ -66,6 +68,55 @@ def git_readiness(root, env=None):
             raise sh.DriverError(f"Git capability readiness: {label}: query failed "
                                  f"(exit {result.code}): {result.err[-2000:]}")
 
+
+
+def caller_source_writable(root, plugin_root=None):
+    """Why installed caller sources overlap the worker write scope, or None."""
+    try:
+        bridge = Bridge({"root": str(root), "edit": True, "commands": [], "probe": False})
+        plugin = Path(plugin_root or sh.PLUGIN)
+        pending = [plugin / name for name in ("bin", "hooks", "agents", "skills")]
+        seen = set()
+        for visited in range(10000):
+            if not pending:
+                return None
+            source = pending.pop().resolve()
+            if bridge.root.is_relative_to(source):
+                return "the main BUILD scope overlaps installed runtime or instruction sources"
+            if source.is_relative_to(bridge.root):
+                try:
+                    bridge.path(str(source), write=True)  # Physical targets include externally named aliases.
+                except ValueError:
+                    pass  # A protected directory may still contain writable-target aliases.
+                else:
+                    return "the main BUILD scope can edit installed runtime or instruction sources"
+            if source.is_dir() and source not in seen:
+                seen.add(source)
+                for child in source.iterdir():
+                    if visited + len(pending) >= 9999:
+                        return "separation from installed runtime or instruction sources is unproved"
+                    pending.append(child)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        pass
+    return "separation from installed runtime or instruction sources is unproved"
+
+
+@functools.cache
+def guard_checks():
+    """The command guards' checks, loaded once from the installed plugin's hooks."""
+    checks = []
+    for guard in ("guard-delete", "guard-stash-kill", "guard-discard", "guard-commit"):
+        path = sh.PLUGIN / "hooks" / (guard + ".py")
+        if not path.is_file():
+            raise sh.DriverError(f"required guard {guard} is missing; reinstall ouro")
+        spec = importlib.util.spec_from_file_location("ouro_" + guard.replace("-", "_"), path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as ex:
+            raise sh.DriverError(f"{guard} failed to load: {type(ex).__name__}: {ex}") from ex
+        checks.append((guard, module.check))
+    return checks
 
 
 class Bridge:
@@ -195,16 +246,13 @@ class Bridge:
             raise ValueError("git exploration cannot write output files or execute diff helpers")
         if git_query:
             argv = git_read_argv(argv)
-        for guard in ("guard-delete", "guard-stash-kill", "guard-discard", "guard-commit"):
-            path = sh.PLUGIN / "hooks" / (guard + ".py")
-            if not path.is_file():
-                raise sh.DriverError(f"required guard {guard} is missing; reinstall ouro")
-            result = sh.run([sys.executable, str(path)],
-                            input_text=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(self.root)}), timeout=10)
-            if result.code not in (0, 2):
-                raise sh.DriverError(f"{guard} failed (exit {result.code}): {result.err}")
-            if result.code != 0:
-                raise ValueError(result.err or f"{guard} unavailable")
+        for guard, check in guard_checks():
+            try:
+                reason = check("Bash", {"command": command}, str(self.root))
+            except Exception as ex:  # a guard's own defect is infrastructure, never a refusal the model answers
+                raise sh.DriverError(f"{guard} failed: {type(ex).__name__}: {ex}") from ex
+            if reason:
+                raise ValueError(reason)
         def inventory(*args):
             result = process.run(sandbox_argv(self.root, sh.argv_for(
                 "git", "-c", "core.fsmonitor=false", *args)), cwd=self.root, timeout=30, env=git_environment())

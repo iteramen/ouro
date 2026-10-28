@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import sh, validation_lock
 from .coordination import worker_env
+from .runtime.process import check_platform, process_table, descendants, terminate_owned
 
 TIMEOUT = 3600
 OUTPUT_LIMIT = 1024 * 1024
@@ -134,94 +135,12 @@ def attempts(run):
     return results
 
 
-def check_platform():
-    """Caller validation needs a lifecycle boundary, independent of command environment."""
-    if os.name == "nt":
-        raise sh.DriverError("validation process lifecycle accounting unavailable on Windows")
-    if os.name != "posix":
-        raise sh.DriverError("validation process lifecycle accounting requires native Linux")
-    try:
-        kernel = os.uname()
-        if kernel.sysname != "Linux":
-            raise sh.DriverError("validation process lifecycle accounting requires native Linux")
-        identity = kernel.release + " " + kernel.version
-        # Kernel-owned facts, not WSL_* environment variables or the first executable:
-        # a native launcher can activate the Windows broker at any depth.
-        for name in ("osrelease", "version"):
-            identity += " " + (Path("/proc/sys/kernel") / name).read_text(encoding="utf-8")
-        wsl = bool(re.search(r"microsoft|wsl", identity, re.IGNORECASE))
-        for marker in ("/proc/sys/fs/binfmt_misc/WSLInterop", "/run/WSL"):
-            try:
-                Path(marker).stat()
-                wsl = True
-            except FileNotFoundError:
-                pass
-    except (OSError, UnicodeError) as ex:
-        raise sh.DriverError(
-            "validation platform visibility unavailable; restore kernel/proc visibility before retrying") from ex
-    if wsl:
-        raise sh.DriverError(
-            "validation lifecycle accounting unavailable on WSL: Windows interoperability can escape "
-            "the POSIX process table, including through native launchers; run caller validation on "
-            "a native Linux host. No proven child-only interop boundary is supported; unshare availability "
-            "or WSL environment settings are not containment proof")
 
 
-def process_table(env=None):
-    """Read ownership edges and birth identities; never select by name/group."""
-    try:
-        result = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,lstart="], capture_output=True,
-            encoding="utf-8", errors="replace", timeout=5, check=True, env=env)
-        table = {}
-        for line in result.stdout.splitlines():
-            pid, parent, born = line.strip().split(None, 2)
-            table[int(pid)] = (int(parent), born)
-        if os.getpid() not in table:
-            raise ValueError("process visibility unavailable")
-        return table
-    except (OSError, subprocess.SubprocessError, ValueError) as ex:
-        raise sh.DriverError("validation process visibility unavailable") from ex
 
 
-def descendants(table, owned):
-    # Remember escaped sessions while their parent edge is still visible. A PID
-    # alone is never authority to signal a process after PID reuse.
-    changed = True
-    while changed:
-        changed = False
-        for pid, (parent, born) in table.items():
-            if (pid not in owned and parent in owned and parent in table
-                    and table[parent][1] == owned[parent]):
-                owned[pid] = born
-                changed = True
 
 
-def terminate_owned(p, owned, env=None):
-    # Freeze owned parents before collecting another generation. Children may
-    # create sessions, so process-group signals cannot implement tree cleanup.
-    stopped = set()
-    while True:
-        table = process_table(env)
-        descendants(table, owned)
-        live = {pid for pid, born in owned.items()
-                if pid in table and table[pid][1] == born}
-        fresh = live - stopped
-        if not fresh:
-            break
-        for pid in fresh:
-            try:
-                os.kill(pid, signal.SIGSTOP)
-            except ProcessLookupError:
-                pass
-        stopped.update(fresh)
-    for pid in reversed(list(owned)):
-        if pid in live:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    p.wait()
 
 
 def execute(cmd, cwd, log, settings=None):

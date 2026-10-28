@@ -21,7 +21,7 @@ class GateExecutionTests(unittest.TestCase):
         run = Run.__new__(Run)
         run.body = ""
         run.spec_amendments = lambda: []
-        run.env = types.SimpleNamespace(pr_checks=lambda: True)
+        run.env = types.SimpleNamespace(pr_checks=lambda: True, lookup=lambda key: "local" if key == "ship.validation" else None)
         run.area_gates = lambda tree=True: [added, added] if tree else [old]
         for cached in ([old], [], None):
             with self.subTest(cached=cached), patch.object(execution, "grants", return_value=[old]) as history:
@@ -50,7 +50,8 @@ class GateExecutionTests(unittest.TestCase):
         command = sh.cmdline([sys.executable, "gate.py"])
         run = types.SimpleNamespace(worktree=root, wt_git=git,
             head=lambda: git("rev-parse", "HEAD").out.strip(),
-            env=types.SimpleNamespace(default="main", validate=caller, runtime=developer.Settings()),
+            env=types.SimpleNamespace(default="main", validate=caller, runtime=developer.Settings(),
+                                      lookup=lambda key: "local" if key == "ship.validation" else None),
             required_execution=lambda: [command], validation_commands=lambda: [command])
         return run, command
 

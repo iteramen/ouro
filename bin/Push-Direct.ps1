@@ -1,27 +1,23 @@
 <#
 .SYNOPSIS
-    The direct lane's push: the commits on the default branch go to origin, or to a branch a pull
-    request carries, only when every file they change is one the binding's [ship].direct names.
+    Verify the direct publication floor, then push the pinned commits through branch protection.
 .DESCRIPTION
-    Run from the repo root on the default branch, after the commits are made. The repository, the
-    default branch and the globs (`[ship].direct`) come from the binding (.claude/ouro.toml, read
-    through ouro-binding.py beside this script). Nothing is forced, and nothing is ever bypassed.
+    Run from a clean default-branch checkout after committing. The script fetches origin and
+    asks ouro-direct.py beside it for a plan from that base's binding. Defaults:20 added-plus-
+    deleted lines across three files over the entire unpublished range, repository-approved
+    paths/types, a nonempty applicable cheap-gate set, and meaningful declared checks for code.
+    ship.direct_max_lines and ship.direct_max_files override the size limits.
+    Protected files and uncertain Git/command inputs use a PR. Globs remain case-sensitive
+    fnmatch patterns on forward-slash paths; * crosses /.
 
-    The range is the commits origin's default branch (fetched first) lacks. Before any push, in this
-    order, each a `STOP: <why>` line and exit 1:
-      - the checkout is not on the default branch, or the working tree is not clean;
-      - `[ship].direct` is empty or absent: the lane is off;
-      - the range holds no commit that changes a file;
-      - any path any commit in the range touches (the union over the commits, so a file one
-        commit adds and a later one deletes still counts) matches no glob. The stop names each such
-        path and says the run is express or tighter. The matcher is `ouro-binding.py direct`, the
-        one fnmatch.fnmatchcase reading of the globs that `check` uses, on repository-relative
-        paths with forward slashes, so `*` also crosses `/`.
+    Every planned run command must actually pass locally. CI alternatives and notices do not
+    replace it. The script rechecks final inputs, remote base, branch and protection before
+    publication. Fixes and reverts have the same floor. Nothing is forced.
 
-    Then the default branch's protection is read: the rules endpoint, then classic protection. A
-    pull request is required by a pull_request rule, a required_status_checks rule, or classic
-    protection of reviews or of status checks. One outcome follows.
-      - No pull-request requirement: `vehicle: push`, a plain `git push origin <default>` (never
+    Invalid checkout, disabled lane, empty range or a failed operation prints STOP and exits1.
+    Ordinary ineligibility, a failed gate or changed inputs prints fallback: express, exit3,
+    without publishing. Protection is read through both rules and classic endpoints:
+      - No pull-request requirement: `vehicle: push`, a plain push of the checked commit (never
         forced; a non-fast-forward stops, exit 1), then origin's tip is read back and must be HEAD.
         Prints `pushed <default> to origin at <sha>`. Exit 0.
       - A pull-request requirement and no required approving review: `vehicle: pr`. The commits are
@@ -29,18 +25,27 @@
         local default branch returns to origin's tip (the commits live on the branch), and the
         checkout returns to it. The pull request is the caller's to open and to merge once its
         required checks are green. Exit 0.
-      - A required approving review (a count above zero, or a code-owner review), or a protection
-        read that failed or answered in a shape not understood (a plan not offering the protection,
-        or a branch having none, is no failure): `fallback: express`, nothing pushed. Exit 3: the
-        run continues as express.
+      - A required approving review, or failed/unrecognized protection: fallback: express,
+        nothing pushed. Exit 3. A plan not offering protection, or an unprotected branch, is
+        not a failed read. The caller retains default-branch CI watching and PR handling.
+    Inline command execution currently requires native Linux; ordinary Windows delivery can
+    continue through the driver's CI-backed PR route. Gate diagnostics are prefixed data,
+    separate from the publisher's vehicle/pushed/direct-checks records.
 .PARAMETER Issue
     The issue the commits fix: names the branch under `vehicle: pr`. Required only there.
+.PARAMETER ExpectedHead
+    If supplied, require this exact commit before planning or executing checks. Both publication
+    vehicles remain pinned to the checked commit; a moved local head is never silently accepted.
+.PARAMETER ExpectedBase
+    If supplied, require the freshly fetched origin tip to match this exact planning base. A
+    changed unpublished range must be replanned before it can authorize publication.
 .EXAMPLE
     pwsh -File <ouro>/bin/Push-Direct.ps1
 .EXAMPLE
     pwsh -File <ouro>/bin/Push-Direct.ps1 -Issue 940
 #>
-param([int]$Issue)
+param([int]$Issue, [ValidatePattern('^(?:[0-9a-f]{40}|[0-9a-f]{64})$')][string]$ExpectedHead,
+    [ValidatePattern('^(?:[0-9a-f]{40}|[0-9a-f]{64})$')][string]$ExpectedBase)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -105,8 +110,33 @@ function Get-DirectProtection([string]$Slug, [string]$Default) {
     @{ Pr = $pr; Approval = $approval; Failed = $failed; Reading = ($parts -join '; ') }
 }
 
+function Get-DirectPlan([string]$Root, [string]$Base, [string]$Head, [switch]$Check) {
+    $helper = Join-Path $PSScriptRoot 'ouro-direct.py'
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'ouro-direct.py is unavailable; no direct publication is permitted' }
+    $arguments = @($helper, '--repo', $Root, '--base', $Base, '--head', $Head)
+    if ($Check) { $arguments += '--check' }
+    $r = Invoke-Native python3 $arguments
+    if ($r.Code -notin 0, 3) { throw "direct policy could not be read (exit $($r.Code)): $($r.Text)" }
+    try { $plan = ($r.Out -join "`n") | ConvertFrom-Json }
+    catch { throw 'direct policy returned no readable plan' }
+    $kind = if ($Check) { 'checked-plan' } else { 'plan' }
+    if ($plan.kind -cne $kind -or $plan.base -cne $Base -or $plan.head -cne $Head -or $plan.execution_proof -ne $false) {
+        throw 'direct policy returned an unexpected plan identity'
+    }
+    if (($r.Code -eq 0) -ne ($plan.eligible -eq $true -and $plan.route -ceq 'direct')) {
+        throw 'direct policy returned inconsistent eligibility'
+    }
+    $plan
+}
+
+function Stop-DirectPolicy([string]$Reason) {
+    $script:Fallback = $true
+    foreach ($line in ($Reason -split '\r\n|\r|\n')) { Write-Output "reason: $line" }
+    Write-Output 'fallback: express'
+}
+
 function Invoke-PushDirect {
-    param([int]$Issue)
+    param([int]$Issue, [string]$ExpectedHead, [string]$ExpectedBase)
     $b = Get-LandBinding
     $default = $b.Default
     $branch = Get-CurrentBranch
@@ -119,39 +149,84 @@ function Invoke-PushDirect {
 
     $fetch = Invoke-Native git @('fetch', '-q', 'origin', $default)
     if ($fetch.Code -ne 0) { throw "cannot fetch origin's ${default}: $($fetch.Text)" }
+    $root = @(Invoke-Read git @('rev-parse', '--show-toplevel'))[0]
+    $base = @(Invoke-Read git @('rev-parse', "origin/$default"))[0]
+    if ($ExpectedBase -and $base -cne $ExpectedBase) { throw 'the requested direct planning base changed before checks - nothing is pushed' }
     $head = @(Invoke-Read git @('rev-parse', 'HEAD'))[0]
-    $log = Invoke-Native git @('-c', 'core.quotepath=false', 'log', '--format=', '--name-only', '--no-renames', '-z', "origin/$default..HEAD")
-    if ($log.Code -ne 0) { throw "cannot read the range origin/$default..HEAD (exit $($log.Code)): $($log.Text)" }
-    $paths = @(($log.Out -join "`n") -split "[`0`n]" | Where-Object { $_ } | Select-Object -Unique)
-    if (-not $paths.Count) { throw "nothing to push: no commit over origin/$default changes a file" }
-    $miss = Invoke-Native python3 (@((Join-Path $PSScriptRoot 'ouro-binding.py'), 'direct') + $paths)
-    if ($miss.Code -eq 1) { throw "the range changes $($miss.Out.Count) path(s) outside [ship].direct: $($miss.Out -join ', ') - nothing is pushed; the run is express or tighter, by contract section 4's classes" }
-    if ($miss.Code -ne 0) { throw "ouro-binding.py direct failed (exit $($miss.Code)): $($miss.Text)" }
+    if ($ExpectedHead -and $head -cne $ExpectedHead) { throw 'the requested direct publication head changed before checks - nothing is pushed' }
+    if ($base -ceq $head) { throw "nothing to push: no commit over origin/$default changes a file" }
+    $plan = Get-DirectPlan $root $base $head
+    if (-not $plan.eligible) { Stop-DirectPolicy ($plan.reasons -join '; '); return }
 
     $prot = Get-DirectProtection $b.Slug $default
     Write-Output "protection: $($prot.Reading)"
     if ($prot.Failed -or $prot.Approval) {
-        $script:Fallback = $true
-        Write-Output "reason: $(if ($prot.Failed) { $prot.Failed } else { "an approving review is required on $default" })"
-        Write-Output 'fallback: express'
+        Stop-DirectPolicy $(if ($prot.Failed) { $prot.Failed } else { "an approving review is required on $default" })
         return
     }
+    if ($prot.Pr -and -not (Get-Command Invoke-PushBranch -CommandType Function).Parameters.ContainsKey('ExpectedHead')) {
+        throw 'Push-Branch.ps1 lacks checked-head support; update the direct helper bundle before retrying'
+    }
+    if (-not @($plan.commands).Count) { throw 'direct policy returned no mandatory commands' }
+    $planned = $plan | ConvertTo-Json -Depth 30 -Compress
+    $checked = Get-DirectPlan $root $base $head -Check
+    foreach ($output in $checked.outputs) {
+        foreach ($line in (($output.out + $output.err) -split '\r\n|\r|\n' | Where-Object { $_ })) {
+            Write-Output "check-output: $line"
+        }
+        $outcome = if ($null -eq $output.exit) { 'unverified' } else { $output.exit }
+        Write-Output ('gate `{0}`: exit {1}' -f $output.cmd, $outcome)
+    }
+    if (-not $checked.eligible) { Stop-DirectPolicy ($checked.reasons -join '; '); return }
+    $executed = @($checked.checks)
+    if (($checked.commands | ConvertTo-Json -Depth 20 -Compress) -cne ($plan.commands | ConvertTo-Json -Depth 20 -Compress) -or
+            $executed.Count -ne @($plan.commands).Count) { throw 'direct execution returned a different mandatory-check plan' }
+    # A passed command is useful only while the same final inputs and trusted policy remain.
+    $after = Get-DirectPlan $root $base $head
+    if (($after | ConvertTo-Json -Depth 30 -Compress) -cne $planned) {
+        Stop-DirectPolicy 'final inputs or direct policy changed during mandatory checks'; return
+    }
+    $remote = Invoke-Native git @('ls-remote', '--heads', 'origin', "refs/heads/$default")
+    if ($remote.Code -ne 0 -or $remote.Out.Count -ne 1 -or ($remote.Out[0] -split '\s+')[0] -cne $base) {
+        Stop-DirectPolicy "origin's $default changed or cannot be verified after mandatory checks"; return
+    }
+    if ((Get-CurrentBranch) -cne $default) { Stop-DirectPolicy 'the checked-out branch changed during mandatory checks'; return }
+    $prot = Get-DirectProtection $b.Slug $default
+    if ($prot.Failed -or $prot.Approval) {
+        Stop-DirectPolicy $(if ($prot.Failed) { $prot.Failed } else { "an approving review is required on $default" }); return
+    }
+    if ((Get-CurrentBranch) -cne $default -or @(Invoke-Read git @('rev-parse', 'HEAD'))[0] -cne $head) {
+        Stop-DirectPolicy 'the checked publication head or branch changed during the protection read'; return
+    }
+    Write-Output ('direct-checks: ' + (ConvertTo-Json -InputObject $executed -Depth 10 -Compress))
     if ($prot.Pr) {
         if (-not $Issue) { throw "$default requires a pull request, and the branch is named for the issue: pass -Issue <N>" }
+        if (-not (Get-Command Invoke-PushBranch -CommandType Function).Parameters.ContainsKey('ExpectedHead')) {
+            throw 'Push-Branch.ps1 lacks checked-head support; update the direct helper bundle before retrying'
+        }
         Write-Output 'vehicle: pr'
         $vehicle = "direct/$Issue"
-        $null = Invoke-Read git @('checkout', '-q', '-B', $vehicle, 'HEAD')
-        try {
-            Invoke-PushBranch
-            # The commits are on origin's branch now: the local default branch goes back to origin's
-            # tip, so the next fetch fast-forwards once the pull request lands.
-            $null = Invoke-Read git @('branch', '-f', $default, "origin/$default")
+        $exists = Invoke-Native git @('show-ref', '--verify', '--quiet', "refs/heads/$vehicle")
+        if ($exists.Code -notin 0, 1) { throw 'cannot establish the local PR branch identity - nothing is pushed' }
+        if ($exists.Code -eq 0) {
+            if (@(Invoke-Read git @('rev-parse', "refs/heads/$vehicle"))[0] -cne $head) {
+                throw 'the local PR branch holds a different commit; preserve it before retrying - nothing is pushed'
+            }
+            $null = Invoke-Read git @('checkout', '--no-overwrite-ignore', '-q', $vehicle)
         }
-        finally { $null = Invoke-Read git @('checkout', '-q', $default) }
+        else { $null = Invoke-Read git @('checkout', '--no-overwrite-ignore', '-q', '-b', $vehicle, $head) }
+        try {
+            Invoke-PushBranch -ExpectedHead $head
+            # The commits are on origin's branch now: the local default branch goes back to origin's
+            # checked base only if it still names H. A concurrent owner's H2 keeps its reference.
+            if (@(Get-Worktrees | Where-Object { $_.Branch -ceq $default }).Count) { throw 'the default branch is now used by another worktree; its reference is retained' }
+            $null = Invoke-Read git @('update-ref', "refs/heads/$default", $base, $head)
+        }
+        finally { $null = Invoke-Read git @('checkout', '--no-overwrite-ignore', '-q', $default) }
         return
     }
     Write-Output 'vehicle: push'
-    $p = Invoke-Native git @('push', 'origin', $default)
+    $p = Invoke-Native git @('push', 'origin', "${head}:refs/heads/$default")
     if ($p.Code -ne 0) { throw "the push was refused: $($p.Text)`na non-fast-forward means origin's $default holds commits this clone lacks, and a protection the read did not show refuses the rest: nothing is forced" }
     Write-Output "pushed $default to origin at $head"
     $ls = Invoke-Native git @('ls-remote', '--heads', 'origin', "refs/heads/$default")

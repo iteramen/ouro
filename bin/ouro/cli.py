@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import developer, node, ops, run, sh, triage
+from . import developer, node, ops, run, sh, triage, worktrees
 from .coordination import worker_env
 from .sh import DriverError, Env, Refused, Stopped
 from .runtime import diagnostics
@@ -20,6 +20,7 @@ def parser():
     r.add_argument("--override-claim", action="store_true", help="explicitly override a known advisory board claim; grants no shipping permission")
     r.add_argument("--validate", action="store_true", help="execute pending approved validation in this driver's context")
     r.add_argument("--recover-build", action="append", default=[], metavar="PATH", help="preserve the dirty original and offer this selected source file to BUILD in a private clean checkout; repeat for each path")
+    r.add_argument("--pr", type=int, metavar="N", help="adopt open pull request N, whose body fixes the issue, instead of building a new branch")
     r.add_argument("--dry-run", action="store_true", help="print the transitions and commands; write nothing")
     t = sub.add_parser("triage", help="grade an issue with the TRIAGE node and post the verdict")
     t.add_argument("n", type=int)
@@ -77,10 +78,13 @@ def main(argv):
             print(json.dumps(validation_lock.inspect(root, args.recover, sh.child_env(worker_env(runtime)))))
             return 0
         env = bind(getattr(args, "dry_run", False), args.developer_config)
+        if args.cmd in ("run", "triage"):
+            worktrees.sweep(env)
         if args.cmd == "run":
             env.validate = args.validate
             env.recover_build = args.recover_build
             env.override_claim = args.override_claim
+            env.adopt_pr = args.pr
             return run.main(env, args.n, args.part)
         if args.cmd == "triage":
             return triage.triage(env, args.n, args.dry_run)

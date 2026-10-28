@@ -22,6 +22,18 @@ inputs:
       message under one older than 3.12.
     required: false
     default: 'true'
+  parallel:
+    description: >-
+      How many selected gates may run at once; 1, the default, runs them one after another with
+      live output. Above 1, each gate's output is captured and printed as one group when it ends,
+      so only gates that tolerate running beside each other belong in a binding that raises it.
+    required: false
+    default: '1'
+
+outputs:
+  selection-mode:
+    description: "The loop's selection mode: full, paths, or fallback. Missing output is unknown."
+    value: ${{ steps.loop.outputs.selection-mode }}
 
 runs:
   using: composite
@@ -43,6 +55,7 @@ runs:
     # caller checked its repo out, without `path:`, so `python ... get gate` reads that repo's own
     # binding -- never this Action's.
     - name: Gates from the binding
+      id: loop
       shell: pwsh
       run: |
         # Empty when the step above was skipped; Split-Path refuses an empty path, and under the
@@ -96,7 +109,9 @@ runs:
         # first, because "...HEAD" reads as no change at all.
         $toRun = $gates
         $skipped = @()
+        $selection = 'full'
         if ('${{ inputs.select-by-paths }}' -eq 'true') {
+          $selection = 'paths'
           $eventName = '${{ github.event_name }}'
           $base = '${{ github.event.pull_request.base.sha }}'
           $before = '${{ github.event.before }}'
@@ -145,6 +160,7 @@ runs:
             catch { $why = $_.Exception.Message }
           }
           if ($why) {
+            $selection = 'fallback'
             $toRun = $gates
             $skipped = @()
             Write-Host "select-by-paths: every gate runs: $why"
@@ -156,22 +172,82 @@ runs:
         # its place; a gate with no ci keeps running run, as it always has. <ouro> in either names
         # this Action's own plugin root, above.
         $commandOf = { param($g) $(if ($g.ci) { $g.ci } else { $g.run }).Replace('<ouro>', $root) }
-        foreach ($g in $skipped) { Write-Host "SKIP its paths are unchanged  $(& $commandOf $g)" }
-        $failed = @()
-        foreach ($g in $toRun) {
+        # Recognize only a plain script invocation, never parse/evaluate a command for its label.
+        # Other commands retain their binding index; arguments and directories never reach the summary.
+        $labelOf = {
+          param($command, $number)
+          if ($command -cmatch '^(?:python3|pwsh -NoProfile -File) (?:[A-Za-z0-9_./:\\-]+[\\/])?(?<suite>[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:py|ps1))(?: [A-Za-z0-9_./:=+-]+)*$') { $Matches.suite }
+          else { "gate #$number" }
+        }
+        $timings = @()
+        $summaryPath = $env:GITHUB_STEP_SUMMARY
+        $platform = if ($IsWindows) { 'Windows' } elseif ($IsLinux) { 'Linux' } elseif ($IsMacOS) { 'macOS' } else { 'other' }
+        foreach ($g in $skipped) {
           $run = & $commandOf $g
-          Write-Host "::group::$run"
-          Write-Host "+ $run"
-          # A gate whose command does not resolve throws rather than exiting; $code stays 1 so a
-          # missing script is a red gate, never a stale exit code inherited from the last one.
-          $code = 1
-          try { Invoke-Expression $run; $code = $LASTEXITCODE } catch { Write-Host $_ }
-          Write-Host '::endgroup::'
+          $number = [array]::IndexOf($gates, $g) + 1
+          Write-Host "SKIP its paths are unchanged  $run"
+          $timings += [pscustomobject]@{ Gate = $number; Suite = (& $labelOf $run $number); Result = 'SKIP'; Seconds = '-' }
+        }
+        $failed = @()
+        $parallel = 0
+        if (-not [int]::TryParse('${{ inputs.parallel }}', [ref]$parallel) -or $parallel -lt 1) {
+          Write-Host '::error::parallel must be a positive whole number'; exit 1
+        }
+        function Complete-Gate($number, $run, $code, $elapsed) {
           $verdict = if ($code -eq 0) { 'PASS' } else { 'FAIL' }
           Write-Host "$verdict exit=$code  $run"
-          if ($code -ne 0) { $failed += $run }
+          $seconds = $elapsed.TotalSeconds.ToString('F3', [Globalization.CultureInfo]::InvariantCulture)
+          $script:timings += [pscustomobject]@{ Gate = $number; Suite = (& $labelOf $run $number); Result = $verdict; Seconds = $seconds }
+          Write-Host "TIMING gate=$number result=$verdict seconds=$seconds platform=$platform"
+          if ($code -ne 0) { $script:failed += $run }
+        }
+        $items = @($toRun | ForEach-Object { [pscustomobject]@{ Number = [array]::IndexOf($gates, $_) + 1; Run = (& $commandOf $_) } })
+        if ($parallel -gt 1 -and $items.Count -gt 1) {
+          $here = (Get-Location).Path
+          $items | ForEach-Object -ThrottleLimit $parallel -Parallel {
+            Set-Location -LiteralPath $using:here
+            $code = 1
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            # 2>&1 inside the command: redirecting Invoke-Expression itself drops a native child's stderr
+            $text = try { (Invoke-Expression "$($_.Run) 2>&1" | ForEach-Object { "$_" }) -join "`n"; $code = $LASTEXITCODE } catch { "$_" }
+            $watch.Stop()
+            [pscustomobject]@{ Number = $_.Number; Run = $_.Run; Code = $code; Elapsed = $watch.Elapsed; Text = $text }
+          } | ForEach-Object {
+            Write-Host "::group::$($_.Run)"
+            Write-Host "+ $($_.Run)"
+            Write-Host ($_.Text.TrimEnd())
+            Write-Host '::endgroup::'
+            Complete-Gate $_.Number $_.Run $_.Code $_.Elapsed
+          }
+        }
+        else {
+          foreach ($item in $items) {
+            Write-Host "::group::$($item.Run)"
+            Write-Host "+ $($item.Run)"
+            # A gate whose command does not resolve throws rather than exiting; $code stays 1 so a
+            # missing script is a red gate, never a stale exit code inherited from the last one.
+            $code = 1
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            try { Invoke-Expression $item.Run; $code = $LASTEXITCODE } catch { Write-Host $_ }
+            finally { $watch.Stop() }
+            Write-Host '::endgroup::'
+            Complete-Gate $item.Number $item.Run $code $watch.Elapsed
+          }
         }
 
         Write-Host "--- $($toRun.Count - $failed.Count)/$($toRun.Count) gates passed, $($skipped.Count) skipped"
+        $counts = "Platform: $platform; selection: $selection; selected: $($toRun.Count)/$($gates.Count); skipped: $($skipped.Count); failed: $($failed.Count)"
+        Write-Host "Gate timings: $counts"
+        if ($summaryPath) {
+          $summary = @('### Gate timings', '', $counts, '', '| Gate | Suite | Result | Seconds |', '| --- | --- | --- | ---: |') + @(
+            $timings | Sort-Object Gate | ForEach-Object { "| $($_.Gate) | $($_.Suite) | $($_.Result) | $($_.Seconds) |" }
+          )
+          try { [IO.File]::AppendAllText($summaryPath, ($summary -join "`n") + "`n", [Text.UTF8Encoding]::new($false)) }
+          catch { Write-Host '::warning::gate timing summary could not be written' }
+        }
+        if ($env:GITHUB_OUTPUT -and $selection -cin @('full', 'paths', 'fallback')) {
+          try { [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "selection-mode=$selection`n", [Text.UTF8Encoding]::new($false)) }
+          catch { Write-Host '::warning::gate selection output could not be written' }
+        }
         foreach ($f in $failed) { Write-Host "::error::gate failed: $f" }
         if ($failed.Count -gt 0) { exit 1 }

@@ -3,7 +3,8 @@ import json
 import re
 
 from . import briefs, node, sh
-from .run import Run, acceptance_commands, body_line, empty_list, parse_parts, restamped
+from .acceptance import acceptance_commands, empty_list
+from .run import Run, body_line, parse_parts, restamped
 from .sh import DriverError, argv_for, say
 
 STATE_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage", "idea")  # umbrella is cleared by its children closing, never by a re-triage
@@ -24,9 +25,12 @@ def label_moves(verdict, size, labels, named=()):
     elif verdict == "SPLIT":
         add = ["umbrella"]
     else:
-        return [], []
+        remove = [l for l in ("agent-ready", "checkpoint") if l in present] if verdict == "STALE" and "checkpoint" in present else []
+        return [], remove
     add = list(named) + add
     remove = [l for l in STATE_LABELS if l in present and l not in add]
+    if verdict == "PROMOTE" and "checkpoint" in present:
+        remove.append("checkpoint")
     return [a for a in add if a not in present], remove
 
 
@@ -273,7 +277,6 @@ def triage(env, n, dry):
     if new_body != body:
         env.write("write the Size/Flow/Doc impact lines",
                   argv_for("gh", "issue", "edit", str(n), "-R", env.slug, "--body-file", env.body_file("issue-body.md", new_body)))
-    env.comment_issue(n, comment)
     if add or remove:
         argv = argv_for("gh", "issue", "edit", str(n), "-R", env.slug)
         for l in remove:
@@ -281,4 +284,5 @@ def triage(env, n, dry):
         for l in add:
             argv += ["--add-label", l]
         env.write("set the labels", argv)
+    env.comment_issue(n, comment)
     return 3 if preflight_failed else 0

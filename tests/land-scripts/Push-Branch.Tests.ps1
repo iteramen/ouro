@@ -99,4 +99,50 @@ Assert-Equal 1 $c.Code 'the default branch exits 1'
 Assert-Line $c.Lines 'STOP: the checkout is on master, the default branch' 'with the STOP line' -Prefix
 $help = Get-Help ([WildcardPattern]::Escape($Script))
 Assert-Match 'Push the feature branch to origin' ($help.Synopsis) 'the script exposes its help'
+Write-Host 'the public checked-head parameter refuses a different local commit'
+$w = New-World 'checked-head'; $m = $w.Main
+$base = @(G $m rev-parse HEAD)[0]
+$null = G $m checkout -q -b feat/checked
+$checked = New-Commit $m 'checked.txt'
+$c = Invoke-Child $Script @('-ExpectedHead', $base) $m
+Assert-Equal 1 $c.Code 'mismatched checked head exits one'
+Assert-Line $c.Lines 'STOP: the checked publication head changed before the branch push - nothing is pushed' 'the expected-head parameter is actually implemented'
+Assert-Equal '' (Get-OriginTip $w.Origin 'feat/checked') 'no mismatched commit reaches the remote'
+
+Write-Host 'plain and leased checked pushes pin H across a real late local ref advance'
+foreach ($leased in @($false, $true)) {
+    $w = New-World "immutable-head-$leased"; $m = $w.Main
+    $base = @(G $m rev-parse HEAD)[0]
+    $null = G $m checkout -q -b feat/pinned
+    $checked = New-Commit $m 'checked.txt'
+    $ownerHead = @(G $m commit-tree "${checked}^{tree}" -p $checked -m 'late owner H2')[0]
+    if ($leased) { $null = G $m push -q origin "${base}:refs/heads/feat/pinned" }
+    $invokeParams = @{ ExpectedHead = $checked }
+    if ($leased) { $invokeParams.Lease = $base }
+    $nativeOriginal = ${function:Invoke-Native}
+    $script:branchAdvanceDone = $false
+    try {
+        # Inject the boundary race only; all metadata reads and pushes remain
+        # real Git commands against the scratch origin. No successful result is mocked.
+        function Invoke-Native {
+            param([string]$Exe, [string[]]$Arguments)
+            if ($Exe -eq 'git' -and $Arguments[0] -eq 'push' -and -not $script:branchAdvanceDone) {
+                $script:branchAdvanceDone = $true
+                & git update-ref refs/heads/feat/pinned $ownerHead $checked
+                if ($LASTEXITCODE -ne 0) { throw 'real late-ref calibration failed' }
+            }
+            & $nativeOriginal $Exe $Arguments
+        }
+        Push-Location -LiteralPath $m
+        try { $r = Invoke-Step { Invoke-PushBranch @invokeParams } }
+        finally { Pop-Location }
+    }
+    finally { Set-Item -LiteralPath Function:Invoke-Native -Value $nativeOriginal }
+    Assert-Equal $true $script:branchAdvanceDone 'local branch really advanced after the identity check'
+    Assert-Equal '' $r.Stop 'the checked immutable push completes'
+    Assert-Equal $checked (Get-OriginTip $w.Origin 'feat/pinned') 'origin receives checked H, never the later H2'
+    Assert-Equal $ownerHead (@(G $m rev-parse HEAD)[0]) 'late owner H2 retains its local reference'
+    Assert-Equal 'origin/feat/pinned' (@(G $m rev-parse --abbrev-ref 'feat/pinned@{upstream}')[0]) 'checked SHA publication retains upstream tracking'
+    Assert-Line $r.Lines "pushed feat/pinned to origin at $checked" 'reports the actual checked commit' -Prefix
+}
 Complete-Suite 'Push-Branch'

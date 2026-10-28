@@ -1,10 +1,10 @@
 """Bounded metadata for runtime attempts, independent of accepted node accounting."""
 from collections import deque
 from contextlib import contextmanager
-import json
 import re
 import time
 
+from . import codex_events
 from ..sh import DriverError
 
 ATTEMPTS = deque(maxlen=128)
@@ -20,25 +20,15 @@ def count(value):
 
 def events(row, output):
     """Project bounded transport output onto metadata; never retain event bodies."""
-    total = 0
-    for line in output.splitlines():
-        try:
-            event = json.loads(line)
-        except (ValueError, RecursionError):
-            continue
-        if not isinstance(event, dict):
-            continue
-        total += 1
-        if event.get("type") == "thread.started":
-            row["session"] = identifier(event.get("thread_id"))
-        if event.get("type") == "turn.completed":
-            row["provider_completed"] = True
-            usage = event.get("usage")
-            usage = usage if isinstance(usage, dict) else {}
-            for target, source in (("input", "input_tokens"), ("output", "output_tokens"),
-                                   ("cache_read", "cached_input_tokens")):
-                row[target] = count(usage.get(source))
-    row["events"] = total
+    transcript = codex_events.scan(output)
+    if transcript.session is not None:
+        row["session"] = identifier(transcript.session)
+    if transcript.completed:
+        row["provider_completed"] = True
+        for target, source in (("input", "input_tokens"), ("output", "output_tokens"),
+                               ("cache_read", "cached_input_tokens")):
+            row[target] = count(transcript.usage.get(source))
+    row["events"] = transcript.count
 
 
 def transport(row, output, code):

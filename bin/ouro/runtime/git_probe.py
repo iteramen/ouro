@@ -1,8 +1,55 @@
 """Identity-checked teardown of an owned Git-readiness probe; no workflow state."""
 import os
+import stat
 from pathlib import Path
 
 from .. import sh
+
+
+class ProbeParent:
+    """Pin one configured parent alias and its plain resolved directory."""
+    def __init__(self, path):
+        self.path = path
+        self.directories = {}
+        self._directories(path.parent)
+        self.alias = path.lstat()
+        self.link = None
+        if stat.S_ISLNK(self.alias.st_mode) and getattr(self.alias, "st_reparse_tag", 0) in (
+                0, getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C)):
+            self.link = os.readlink(path)
+            destination = Path(self.link)
+            self._directories(destination if destination.is_absolute() else path.parent / destination)
+        else:
+            self._directories(path)
+        self.resolved = path.resolve(strict=True)
+        self._directories(self.resolved)
+        self.identity = self.resolved.lstat()
+        self.check()
+
+    @staticmethod
+    def plain(path):
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                or getattr(info, "st_reparse_tag", 0)):
+            raise sh.DriverError("unproved probe parent directory")
+        return info
+
+    def _directories(self, path):
+        # Inspect prefixes before resolving '..'; an intermediate alias must not
+        # disappear through normalization. Only the configured final leaf may alias.
+        for directory in [*reversed(path.parents), path]:
+            self.directories.setdefault(directory, self.plain(directory))
+
+    def check(self):
+        for path, expected in self.directories.items():
+            if not os.path.samestat(self.plain(path), expected):
+                raise sh.DriverError("probe parent identity changed")
+        current = self.path.lstat()
+        if (not os.path.samestat(current, self.alias)
+                or (self.link is not None and os.readlink(self.path) != self.link)
+                or self.path.resolve(strict=True) != self.resolved
+                or not os.path.samestat(self.path.stat(), self.identity)):
+            raise sh.DriverError("probe parent identity changed")
 
 
 def remove_probe(target, identity, parent_identity, common, common_identity, previous, created, marker_identity):
@@ -11,7 +58,7 @@ def remove_probe(target, identity, parent_identity, common, common_identity, pre
 
     def plain(path, directory=False):
         info = path.lstat()
-        if (getattr(info, "st_file_attributes", 0) & 0x400
+        if (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
                 or getattr(info, "st_reparse_tag", 0)
                 or not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))):
             raise sh.DriverError("unproved probe file identity")
@@ -22,7 +69,12 @@ def remove_probe(target, identity, parent_identity, common, common_identity, pre
         if not os.path.samestat(info, expected):
             raise sh.DriverError("probe identity changed")
 
-    same(target.parent, parent_identity)
+    if not isinstance(parent_identity, ProbeParent) or target.parent != parent_identity.path:
+        raise sh.DriverError("unproved probe parent identity")
+    parent_identity.check()
+    # Git keeps the configured spelling; teardown uses only its pinned physical
+    # directory so a retarget cannot redirect traversal or deletion.
+    target = parent_identity.resolved / target.name
     same(common, common_identity)
     registrations = common / "worktrees"
     if registrations.exists():
@@ -86,7 +138,7 @@ def remove_probe(target, identity, parent_identity, common, common_identity, pre
             info = path.lstat()
             tag = getattr(info, "st_reparse_tag", 0)
             symlink = stat.S_ISLNK(info.st_mode) and tag in (0, getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C))
-            if (getattr(info, "st_file_attributes", 0) & 0x400 or tag) and not symlink:
+            if (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT or tag) and not symlink:
                 raise sh.DriverError("reparsed probe contents")
             if stat.S_ISDIR(info.st_mode):
                 for child in path.iterdir():
@@ -102,9 +154,11 @@ def remove_probe(target, identity, parent_identity, common, common_identity, pre
         same(registration, registration_identity)
         rows += inventory(registration)
     for path, info in rows:
+        parent_identity.check()
         if not os.path.samestat(path.lstat(), info):
             raise sh.DriverError("probe contents changed during teardown")
     for path, info in rows:
+        parent_identity.check()
         if not os.path.samestat(path.lstat(), info):
             raise sh.DriverError("probe contents changed during teardown")
         path.rmdir() if stat.S_ISDIR(info.st_mode) else path.unlink()

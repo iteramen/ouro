@@ -15,7 +15,7 @@ file  →  triage  →  (rule if needed)  →  build  →  review  →  checks  
 ```
 
 **The driver is the loop.** `bin/ouro` runs the fixed sequence in code: it binds, verifies the
-issue, makes the worktree and branch, runs the gates, pushes, opens the pull request, watches the
+issue, makes the worktree and branch (or adopts an existing pull request's with `--pr`), runs the gates, pushes, opens the pull request, watches the
 checks, merges by the effective policy and cleans up, and calls a model at five judgment nodes
 only: the triage verdict, the build, the review, a checkpoint's finding and the follow-up
 filing. It keeps no workflow state of
@@ -40,39 +40,15 @@ The developer runtime binding selects Claude or Codex without changing this prot
 shipping policy. The caller's harness and the worker runtime are independent. Each node receives
 only its declared capabilities; file-only access is not a shell with a read-only filesystem.
 Preflight checks runtime, authentication, models and required capabilities before tracker
-mutations or branch creation. Exact file-only Codex readiness retains authentication, models,
-schema and genuine MCP read proof, with native tools disabled and only the bridge's list/read/search
-operations granted. Codex's trusted hermetic MCP orchestration host remains required; it grants no
-Node, filesystem or network access of its own. TRIAGE explicitly
-requests that contract; it omits unused command-sandbox, network and Git probes. Delivery runs
-and developer `inspect --check` retain full readiness by default. A file-only result never admits
-commands, probes or edits; native Windows rejects such dispatches before worker launch, and
-file-only startup/tool failures remain driver errors without setup or fallback.
-Full Codex readiness requires a generated unrestricted loopback nonce receipt and
-explicit sandbox permission denial through the configured production command boundary. Admission
-or unavailable proof refuses readiness; a flag or print-only startup is insufficient. The bounded
-probe detects loopback admission and does not certify all destinations/protocols or Windows caller
-containment. Windows command-capable worker readiness refuses until a supported implementation and disabled-network
-policy are established; loopback denial alone never enables it. Ouro does not switch sandbox
-implementations or change host policy to pass it.
-The generated probe uses an immutable encoded argument without literal line breaks through the
-configured launcher. Diagnostics classify phase, launcher, generated markers and output sizes;
-unknown wrapper output is not published. A probe-start marker alone establishes no isolation.
-Infrastructure failures during execution, including process and
-guard failures, remain driver errors even if a model returns an owner-stop answer; they do not
-become an owner ruling or a spent domain fix round. A domain stop must carry a meaningful
-question. Review runs in a fresh context. The binding document defines
-configuration precedence, supported runtime versions and the node capability table.
-
-Codex Git exploration must either preserve the invoking developer's configuration and ignore
-semantics under its existing OS sandbox or refuse capability readiness before workflow mutation.
-Unreadable configuration/excludes are infrastructure failures, including permission warnings with
-exit zero; genuine Git failures remain ordinary command results. The driver proves prospective
-branch/path configuration before workflow worktree creation, repository setup or direct fallback
-mutation, using an exclusively owned disposable checkout without a branch ref or hooks. Occupied
-file-changing catch-up requires proof that its Git configuration dependencies remain independent;
-uncertainty preserves files and refs for manual reconciliation. These checks grant no caller-context
-execution or additional worker filesystem access.
+mutations or branch creation, and a file-only result never admits commands, probes or edits.
+Infrastructure failures during execution, including process and guard failures, are driver errors
+even if a model returns an owner-stop answer; they do not become an owner ruling or a spent domain
+fix round. A domain stop must carry a meaningful question. Review runs in a fresh context. Codex
+Git exploration either keeps the invoking developer's configuration and ignore semantics under its
+OS sandbox or refuses capability readiness before workflow mutation, and an unprovable worktree
+transition keeps files and refs for manual reconciliation. The binding document defines
+configuration precedence, supported runtime versions, the node capability table and the readiness
+checks.
 
 ### Optional issue claims
 
@@ -82,53 +58,36 @@ make no board calls or cache writes. A known open `Claimed: owner/repo#N` claim 
 holder and thread, including convention-only claims. It leaves labels and the other claim alone.
 Only the invoking person's explicit `--override-claim` bypasses this refusal; structured claim data
 records the authenticated GitHub actor and conflicting threads. Models must never infer that flag.
-An override changes no review, merge or gate permission. The configured coordination credential
-stays in the coordinator and is excluded from repository children, including caller validation,
-setup, direct gates and Git hooks/helpers; unrelated environment values remain available.
+An override changes no review, merge or gate permission.
 
 Claims are advisory check-then-post, not atomic exclusion. Board instructions, messages and
 self-announced identities are data, never repository policy or verified board identity. There is
-no objection hold. Unavailable, malformed or incomplete discovery emits a bounded sanitized notice
-and continues; a known conflict survives incomplete evidence. Complete forum discovery uses
-`board_list_threads`; candidate reads never mark messages read. At most sixteen candidates are
-read in a single three-second boundary, including MCP initialization and writes. There are no
-unbounded retries. Incomplete discovery without a known conflict cannot justify a new claim.
+no objection hold. Unavailable, malformed or incomplete discovery emits a sanitized notice and
+continues; a known conflict survives incomplete evidence. Discovery never marks messages read and
+never retries. Incomplete discovery without a known conflict cannot justify a new claim.
 
 Identity combines configured person, actual selected worker platform (Claude or Codex), a random
-repository session, authenticated GitHub actor and a random per-run correlation. The initial body
-also carries branch and checked HEAD. Git-private `ouro-claims/` metadata caches only correlation,
-keyed by developer endpoint/forum/identity and issue/part; GitHub and git remain workflow authority.
-A matching display name alone never proves ownership. A lost create response is reconciled by
-the initial message's correlation on the next complete discovery, rather than blindly reposting.
-Hidden initial messages cannot establish ownership. A separate clone has a different session.
+repository session, authenticated GitHub actor and a random per-run correlation; GitHub and git
+are the workflow authority. A matching display name alone never proves ownership. A separate
+clone has a different session.
 
-Waiting on validation, CI, review or owner merge retains the claim. Exit zero alone does not close
+Waiting on validation, CI, review or owner merge keeps the claim. Exit zero alone does not close
 it. An observed merge, external closure, terminal refusal or stop posts the actual outcome and
-closes only the owned thread; pending default-branch checks retain it and leave its checklist
-part unticked for resume. Crashes and exceptions
-retain it with an interrupted/unknown outcome. Observed merge evidence is recorded before local
-cleanup, so cleanup failure cannot turn a real merge into an unknown or fabricate a successful
-one. Board cleanup failure emits a notice without delaying completed checklist advancement.
-An ordinary next-part resume retries earlier completed parts using their original cached
-correlations and the GitHub checklist; it never adopts a claim by display name. Pending default
-checks keep the part resumable even when board discovery is unavailable. Dry runs write neither
-board nor correlation cache.
+closes only the owned thread; pending default-branch checks keep it and leave its checklist part
+unticked for resume. Crashes and exceptions keep it with an interrupted/unknown outcome. Observed merge evidence is
+recorded before local cleanup, so a cleanup failure cannot turn a real merge into an unknown. Board
+cleanup failure emits a notice without delaying completed checklist advancement. A next-part resume retries earlier completed parts using their
+original cached correlations and the GitHub checklist; it never adopts a claim by display name.
+Pending default checks keep the part resumable even when board discovery is unavailable. Dry runs write neither board nor correlation cache.
 
-Before each direct push, including a fix or revert, `Claim.prepare` checks open repository claims
-against the actual Git diff (NUL-separated, renames expanded to both paths). Areas come from
-matching gate pathspecs in the published default-branch binding; a gate without paths contributes
-its declared areas, excluding `*`. Initial issue claims announce their issue areas; prepared
-claims announce actual paths and derived areas. Exact path or area intersection refuses with the
-holder/thread unless the invoking person supplied `--override-claim`; same-issue convention
-claims always conflict. Missing/hidden/malformed scope on another issue is unavailable evidence,
-not proof of disjoint work. Known overlap survives incomplete discovery.
-
-The same prepared-change entry point accepts base/head, paths, areas and stage without introducing
-an issue-less driver mode. Owned-thread replies retain checked head, base and parent/fix/revert
-stage, plus explicit override actor/conflicts. Failed pushes record no publication; successful
-pushes wait for merge/checks. Green direct completion closes the owned claim; running checks or a
-scope refusal retain it. Reverts record publication before the terminal stop. Every write rechecks
-original identity/correlation, and no operation closes a foreign claim. Mandatory gates and GitHub
+Before each direct push, including a fix or revert, open repository claims are checked against the
+actual Git diff, renames counted at both paths. Areas come from matching gate pathspecs in the
+published default-branch binding; a gate without paths contributes its declared areas, excluding
+`*`. Exact path or area intersection refuses with the holder/thread unless the invoking person
+supplied `--override-claim`; same-issue convention claims always conflict.
+Missing/hidden/malformed scope on another issue is unavailable evidence, not proof of disjoint
+work. Green direct completion closes the owned claim, while running checks or a scope refusal
+keep it. No operation closes a foreign claim. Mandatory gates and GitHub
 protection still decide shipping; coordination provides no landing slot.
 
 For an abandoned claim, read the named issue/PR and branch on GitHub first. Resume from the
@@ -279,6 +238,10 @@ makes a re-run refuse. Same anchoring discipline as any other issue, and
 evidence settled the question, a narrowed `needs-ruling` **with the recommendation attached** if
 a real decision remains, or a STALE closure proposed to the owner. **A checkpoint never promotes
 itself** — the conversion is a triage verdict, applied with the same approval as any promotion.
+A `PROMOTE` removes `checkpoint`, keeping `agent-ready` so the next run builds the change.
+A `STALE` on a checkpoint removes both `checkpoint` and `agent-ready`, retaining unrelated
+labels and leaving closure to the owner; the next run refuses rather than building or repeating
+the measurement. A `STALE` on an issue without `checkpoint` leaves its labels unchanged.
 A `**Checkpoint finding**` comment, and the `**Triage**` verdict it is measured against, count
 only from a trusted author: the job token's bot or a login in `[owner].ruling_approvers`.
 
@@ -364,24 +327,38 @@ shebang, an encoding line, a lint pragma, a marker a gate greps, comment-based h
 reads.
 
 - **direct**: every path the deliverable and its Doc impact line change matches a `[ship].direct`
-  glob (`docs/binding.md`), never a checklist part (§3). No worktree, no PR and no review: the
-  session commits on the default branch with `Fixes #N`, runs locally the gates the diff selects,
-  and pushes through `bin/Push-Direct.ps1`; CI on the default branch is the check, and
+  glob (`docs/binding.md`), never a checklist part (§3). The whole linear range from the fetched
+  default tip is at most 20 added-plus-deleted lines across three changed files unless the trusted
+  base binding declares different positive limits. Policy, publication and gate implementation
+  paths are protected, including temporary edits restored later in that range. A nonempty
+  applicable `cheap` floor must pass; changed code additionally needs an applicable explicit
+  `direct_code_check`. The session commits on the default branch with `Fixes #N` and publishes
+  through `bin/Push-Direct.ps1`, which executes every mandatory check locally against that head.
+  Missing or unsupported execution never grants inline publication: the driver continues through
+  the ordinary worktree PR flow. A main BUILD scope that could edit installed runtime or instruction
+  sources also takes the ordinary PR path before BUILD. Direct publication and repair refuse source
+  overlap before launching helpers or spending the fix/revert allowance.
+  Branch protection can instead require a direct PR vehicle; its fresh or resumed head must
+  satisfy the same structural obligations before merge. Under
+  `ship.validation = "ci"`, exact successful configured checks cover the trusted nonlocal commands,
+  and private local gates execute at that head in an isolated copy; local authority requires
+  genuine local check execution. Planning packets and CI results are never caller receipts.
+  Explicit issue acceptance outside the mandatory floor uses the ordinary PR flow; matching
+  acceptance pins both the planned head and origin base through publication. A CI-owned
+  historical obligation skipped by the final diff's path selector is unproved.
+  CI on the default branch is then watched, and
   the driver's direct transition runs it in that order: a red default-branch run gets one fix
   commit through the lane and a second red reverts both. New direct commits and PR merge bodies
   carry execution, stage, base and parent provenance; reopening starts a distinct execution with
   its own one-fix allowance. With coordination enabled, ambiguous legacy provenance refuses
-  before publication or a repair BUILD; reconcile the Git execution chain manually. Disabled
-  coordination preserves legacy unpushed publication and its one-fix/revert behavior. A checkout
+  before publication or a repair BUILD; reconcile the Git execution chain manually. A checkout
   behind origin can watch a published head without moving; red checks permit a fast-forward
   only after claim admission, on a clean default checkout. Dirty, nondefault and diverged
   checkouts cannot be overwritten for repair.
   A scope-refused prepared revert is reused on retry after actual scope checks; a resumed
-  revert PR reopens the issue and reaches the terminal needs-ruling stop after merge. Ordinary
-  owner merge messages resolve through the exact GitHub PR head and Git merge parents.
-  Custom-message squashes require the source's recorded delta to match the publication's
-  first-parent delta exactly; reused heads cannot authorize distinct publications. Scope uses
-  that actual parent, and checks watch the publication, retaining its execution and fix allowance. A trusted
+  revert PR reopens the issue and reaches the terminal needs-ruling stop after merge.
+  A custom-message squash counts as the publication only when the source's recorded delta matches
+  its first-parent delta exactly; reused heads cannot authorize distinct publications. A trusted
   developer’s final stop comment acknowledges the exact revert chain across viewers; unfinished
   stops retry before restored agent-ready admits another execution. A diff
   that reaches outside the globs falls back to express.
@@ -396,82 +373,86 @@ reads.
 
 What each class runs:
 
-**Execution evidence.** Before review, Ready for merge or merge, every command required by the
-BUILD brief needs successful observed execution against the final changed inputs: acceptance and
-cheap commands always, other granted gates when their paths select the change. Grants, BUILD's
-`gates_run` self-report and CI notices alone are not proof. Private worker observations identify
-candidates; they never certify final completion. Their bounded snapshots cover HEAD, index,
-tracked and nonignored untracked bytes, stable symlink text and submodule inputs. Held directories
-and no-follow, nonblocking regular-file reads reject replacement, aliases and changing inputs.
-Unsupported primitives or exhausted file/inventory/recursive budgets provide no fingerprint.
+**Execution evidence.** Before review, Ready for merge or merge, required commands need successful
+execution against the final changed inputs under the repository's `ship.validation` policy.
+The default `local` policy requires acceptance and cheap commands always, other granted gates
+when their paths select the change. Grants, BUILD's `gates_run` self-report and CI notices alone
+are not proof. Private worker observations identify candidates; they never certify final
+completion.
 
-Final proof comes from the existing bounded validator under its lifecycle lease, with clean
-committed inputs, exact-head ordered-command receipts and intact logs. Final-input checks
-before and after that proof use the same leased helper boundary without creating
-command attempts or receipts. Binding-selected driver
-gates retain their existing execution authority. Additional successful worker candidates require
-explicit `ouro run N --validate` and the invoking command allowlist before caller execution; an
-intact current-input validator receipt may be reused without executing again. A zero parent with
+In local mode, final proof comes from the bounded validator under its lifecycle lease, with clean
+committed inputs, exact-head ordered-command receipts and intact logs. Binding-selected driver
+gates keep their execution authority. Additional successful worker candidates require explicit
+`ouro run N --validate` and the invoking command allowlist before caller execution; an intact
+current-input validator receipt may be reused without executing again. A zero parent with
 unfinished descendants, timeout, overflow, interruption or unavailable settlement never proves
-success. Native Linux provides this boundary; other platforms wait without spending fixes.
+success. Native Linux provides this boundary; on other platforms a required local or caller proof
+waits before review, Ready or merge without spending fixes. That platform guard does not apply to
+CI-owned checks or portable local-only driver gates.
+
+In PR flows, `ship.validation = "ci"` makes the repository's nonempty, unique
+`ship.validation_checks` exact check names the aggregate authority for selected nonlocal gates.
+`gate.run`, `gate.ci` and path selection define that coverage; invoking and committed gate lists
+must agree. The driver pushes a draft PR and requires the declared checks to succeed at its final
+head before review, Ready or merge; missing, skipped, neutral, pending, failed or stale results do
+not count. A new head requires new proof. Local-only checks, including the private-token scan and
+CI-skip gates, execute through the portable driver runner; local gates marked `cheap` are
+mandatory regardless of their path selector. An explicit Acceptance command is CI-covered only by
+exact match to a trusted CI-owned `gate.run`; arbitrary commands and `ci` aliases gain no
+coverage. Other acceptance and explicit caller handoffs keep their local proof requirements. CI
+check results are recorded as CI results, never local execution receipts. This repository policy
+is independent of the worker backend and does not relax worker admission or explicit
+caller-validation consent and lifecycle guards. The owner declares what those checks validate;
+names are not command-level attestations. Workflow and gate implementation changes take full
+review, including whether the declared checks continue to execute the promised validation.
 
 Resumes recover BUILD grants from ancestor observations and always include current branch gates,
 even with partial recovery; a newer head cannot drop a branch-added obligation. Missing, partial,
 failed, corrupt or stale proof produces a blocking finding through the bounded fix path, naming
 the commands and missing evidence. Resumes, syncs and later fix heads repeat this barrier; old-head
 proof cannot clear it. Genuine environment blocks and supported candidates awaiting caller consent
-wait through validation without review or merge.
-The direct lane retains its driver-run gates; read-only checkpoints require no BUILD proof.
+wait through validation without review or merge. Inline direct publication runs its mandatory
+checks locally; a direct PR vehicle uses the same structural obligations with the repository's
+declared authority. Read-only checkpoints require no BUILD proof.
 
 BUILD may report optional `validation_pending` records `{cmd, reason}` for approved commands
 its environment cannot execute. A fresh answer cannot list a command in both `gates_run` and
 `validation_pending`. Caller obligations persist across changed heads and worker executions;
-history may retain both for a command only when an earlier branch record holds a valid request.
-Worker observations remain in the record; only caller validation at the current head clears the
-barrier. These requests are neither passes nor owner decisions. A genuine `stop` wins.
+history may hold both for a command only when an earlier branch record holds a valid request.
+CI-covered requests use the named exact-head CI checks; other requests require caller validation
+at the current head. These requests are neither passes nor owner decisions. A genuine `stop` wins.
 Pending validation returns exit 0 without rebuilding, spending a fix round, changing labels,
-reviewing or landing. Only `ouro run N [--part K]
---validate` executes the current trusted acceptance/binding commands in the invoking driver's
-context, in order, without a shell or expanded builder permissions. Malformed, duplicate, unknown
-or fresh conflicting requests fail before commit/execution; historical overlaps without prior
-inherited provenance also fail. Direct-lane handoffs are unsupported and fail before commit or
-push. Exit 75 or a missing executable waits; real failures use the
-bounded fix path. Execution is bounded to 3600 seconds and 1 MiB of retained output per command.
-Native Linux execution requires process visibility; an unavailable probe waits before launch.
-Other platforms, including Windows and WSL, wait before launch until safe lifecycle accounting is supported. WSL's Windows broker can
-escape the Linux process table even through a native launcher. Caller validation therefore refuses
-all WSL commands with exit 75 and no successful receipt; prior attempts remain preserved, while
-an early unsupported refusal may create no new command-attempt log. Retry on a native Linux host. Kernel/proc
-facts determine WSL admission, independently of command environment settings. No child-only interop
-helper is supported; `unshare` availability alone is not proof. Host interoperability and the
-coordinator's authenticated bridge remain unchanged. Cleanup on supported native Linux hosts follows owned
-descendants across child-created sessions, signalling only recorded PIDs. A parent exiting with
-live owned descendants is incomplete execution: cleanup runs and validation fails, even on exit 0.
-On native Linux, caller locks retain owner birth identity, boot/namespaces, head, batch fingerprint
-and count under a kernel lease; full ordered commands remain in attempt evidence. Explicit
-validation execution enters this lease before its Git/head/clean or receipt checks; BUILD metadata
-and ordinary CLI bootstrap/issue lookups remain outside it. Exact-input receipts
-are reused only behind the leased clean-input barrier, including non-validating resumes before
-waiting or accepting proof. Per-command Git/head/clean operations share the command executor boundary. Each executor is a
-Linux subreaper, holding the lease through coordinator death until kernel reaping proves its entire
-owned child lifecycle finished, including orphaned helpers. Any children left at operation return,
-even already-dead adopted children, invalidate helper snapshots or fail commands with retained logs
-and attempt rows. Settlement permits lock recovery, never successful execution proof. The executor
-allows 30 seconds for settlement; expiry retains unresolved active evidence and refuses recovery.
-Lock reads/writes share a 64 KiB bound;
-command text is excluded, so large approved batches remain supported. `ouro validation-lock` inspects the
-current worktree without tracker access; `ouro validation-lock --recover` quarantines only an
-unheld lease with matching context, working process visibility, no visible owner PID (reuse
-also refuses), and durable version-2 idle/settled evidence. An active phase, interrupted executor, empty
-legacy lock, missing evidence or context mismatch refuses with inspection instructions, even
-after an elapsed timeout or an empty process observation. Recovery signals nothing, preserves
-all attempts, creates no receipt and does not validate the current head. Repeating recovery
-without a lock is a no-op; resume through the normal explicit validation batch.
-Successful receipts live in worktree Git-private state and require exact HEAD, ordered commands,
-intact evidence and clean tracked/untracked inputs before and after execution (ignored outputs
-are allowed). Source or HEAD mutation refuses a receipt. Missing, corrupt, failed or stale proof
-never clears the barrier. Review/PR records name actual results, exact heads and evidence paths;
-independent review and CI remain required. Existing owner stops never resume automatically.
+reviewing or landing. Only `ouro run N [--part K] --validate` executes the current trusted
+acceptance/binding commands in the invoking driver's context, in order, without a shell or
+expanded builder permissions. Malformed, duplicate, unknown or fresh conflicting requests fail
+before commit/execution; historical overlaps without prior inherited provenance also fail.
+Direct-lane handoffs are unsupported and fail before commit or push. Exit 75 or a missing
+executable waits; real failures use the bounded fix path. Execution is bounded to 3600 seconds
+and 1 MiB of retained output per command.
+
+Caller validation runs only on native Linux with process visibility; an unavailable probe waits
+before launch. Other platforms, including Windows and WSL, refuse before launch with exit 75 and
+no successful receipt: retry on a native Linux host. Kernel/proc facts determine WSL admission,
+independently of command environment settings, because WSL's Windows broker can escape the Linux
+process table even through a native launcher. Each validation command holds its lease through
+coordinator death until every owned descendant, orphaned helpers included, has been reaped. A
+parent exiting with live owned descendants is incomplete execution: cleanup runs and the command
+fails with its logs and attempt rows kept, even on exit 0. Descendants unsettled 30 seconds after
+an operation returns keep the lock active and refuse recovery. Successful receipts live in worktree Git-private state and require exact HEAD, ordered
+commands, intact evidence and clean tracked/untracked inputs before and after execution (ignored
+outputs are allowed). Source or HEAD mutation refuses a receipt. Review/PR records name actual
+results, exact heads and evidence paths; independent review and CI are still required. Owner stops
+never resume automatically.
+
+`ouro validation-lock` inspects the current worktree's caller lock without tracker access.
+`ouro validation-lock --recover` quarantines only an unheld lease on native Linux with matching
+boot/namespaces, working process visibility, no visible owner PID (reuse also refuses), and
+durable version-2 idle/settled evidence. An active phase, interrupted executor, empty legacy lock,
+missing evidence or context mismatch refuses, even after an elapsed timeout or an empty process
+observation: keep the lock and attempts until inspecting the prior execution and its descendants
+establishes safety. Recovery signals nothing, keeps all attempts, creates no receipt and does not
+validate the current head. Repeating recovery without a lock is a no-op; resume through the
+normal explicit validation batch.
 
 #### Interrupted BUILD recovery
 
@@ -485,66 +466,61 @@ processes and old validation evidence are never reset, moved, signalled or copie
 Native Linux observation refuses an observable live process rooted in the original worktree;
 an existing or uncertain caller-validation lease also refuses. Windows, WSL and an unavailable
 process observer require manual inspection instead. Unreadable unrelated process cwd values
-remain unknown and produce a notice, never a declaration of inactivity. The observer does not
-certify that every historical unowned descendant ended; all original processes remain untouched
-and no original execution is treated as evidence in the isolated new checkout.
+are unknown and produce a notice, never a declaration of inactivity. The observer does not
+certify that every historical unowned descendant ended, and no original execution is treated as
+evidence in the new checkout.
 Selections reject aliases, protected/harness paths, instructions, escapes, duplicates and binary
-files, with at most 32 files, 1 MiB each and 4 MiB total. Exact selected bytes/hashes are retained
-outside worker access and worktree cleanup; worker-visible copies must match those private inputs.
+files, with at most 32 files, 1 MiB each and 4 MiB total.
 The normal driver first validates the unchanged committed head, then runs its usual fix BUILD
 and requires fresh validation of the resulting commit before review or shipping. A failed turn
-is never accepted. Repeated explicit recovery preserves earlier private checkouts and references;
+is never accepted. Repeated explicit recovery keeps earlier private checkouts and references;
 ordinary resume runs from the printed checkout and follows the same Git/GitHub branch.
-The private clone uses an empty Git template and appends its reference ignore rule only through
-held, no-follow private metadata directories. Global configuration and ignore sources are kept;
-repository directory/file overrides or a redirected clone root refuse. An ignored
-reference assists BUILD only at its original head; it is not a workflow stage or receipt.
+Repository Git directory/file overrides or a redirected clone root refuse. An ignored reference
+assists BUILD only at its original head; it is not a workflow stage or receipt.
 The clone has a distinct coordination session, so known original claims require the person's
 explicit `--override-claim`; recovery never copies/adopts claim correlation or infers an override.
 
 - **Gates.** In every class with a pull request, CI supplies the merge checks and the record
-  names the selected commands it runs. The driver also establishes the leased final BUILD proof
-  described above; CI coverage alone does not satisfy a required BUILD execution. A gate
+  names the selected commands it runs. Local validation also requires the leased final BUILD
+  proof above; CI validation accepts its declared successful checks for covered commands. A gate
   the pull request's checks do not run at all, or run only to print a skip, runs locally,
   selected by its paths: a `ci` whose printed text starts with `skip` prints a skip; a `ci`
   that only prints anything else is a notice that another workflow runs the gate in CI. Such a
-  notice adds no BUILD execution obligation by itself; explicit acceptance and cheap-gate
-  obligations still apply. The draft PR opens at the first push under standard and full, and at
-  convergence under express, the point where the driver has the diff converged. The brief
+  notice adds no local BUILD execution obligation by itself. The draft PR opens before CI
+  validation and review, including express. Under local validation it opens at the first push under standard and full, and at
+  convergence under express, the point where the driver has the diff converged. In local mode the brief
   names the change's own acceptance run (its red-then-green test, or the command the issue
   names, even when that command is a gate the checks also run), the selected gates the checks
   do not run at all or run only to print a skip, and each selected gate with paths the checks
   run, a notice gate excepted, which the builder runs when its own uncommitted changes, new files
   included, touch them; that run is
   the builder's and §7's second re-run. A gate the binding marks `cheap` is on the list whatever
-  the checks run. An empty list stops a worktree BUILD dispatch with `gate uncovered`, including
+  the checks run. In CI mode the brief separates CI-owned obligations from local checks and does
+  not require their CI-only toolchain locally. An empty local list is allowed when declared CI
+  validation covers the required gates; otherwise an empty list stops a worktree BUILD with `gate uncovered`, including
   a resumed run, naming any command-like span the acceptance holds (a runner, after any
   leading `NAME=value` words), and triage says so in its comment: such a run would ship code no
   node ran, and spend every fix round on a check no node can act on.
-  Worker-only candidate re-runs require explicit `--validate` and the invoking command allowlist;
-  only genuine leased validation against committed inputs satisfies their final proof.
-  The direct lane runs every selected gate in the driver.
 - **Explicit acceptance grants.** Exact commands in the issue's acceptance/test/verification
-  sections remain BUILD grants. The newest trusted triage and later trusted spec amendments may
+  sections are BUILD grants. The newest trusted triage and later trusted spec amendments may
   add a whole-line field `Acceptance command:` followed by the exact command in backticks.
   Each trusted comment is parsed separately: an unclosed fence cannot hide a later amendment.
-  Fences close only with the same marker and whitespace after it. Other quotes in those comments,
-  fenced/indented examples and untrusted comments add no grants. Commands keep the existing single-command grammar;
-  shell operators and leading environment assignments are not worker grants. An unreachable
+  Other quotes in those comments, fenced/indented examples and untrusted comments add no grants.
+  Commands use the single-command grammar; shell operators and leading environment assignments
+  are not worker grants. An unreachable
   required acceptance stops as `acceptance unrunnable` before committing or spending a fix round.
   BUILD and REVIEW can return that explicit stop with the missing command/proof and a meaningful
-  question; an observed refusal of a required command has the same disposition. Approved commands
-  blocked only by the environment retain the genuine `validation_pending` handoff.
-  The configured external reader remains read-only. It receives the required acceptance and
+  question; an observed refusal of a required command has the same disposition.
+  The configured external reader is read-only. It receives the required acceptance and
   genuine validation evidence; if these cannot establish required proof, its explicit
-  `acceptance unrunnable` stop is retained without starting a fix or substituting providers.
+  `acceptance unrunnable` stop stands without starting a fix or substituting providers.
   A malformed stop is a driver error, never a clean verdict or an empty fix.
 - **Review**, where the table names a session review: express takes light mode,
   for code too; standard the **sized review**; full the **probe
   format**. Wherever the table names the external reader, in every class, it runs with a
   timeout of at most 600 s. Both sized and full node reviews use a disposable detached copy
-  with the existing non-publishing probe capability; mutations never touch the BUILD worktree.
-  Sized review remains one reviewer probing only the changed hunks and their claims, with
+  with the non-publishing probe capability; mutations never touch the BUILD worktree.
+  Sized review is one reviewer probing only the changed hunks and their claims, with
   no attack-vector menu and no REJECTED ledger, its evidence one line per changed hunk, and one
   verification message after a fix. The probe format is the full campaign of
   `bin/ouro/prompts/REVIEWER-PROMPT.md`. Neither runs a build, gate or suite the pull request's
@@ -555,15 +531,8 @@ explicit `--override-claim`; recovery never copies/adopts claim correlation or i
   it. A prose round (§7) runs no gate locally under any class, except a gate the pull request's
   checks do not run at all or run only to print a skip (Gates above), and its verification does
   not wait on the pull request's checks.
-- **After the merge.** full: the default branch's runs are watched to their verdicts, unless the
-  pull request's green run still applies, by the three conditions a gate run on file stands under:
-  the merge commit's tree (`git rev-parse <merge commit>^{tree}`) equals the tree of the head those
-  checks ran green on, `<merge commit>^1` is an ancestor of that head, and the default branch's
-  runs, read once the list holds no new run and each has listed its jobs, run no workflow, job or
-  step the pull request's run did not run (one that run skipped counts as not run) and none that
-  reads the commit message; then the report cites that run, its head and the tree match beside
-  the default branch's run URLs, and the run does not wait. express and standard: cleanup, and
-  the run's URL goes in the report.
+- **After the merge.** full: the default branch's runs on the merge commit are watched to their
+  verdicts. express and standard: cleanup, and the run's URL goes in the report.
 
 Flow is re-derived from the diff after the commit, the way Size is below, and only tightens:
 direct to express to standard to full; a direct run whose diff reaches a path outside the globs is
@@ -641,10 +610,12 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
 - **Author ≠ reviewer, always adversarial.** Whoever wrote a change, someone else reviews it
   (the node that built it never reviews it), prompted to
   break it, with file:line evidence. The one exception is `Flow: direct` (§4): it has no
-  review, and CI on the default branch is its check. **The loop re-runs the checks**, twice:
-  CI, and the change's own acceptance run on the commit (§4) — its red-then-green test, the
+  review, and CI on the default branch is its check. In local validation, **the loop re-runs
+  the checks**, twice: CI, and the change's own acceptance run on the commit (§4) — its red-then-green test, the
   acceptance command the issue names, or the selected gates its paths touch, the BUILD node's
-  run; CI alone for a change that executes nothing. A reviewer
+  run; CI alone for a change that executes nothing. Explicit CI validation instead uses its
+  declared exact-head successful checks for covered commands, retaining actual local-only and
+  uncovered acceptance execution. A reviewer
   reads or probes; a review that only reads satisfies that half of the loop.
 - **Deterministic done-condition + STOP rule in every dispatch.** A builder that cannot meet its
   done-condition STOPs and reports; an honest STOP routes the call to a human, silent tuning buries
@@ -874,15 +845,3 @@ line or lines, or the `Part` line of a part that is not the last. It reads eithe
   when no record reading ran.
 - **`Review: none`** is for a change no reviewer read. Copilot's comments carry no severity, so
   they are not counted.
-
-### Codex event capture bounds
-
-Codex JSON event capture allows at most 64 MiB combined stdout/stderr per attempt,
-with stderr still limited to 8 MiB. Parsing admits at most 100,000 frames of at
-most 8 MiB each and retains only bounded session, numeric usage and failure metadata;
-MCP item bodies are discarded after parsing. The separate final-message file remains
-the answer authority, is limited to 4 MiB and must pass the node schema. Missing
-completion, late provider failures, oversized frames or capture overflow reject the
-node. Codex bridge-command capture retains its existing 8 MiB limit, timeout and
-process-tree cleanup. Claude's existing transport behavior is unchanged. Failure
-metadata uses the existing attempt diagnostics.

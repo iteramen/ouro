@@ -18,6 +18,11 @@ address the repository `origin` names in place of `[repo].slug`.
 
 ## Schema (v1)
 
+`Vendor-Ouro.ps1` keeps the consumer's binding and copies the flat fixture suites except
+`tests/driver/` and `tests/runtime/`, which require the plugin layout. Remove any flat-layout
+gate entries naming those two suites; old copied files are retained, with removal optional.
+Plugin installs and public plugin exports still include both roots.
+
 One row per key the validator accepts, spelled dotted; `[[gate]]` is a list with one entry per
 verify command, and `[docs.banned]` a table whose keys are data. Required means `check` refuses
 the binding without it. `templates/ouro.toml.example` is the copy-paste example.
@@ -31,6 +36,7 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `repo.branch_prefix` | text | none | the prefix of every task branch the driver cuts (`<prefix>/<N>-<slug>`), where the repository's branch policy requires one; absent, it is the first area label, then the first type label, then `ouro`; `check` refuses it empty, holding a slash, whitespace or `..`, or equal to or starting with a `protected_branch_prefixes` entry |
 | `repo.checkout` | an absolute path | none | the canonical local checkout, which no ouro script reads (the driver finds the main checkout through git); per-machine, so it belongs in the overlay below, and `check` warns when the committed binding carries it |
 | `repo.setup` | a command line | none | run once in each worktree the driver works in, the full flow's review copy included, before any gate or node runs there, so a repository whose gates need installed dependencies (`npm ci`, `uv sync`) gets them in a tree that carries only tracked files; checked as a gate's `run` is; a marker in the worktree's git directory says it ran, and a resumed run skips it where the marker is; a setup that fails, or leaves entries the build would commit (it commits with `add -A`), stops the run with `**Stop:** gate uncovered` naming them; the direct lane builds in the main checkout and does not run it, and the gates Action in CI does not read it |
+| `repo.release_notes` | regexes | `["(^\|/)CHANGELOG\\.md$"]`, a `CHANGELOG.md` basename | the release-note paths, such as per-change fragment files or a localised twin: the driver leaves a changed path one matches out of the S shape's file count (contract §4), not its line count, and the REVIEW brief names those paths as the release-note entries to verify; each is searched in the repo-relative path with Python's `re`, case-sensitively, so `check` refuses exactly what the driver cannot compile; `[]` means none |
 | `labels.scope` | label names | `[]` | scope or effort labels that may ride on any state |
 | `labels.area` | label names | `[]` | the area labels a gate's `areas` selects on; the shape gate requires at least one on every agent-ready issue, an empty or undeclared set skipping that check, and an issue with several runs every gate any of them selects |
 | `labels.type` | label names | `[]` | the type labels; the shape gate requires exactly one on every agent-ready issue, an empty or undeclared set skipping that check; disjoint from `area` |
@@ -39,9 +45,12 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `gate.ci` | a pwsh command line | `run` | what CI runs in place of `run`; one that only prints a skip makes the driver run `run` locally in every class |
 | `gate.paths` | git pathspecs | none | the gate runs only when the diff changes one of them |
 | `gate.cheap` | `true`, `false` | `false` | the gate needs no toolchain and runs in seconds: the BUILD node is granted it on every build, whatever the checks run, so an issue with no acceptance command still gets a command (contract §4) |
+| `gate.direct_code_check` | `true`, `false` | `false` | an explicit meaningful direct code check; requires nonempty `paths`, and need not be cheap |
 | `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the effective policy is the stricter of the repository's and the issue's |
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
 | `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe: Choosing `ship.review` below |
+| `ship.validation` | `local`, `ci` | `local` | final-input validation authority for PR flows, including resumed direct PR vehicles; inline direct checks remain local |
+| `ship.validation_checks` | exact GitHub check names | none; required under `ci` | nonempty unique names declaring aggregate CI coverage of selected nonlocal gates |
 | `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's |
 | `ship.external_cli` | `grok`, `claude`, `codex`, `copilot` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
 | `ship.external_model` | a model name | the CLI's own default | the reader's model; one the CLI refuses counts as a round-1 failure |
@@ -52,6 +61,8 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing: Rules the skills apply below |
 | `ship.forbidden_check` | `required`, `off` | follows the list's `# protects:` line, or with no list the target repository's visibility | whether the hook checks what a session posts against the private token list: The forbidden-token check below |
 | `ship.direct` | globs | none, the lane off | the files the direct lane may push |
+| `ship.direct_max_lines` | positive integer | `20` | direct policy's added-plus-deleted line limit over the whole linear commit range |
+| `ship.direct_max_files` | positive integer | `3` | direct policy's changed-file union limit over that range |
 | `models.builder` | `opus`, `sonnet`, `haiku`, `fable` | `opus` | the model of the BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes |
 | `models.builder_trivial` | the same | `sonnet` | the BUILD node's model on a `trivial` issue |
 | `models.reviewer` | the same | `opus` | the REVIEW node's model |
@@ -152,6 +163,28 @@ wins over the other. A reader asks for the key it needs, and `get ship.sync` and
 answer from the preset where the binding declares only that — those two keys, not a read of the
 whole `[ship]` table, which answers what the file holds; where it declares nothing, both are
 absent, which is the reader's cue to take today's behaviour.
+
+### Validation authority
+
+`ship.validation` is `local` by default. A repository may opt its PR flows into CI validation:
+
+```toml
+[ship]
+validation = "ci"
+validation_checks = ["gates (windows)", "gates (linux)"]
+```
+
+The nonempty, unique check names are literal and case-sensitive, not globs. The owner declares
+that together they execute all selected nonlocal gates, including gates delegated by a `ci`
+notice. `gate.run`, `gate.ci` substitutions and `gate.paths` are the command and selection
+declarations; there is no second command registry. The invoking gate list must equal
+the committed gate list: a branch cannot silently change its own declared validation coverage.
+Update the trusted invoking binding before resuming a gate-list change.
+
+What CI mode requires before review, Ready or merge is [contract §4](contract.md), "Execution
+evidence". It can support a Windows coordinator with admitted Claude workers, but cannot enable
+native Windows Codex command or edit workers. `validation_checks` has no effect in local mode.
+Update older Ouro pins before adding these keys, since older readers reject unknown keys.
 
 ### Model tiers
 
@@ -254,80 +287,51 @@ credential_env = "MOMENTUS_API_KEY"  # default; names a variable, never contains
 | `coordination.credential_env` | environment-variable name: letters, digits and underscores, starting with a letter or underscore | `MOMENTUS_API_KEY` |
 
 Unknown keys, inline keys/tokens and repository shipping tables are refused. Put the key only in
-the invoking coordinator's environment. Claude and Codex preflight/worker subprocesses remove
-the configured variable, as do external Claude/Codex reader launches; tool and bridge children
-inherit that removal, including Windows
-case aliases. Other runtime capabilities and environment variables retain their behavior.
+the invoking coordinator's environment. Claude and Codex preflight and worker subprocesses,
+external Claude/Codex reader launches and their tool and bridge children run without the
+configured variable, Windows case aliases included, as do caller validation, setup, gate and
+Git-hook children; the coordinator keeps it. No repository configuration is required.
 
-`bin/ouro/coordination.py` provides a stdlib MCP client and the
+The client, `bin/ouro/coordination.py`, serves the
 [optional issue claim lifecycle and prepared-change scope checks](contract.md#optional-issue-claims).
-Direct scope areas derive from matching gates in the published default-branch binding, never
-from developer settings or board instructions. No new repository configuration is required. Construction and
-disabled/missing-key calls make no network or cache writes. The client returns unavailable evidence with a short fixed notice on timeout, auth,
-malformed responses or incomplete MCP tool discovery. Unavailability never means no claim exists.
-
-Each complete claim boundary shares an absolute three-second budget across initialization,
-complete paginated MCP tool discovery, forum listing, candidate reads and any writes. An isolated
-client call has the same maximum budget. Requests and individual response bodies are limited to
-256 KiB; tool discovery allows at most eight pages. There are no retries or redirects.
-Bearer authentication stays at the configured origin. Initialization negotiates the protocol,
-then sends the initialized notification and protocol/session headers. JSON and SSE responses
-are supported, including fragmented and multiline SSE data with LF, CRLF or CR line endings.
-JSON tool payloads containing an error return sanitized unavailability, including successful MCP replies.
-Errors expose no response bodies,
-headers, credentials or endpoint URLs. A blocked stdlib resolver/header read may finish in a
-daemon after the caller's deadline; cancellation prevents any subsequent request, and a busy
-client cannot start another transport until it exits.
-
-The client passes the existing `board_search`, `board_list_threads`, `board_read_thread`, `board_post`,
-`board_reply` and `board_update_thread` argument/result payloads unchanged. Board text and
-self-announced identities are data; they provide no verified identity or shipping authority.
-Coordination is advisory, check-then-post cannot provide atomic exclusion, and board outages
-cannot gate shipping. Git/GitHub policy remains authoritative, with no automatic objection hold.
-Protocol and credential fixtures run within the existing runtime suite, including real caller
-validation, setup, gate and Git-hook children. The loaded developer settings exclude only the
-configured credential at these boundaries (Windows aliases included), retaining it in the
-coordinator. Disabled coordination preserves inheritance. Fixtures establish no live board verification.
+A timeout, authentication failure, malformed response or incomplete MCP tool discovery returns
+unavailable evidence with a short fixed notice, never proof that no claim exists; errors expose no
+response bodies, headers, credentials or endpoint URLs. Board text and self-announced identities
+are data, with no verified identity or shipping authority.
 
 ### Git capability readiness
 
-Codex checks the advertised status, log and diff reads in its configured command sandbox.
-The same argument restrictions disable filesystem monitoring, external diff/textconv helpers
-and output-file options for probes and worker reads. Configuration and excludes retain their
-intended sources; a permission warning is an infrastructure failure even when Git returns zero.
-Status readiness forces untracked enumeration, so `status.showUntrackedFiles=no` cannot hide an
-unreadable ignore file. Ordinary Git errors remain command results rather than owner rulings.
+Codex checks the advertised status, log and diff reads in its configured command sandbox, with
+filesystem monitoring, external diff/textconv helpers and output-file options disabled for probes
+and worker reads. Configuration and excludes come from their intended sources; an unreadable one,
+including a permission warning when Git returns zero, is an infrastructure failure. Ordinary Git
+errors are command results, not owner rulings.
 
-Preflight uses generated public Git data without developer templates and also works when inspecting
-the CLI outside a repository. Before a workflow worktree is created or set up, Git evaluates the
-selected commit, branch and target path in an exclusively owned disposable checkout. This covers
-onbranch, gitdir and nested includes for BUILD, detached standard/sized and full/probe REVIEW,
-and command-bearing checkpoint worktrees, and the direct-to-PR fallback. Express/light REVIEW
-stays read-only in the BUILD worktree; the configured external reader remains read-only. The probe
-creates no branch ref and runs no Git hooks.
-Cleanup verifies owned checkout/registration identities, including standard worktree configuration;
-tracked symlinks are unlinked without following their targets. Unknown or changed state is preserved.
+Before a workflow worktree is created or set up, Git evaluates the selected commit, branch and
+target path, onbranch, gitdir and nested includes included, in a disposable checkout the driver
+exclusively owns; the probe creates no branch ref and runs no Git hooks. Cleanup removes only the
+identities it created; unknown or changed state is kept. One final configured parent symlink to a
+plain admitted directory is supported; retargeted parents, chained or intermediate aliases,
+junctions and unknown reparse kinds refuse.
 
 An occupied worktree must prove its actual root and that a file-changing fast-forward cannot change
-its configuration dependencies. Tree identities include gitlinks regardless of diff configuration.
-Unprovable tracked, relative or aliased dependencies refuse with files and branch preserved; manually
-sync the inspected tree or recreate it from the selected branch before retrying. No configuration,
-excludes, credential-directory permission or caller execution override is applied to force success.
-`tests/runtime/git_sandbox.py` runs the actual Windows generated identity/ignore controls separately
-from the filesystem/network conformance probe; its non-Windows skip is not Windows proof.
+its configuration dependencies. Unprovable tracked, relative or aliased dependencies refuse with
+files and branch kept; manually sync the inspected tree or recreate it from the selected branch
+before retrying. No configuration, excludes, credential-directory permission or caller execution
+override is applied to force success.
 
 ### Runtime capability boundary
 
-Codex workers require CLI 0.163.0+ and saved authentication. Both file-only and full preflight
-check the selected CLI, authentication, flags, configured model availability, bridge contract
-and structured file-read proof. Default/full readiness additionally checks OS sandbox startup,
-generated Git queries and a bounded network capability proof before tracker writes or branch
-creation. Each contract makes a small
-file-only model call on generated readiness data for each distinct selected model, requiring a
-successful recorded read as well as the structured answer; these calls appear as PREFLIGHT usage.
-Process and guard failures remain driver errors even when a model returns an owner-stop answer.
-Root AGENTS.md and CLAUDE.md plus .claude/rules text are supplied explicitly;
-path-scoped rules retain their declared scope. Instructions exceeding 128 KiB are refused.
+Codex workers require CLI 0.163.0+ and saved authentication. Preflight checks the selected CLI,
+authentication, flags, each selected model's availability, the bridge contract and a structured
+file-read proof; full readiness also checks OS sandbox startup, the Git reads above and a network
+capability proof, all before tracker writes or branch creation. Each distinct selected model gets
+a small file-only call on generated readiness data, reported as PREFLIGHT usage. TRIAGE takes the
+file-only (READ) preflight; delivery runs and `inspect --check` take full readiness. A READ result
+never admits commands, probes or edits. Process and guard failures are driver errors even when a
+model returns an owner-stop answer. Root AGENTS.md and CLAUDE.md plus .claude/rules text are
+supplied explicitly; path-scoped rules keep their declared scope. Instructions exceeding 128 KiB
+are refused.
 
 | Node | Codex tools |
 |---|---|
@@ -336,141 +340,42 @@ path-scoped rules retain their declared scope. Instructions exceeding 128 KiB ar
 | BUILD | the file tools plus constrained write/edit/delete, the listed acceptance/gate commands and git exploration |
 | Sized/full REVIEW | file tools plus probes in a separate detached worktree; no file edit tools, publishing or commits |
 
-Codex's native shell, apps, plugins, hooks, browser/computer tools, image tools and subagents
-are disabled for nodes. A private stdio MCP bridge exposes only the node's granted operations.
-Exact file-only dispatch sets `features.code_mode.enabled=false`, keeping direct MCP
-list/read/search calls. Codex's required trusted V8 orchestration host remains available; its
-execution contract has no Node, filesystem or network access, and only the three bridge file
-operations are granted. Disabling Code Mode configuration does not mean removing that host.
-Its explicit READ preflight retains CLI version, authentication, model
-availability and genuine structured file-read proof, without unused command-sandbox, network
-or Git controls. TRIAGE selects READ; delivery runs and `inspect --check` retain full preflight.
-File-only FOLLOWUP and express/light REVIEW use the same narrow dispatch contract; this does not
-make their enclosing delivery run file-only. A READ result never serves as command admission.
-Automatic skill catalogs, bundled skills, skill search and skill dependency installation are
-disabled too; the driver supplies the workflow and repository instructions explicitly.
-The CLI itself runs read-only; bridge edits are confined to the worktree and protect
-.git, .claude, .codex, .agents and .aws paths at its root. Symlink escapes and content writes
-through hard-linked files are refused; deleting an alias preserves the other file.
-Nested fixture configuration is ordinary worktree content. Protected manual paths retain both
-their lexical and resolved classification, including junctions and Windows short names; a denial
-keeps its owner edit and merge barrier. Peer worktrees remain outside the node's scope.
+Codex's native shell, apps, plugins, hooks, browser/computer tools, image tools, subagents and
+automatic skill catalogs are disabled for nodes; a private stdio MCP bridge exposes only the
+node's granted operations, and the driver supplies the workflow and repository instructions.
+The CLI itself runs read-only. Bridge edits are confined to the worktree and protect .git,
+.claude, .codex, .agents and .aws paths at its root; symlink escapes and content writes through
+hard-linked files are refused. Protected manual paths are classified both lexically and resolved,
+junctions and Windows short names included, and a denial keeps its owner edit and merge barrier.
+Peer worktrees are outside the node's scope. Edit-capable BUILD also receives the complete
+installed run skill as outer-caller context: the worker edits only through its bridge and never
+re-enters the driver, activates skills or publishes. Missing or invalid installed skill content
+refuses BUILD before dispatch.
+
 Approved commands run through a named Codex workspace sandbox with networking disabled and
-managed requirements included. Linux and macOS use the platform-selected `codex sandbox` interface,
-without a platform subcommand; Windows retains its explicit working-directory argument.
-`tests/runtime/sandbox.py` is the separate native CLI conformance probe, run on each supported
-platform and against the 0.163.0 floor and current CLI, without compatibility wrappers.
-Its default run includes filesystem and network controls; `--control filesystem` and
-`--control network` run independently, so network refusal cannot imply filesystem checks passed.
-The network helper first requires receipt of a generated TCP nonce from an unrestricted child
-at a host loopback listener, then explicit permission denial through the production sandbox argv.
-Each child has a 15-second bound. Admission, timeout, an unavailable listener/client or ambiguous
-results refuse readiness before source/tracker mutation; a disabled-network flag or successful
-print alone is insufficient. This detects loopback admission, not every destination or protocol.
-The generated Python payload is encoded into one argument without literal line breaks, including
-through a Windows CMD launcher; no probe file is created. Refusals report the control phase,
-launcher kind, exit, generated start/receipt markers and output byte counts, never arbitrary child
-stdout/stderr. A start marker is diagnostic only: host nonce admission still refuses, and a missing
-denial receipt remains unavailable proof. Startup, timeout and output-limit failures stay distinct.
-
-Windows command-capable worker readiness currently refuses even if the loopback controls establish denial:
-no Windows sandbox implementation and disabled-network policy has been established as supported.
-The probe does not identify or certify that implementation, and one loopback result cannot
-establish its broader networking policy. Support requires a named implementation and tested policy;
-unavailable proof remains an explicit refusal. Ouro retains the configured Codex implementation, includes
-managed requirements and does not run sandbox setup, create accounts, change global configuration,
-or alter ACLs/firewall policy. Use a host that enforces the requested boundary, such as native
-Linux/WSL, and rerun readiness. This worker check neither establishes Windows caller-validation
-containment nor changes coordinator networking.
-Native Windows dispatch rejects every command, probe or edit capability before worker launch,
-including after successful READ readiness. READ still requires the outer read-only CLI and direct
-file bridge to work; startup or tool-admission failures remain errors, without automatic setup,
-policy changes or a broader Windows support claim.
-No shell chaining or environment assignments are admitted.
+managed requirements included. No shell chaining or environment assignments are admitted.
 Literal `git rm` and `git mv` update worktree files through the bridge; the driver stages them.
-Git exploration disables external diff/textconv helpers and output-file options.
-Environment-blocked commands use the existing validation handoff; permissions are never expanded.
-Normal BUILD execution proof uses the same native-Linux lifecycle boundary. Selected driver
-gates run through its bounded validator; additional observed worker candidates require explicit
-`ouro run N --validate` and the invoking command allowlist. A private worker observation alone
-does not establish completion. Normal delivery on unsupported platforms waits before review,
-Ready or merge; direct-lane and read-only checkpoint exceptions retain their class rules.
-Worker snapshots use held no-follow POSIX inputs, with limits of 64 MiB per file, 512 MiB shared
-file/inventory bytes, 100,000 entries, submodule depth 16 and 8 MiB per Git inventory result.
-Git queries have a bounded timeout. The 60-second snapshot budget is checked between regular-file
-reads; it is not a hard deadline for a stalled filesystem. Unsupported, changing or oversized
-snapshots provide no fingerprint and never authorize a broader execution context.
-Fresh BUILD answers keep `gates_run` and `validation_pending` commands exclusive. Branch history
-retains inherited caller obligations alongside later worker executions of the same command only
-with an earlier valid request. A changed head requires explicit `ouro run N --validate`
-again against the invoking binding's approved commands; worker reports and old-head receipts do
-not clear that barrier. Caller validation requires native Linux and refuses other platforms before command launch with
-exit 75; prior attempts remain preserved, but an early refusal may create no new command-attempt
-log. Use a native Linux host for caller validation. WSL kernel
-identity or runtime markers refuse even a native first executable, regardless of WSL environment
-variables. Unreadable platform facts fail closed. There is no supported child-only interop helper:
-namespace-tool availability does not establish containment. This changes neither host interop nor
-the coordinator's authenticated Windows bridge, worker permissions or command grants. The runtime
-suite separates simulated platform regressions from actual WSL direct/nested Windows controls;
-the latter require `powershell.exe` and `wslpath` on PATH and access to the Windows account's temp
-directory for uniquely owned markers, keeping the Git fixture on Linux. They print readiness,
-immediate liveness, delayed-marker and receipt observations. A pure-Linux skip is not WSL
-conformance evidence.
+A command blocked only by its environment uses the validation handoff; permissions are never
+expanded. The network proof requires a generated loopback nonce to reach an unrestricted child
+and the production sandbox to deny it; admission, timeout or an ambiguous result refuses readiness
+before source or tracker mutation. It detects loopback admission, not every destination or
+protocol.
 
-Caller-validation ownership lives in the validation worktree's Git-private `ouro-validation/lock`.
-Run `ouro validation-lock` there to inspect its owner birth identity, head, batch fingerprint/count,
-boot/namespaces and idle/active/settled phase; full commands remain in attempt evidence.
-`ouro validation-lock --recover` quarantines a stale lock only on native Linux, with matching
-boot/namespaces, available process visibility, an available kernel lease, no visible owner PID
-(including a reused PID), and durable version-2 idle/settled lifecycle evidence. Explicit validation
-enters the lease before validation execution preflight, including receipt reuse and initial cleanliness
-checks. BUILD metadata and ordinary CLI bootstrap/issue lookups remain outside this boundary.
-Every validation execution Git/head/clean operation and command runs in a leased Linux subreaper executor. It survives
-coordinator death and settles only after kernel child reaping proves no owned descendants remain,
-including orphaned Git helpers. Remaining children invalidate helper snapshots and fail commands,
-retaining command logs and attempt results even after settlement. Already-dead adopted children
-also refuse completion proof. Ordinary receipt-backed resume uses the same leased cleanliness
-boundary; settlement alone never validates a command or snapshot. If that executor dies before proof, its active phase refuses recovery
-even when no process is observed. Legacy/empty/corrupt locks and missing or mismatched lifecycle
-proof require manual inspection of the prior execution and its descendants; retain the lock and
-attempts until that investigation establishes safety. No timeout or PID alone permits recovery.
-Repeated recovery with no lock is a no-op; quarantine never replaces prior evidence, alters Git
-or tracker state, or creates a receipt. Resume with `ouro run N --validate` to run the approved
-batch at current inputs; completed results and interrupted attempts remain evidence.
+Native Windows Codex refuses non-READ preflight before CLI, authentication or capability probes,
+and rejects every command, probe or edit dispatch before worker launch: no Windows command-capable
+worker is supported. READ still requires the outer read-only CLI and the file bridge to work.
+Ouro runs no sandbox setup, creates no accounts and changes no global configuration, ACLs or
+firewall policy. For a Windows driver, select a separate Claude developer profile via
+`--developer-config` or `OURO_DEVELOPER_CONFIG` and use repository CI validation, or use native
+Linux Codex. Execution evidence, caller validation and its lock, and interrupted BUILD recovery
+are the driver's rules, in [contract §4](contract.md).
 
-An interrupted dirty fix can be recovered explicitly with
-`ouro run N --recover-build path/to/file --validate`, repeating the selected source-file flag.
-Run this from the main checkout after inspecting the partial edits. Recovery never ingests all
-dirty files: only explicitly selected independent UTF-8 source files become ignored references
-in a private clean checkout. The original dirty worktree and all evidence remain untouched.
-The printed checkout is the ordinary resume location; Git/GitHub choose every subsequent
-transition. Its original-head validation is executed genuinely there, and a completed BUILD
-requires fresh validation at its new commit. No receipt, accepted BUILD result or claim cache
-is copied. Existing fix caps, review requirements and shipping permissions remain intact.
-Native Linux process observation is required; observable live original workers and active or
-uncertain caller leases refuse. Windows/WSL recovery is unavailable. Unreadable process cwd
-values stay unknown, with a notice. The observer does not prove every historical descendant
-ended; all original processes are preserved and the private clone relies only on its own executions. Bounds are 32 selected files, 1 MiB per UTF-8 file and 4 MiB total. Aliases, protected
-paths and instructions refuse. Private snapshots survive normal landed-worktree cleanup.
-Private cloning uses an empty Git template; its ignore entry is appended only through held,
-no-follow private metadata directories. Intended global configuration and ignores remain in use;
-directory/file overrides and a redirected clone root refuse. An internal local Git input pointer
-enables preserved references at their original head; it
-does not cache workflow state. A separate clone uses normal coordination conflict handling,
-including explicit `--override-claim` where required. See the interrupted BUILD recovery
-contract for refusal and retry behavior.
-
-Every node uses a fresh session. Final results are validated against complete node schemas
-separately from JSONL events; missing results, error events or unusable file tools are driver
-errors. Accepted-node session IDs, usage and tool-call evidence remain in the in-process ledger.
-A separate bounded ledger retains the latest 128 runtime attempts: node, backend/model, sanitized
-session ID, elapsed seconds, available token counts, provider completion, exit/event counts,
-failure class, validation phase and adapter outcome. Missing metadata and unreported cost are
-unknown. Adapter return and provider completion do not establish workflow acceptance; rejected
-attempts never enter accepted-node accounting. Attempt diagnostics retain no event bodies, prompts,
-source, tool arguments, environment values or error messages. The CLI emits usage and attempt
-tables on exit, including coordinator errors after successful nodes and interrupted attempts.
-Node timeouts and cancellation clean up owned descendants.
+Every node uses a fresh session. Final results are validated against complete node schemas;
+missing results, error events or unusable file tools are driver errors. The CLI prints usage and
+attempt tables on exit, including coordinator errors after successful nodes and interrupted
+attempts; missing metadata and unreported cost are unknown. Attempt diagnostics keep no event
+bodies, prompts, source, tool arguments, environment values or error messages. Node timeouts and
+cancellation clean up owned descendants.
 
 `python3 bin/ouro-developer.py install` installs user-wide Codex skills and a launcher;
 `inspect --check` inspects selection and runs preflight; `uninstall` removes owned installation
@@ -568,7 +473,9 @@ sees as a directory. The overlay entry is unchecked.
   `python3 bin/ouro-binding.py direct <path>...` reads `ship.direct` and prints each given path
   that no glob matches, one per line, by the same `fnmatch.fnmatchcase` reading: exit 1 when it
   printed any, 0 when every path matches, 2 with a message on stderr when the key is empty or
-  absent; `Push-Direct.ps1` asks it. Like every key but `repo.checkout`, the overlay may not set it.
+  absent. This path-only query is a prefilter: `Push-Direct.ps1` validates the whole linear
+  commit range against the fetched base binding by the direct lane's rules (contract §4). Like
+  every key but `repo.checkout`, the overlay may not set these keys.
 - Every `[[gate]]` needs a non-empty `areas` and `run`. An issue carrying an area label that matches
   no gate, with no `"*"` gate, is not executable; the driver stops and says so. A `run` may contain
   `<ouro>`, the plugin root, replaced before the command runs — that is how a gate the plugin ships
@@ -590,7 +497,10 @@ sees as a directory. The overlay entry is unchecked.
   pull request neither it nor the builder runs the gate, and the record names it, by its `ci`
   text, among the gates the checks run; a `ci` whose printed text starts with `skip` is the other
   case, a gate the checks cannot run, which the driver runs itself, as it runs the token scan by
-  name; in the direct lane the driver runs every selected gate.
+  name. The gates Action's `selection-mode` output is exactly `full`, `paths` or `fallback`; a
+  missing output is unknown, never proof that selection was by paths. Callers delegating a
+  whole-set provider should run it conservatively for full, fallback or unknown modes after their
+  required gates pass.
 - A `[[gate]]` may also declare `paths`, optional: a non-empty list of non-empty strings. `check`
   refuses a value that is not a list, an empty list and an empty or non-string entry, naming the
   gate. Each entry is a git pathspec, matched against the repository-relative paths a pull request
@@ -626,7 +536,8 @@ sees as a directory. The overlay entry is unchecked.
   gate matches with .NET, so `check` catches only what Python refuses: Python's named group
   `(?P<n>x)` and possessive `x++` pass `check` and throw in the gate, and .NET's `(?<n>x)` is
   refused by `check` though the gate accepts it. Keep a pattern in the syntax both engines accept.
-  All are matched case-insensitively.
+  All are matched case-insensitively. `repo.release_notes` is compiled the same way and matched
+  as its row says.
 - `report_only` names signals without regard to case: the index checks are `S4a` and `S4b`, and
   `S4` matches neither. The full set is `S1 S2 S3 S4a S4b S7 S8 S9 S10`. `check` refuses a
   non-list or a non-string entry but not an unknown name; a name outside the set silently
@@ -642,9 +553,9 @@ sees as a directory. The overlay entry is unchecked.
   `ship.policy`; `stop-at-pr` in the binding means `trivial` is advisory and the run stops at the
   PR.
 - **A gate is the narrowest command that can fail for the diff.** CI runs the matching
-  `[[gate]]` entries as bound. The driver runs selected gates the checks skip and separately
-  establishes final committed-input execution proof, which can require an executed command even
-  when CI also runs it. A gate that merely repeats a PR's required status query
+  `[[gate]]` entries as bound. The driver runs selected gates the checks skip. Local validation
+  separately establishes committed-input proof; explicit CI validation uses the declared final-head
+  checks for covered gates. A gate that merely repeats a PR's required status query
   (`gh pr checks <PR> --required`) is a binding smell: its `run` should name the narrow,
   already-scoped check and leave the full suite to CI.
 - **Protected prefixes are absolute.** The driver refuses to land them and never cuts a branch
@@ -670,17 +581,3 @@ sees as a directory. The overlay entry is unchecked.
   `gh pr`, `gh api graphql`) and the scripts they run all use it. A Claude Code cloud session's
   proxy serves GitHub's REST API and refuses GraphQL, so the driver's first tracker read
   (`gh issue view`) fails there and the run ends as a driver error (exit 1).
-
-The validation executor allows 30 seconds after an operation returns for its owned children to finish. An unsettled child leaves an active lock for inspection; elapsed time never authorizes recovery.
-
-### Codex event capture bounds
-
-Codex JSON event capture allows at most 64 MiB combined stdout/stderr per attempt,
-with stderr still limited to 8 MiB. Parsing admits at most 100,000 frames of at
-most 8 MiB each and retains only bounded session, numeric usage and failure metadata;
-MCP item bodies are discarded after parsing. The separate final-message file remains
-the answer authority, is limited to 4 MiB and must pass the node schema. Missing
-completion, late provider failures, oversized frames or capture overflow reject the
-node. Codex bridge-command capture retains its existing 8 MiB limit, timeout and
-process-tree cleanup. Claude's existing transport behavior is unchanged. Failure
-metadata uses the existing attempt diagnostics.
