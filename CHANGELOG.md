@@ -5,11 +5,10 @@ Consumers pin the plugin by tag, so a release is the unit a person or a resolver
 moving a pin. One bullet per landing; an entry names no issue or pull request number; the
 `chore(release)` bumps themselves are not entries.
 
-This file keeps the minor series being prepared under UNRELEASED and the two preceding
-minor series. Older published sections, including their **Consumer contract:** migration
-notes, remain verbatim in dated root archives:
-[v0.2 through v1.3](CHANGELOG-0.2-through-1.3.md) and [v1.4](CHANGELOG-1.4.md). An archive is
-frozen history; the linked current documentation defines the protocol.
+Released sections stay in this file. The oldest ones, including their **Consumer contract:**
+migration notes, are in frozen root archives:
+[v0.2 through v1.3](CHANGELOG-0.2-through-1.3.md) and [v1.4](CHANGELOG-1.4.md). The linked
+current documentation defines the protocol.
 
 A `**Consumer contract:**` line marks an entry that moves something a consumer's own files
 name: a skill's invocation flags or its credential and tool requirements, a table or key of the
@@ -20,6 +19,39 @@ one-line migration. A release carrying any such entry takes a minor version bump
 release takes a patch.
 
 ## [UNRELEASED]
+
+## [v1.8.0] - 2026-10-28
+
+- Under `ship.validation = "ci"`, an acceptance command only the pull request's checks run, through
+  a gate whose `paths` the change does not touch, stops the run right after BUILD with
+  `acceptance unrunnable`, naming the gate's paths, before any push or CI wait. An unavailable
+  external reader's note names the last line of its stderr, such as an expired login.
+
+- The token hook's refusal names a `cd` or `git -C` target it cannot resolve (a shell variable,
+  `cd -`, a missing directory), where a binding's `forbidden_check = "off"` cannot apply, and says
+  to write the directory literally.
+
+- A gate's `paths` is its only selector. The driver, the direct lane and the gates Action read
+  one rule, which `python3 bin/ouro-binding.py gates --changed <base> [--head <rev>]` prints: the
+  diff from the merge base, with a gate without `paths` running on every change. The BUILD brief
+  grants every gate, whatever the issue's area labels; those labels still drive triage, branch
+  names and coordination claims.
+  **Consumer contract:** `[[gate]].areas` was required and selected gates by the issue's area
+  labels; `check` now refuses it, and `gates <area-label>` is now `gates [--changed <base>]`.
+  Migration: delete every gate's `areas` line, and give each gate that was scoped to an area the
+  `paths` that area's changes touch.
+
+- Unsupported validation hosts name the selected authority and exact pending commands, with
+  explicit CI coverage or native-Linux resume guidance. Mac/Windows BUILD handoffs stay usable;
+  the Mac existing-PR migration recipe preserves prepared source and local-only obligations.
+
+- A run that waits because its host cannot prove BUILD's commands (native Windows, WSL) now names
+  both ways forward: let the pull request's checks prove them with `ship.validation = "ci"` and
+  `ship.validation_checks`, or prove them from a native Linux host with `ouro run N --validate`.
+
+- The token hook reads an attached `-F<file>` only outside quotes in the publishing call's own
+  statement, so a later `pwsh -File`, `-Force` or `-Filter`, or the same word in a quoted title, no
+  longer blocks a commit or issue as an unreadable body file.
 
 ## [v1.7.1] - 2026-10-28
 

@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .runtime.process import DriverError, R, child_env, feed
+from .runtime.process import DriverError, R, child_env, feed, worker_env
 
 PLUGIN = Path(__file__).resolve().parents[2]
 BIN = PLUGIN / "bin"
@@ -197,7 +197,6 @@ class Env:
 
     def run(self, argv, **kwargs):
         """Launch with the loaded coordinator's credential excluded; keep other credentials."""
-        from .coordination import worker_env
         kwargs["env"] = {**(kwargs.get("env") or {}), **worker_env(self.runtime)}
         return run(argv, **kwargs)
 
@@ -233,7 +232,6 @@ class Env:
     def pr_checks(self):
         """Whether a workflow at origin/<default> names pull_request: without one a pull request gets no check, and every selected gate runs here."""
         if self._pr_checks is None:
-            from .coordination import worker_env
             try:
                 self._pr_checks = bool(self.ob.pr_workflows(self.default, self.main, env=child_env(worker_env(self.runtime))))
             except SystemExit as x:

@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from .. import sh
-from ..coordination import worker_env
+from .process import worker_env
 from . import Capabilities, READ, diagnostics, process, schema
 from . import codex_events
 from .claude import tail

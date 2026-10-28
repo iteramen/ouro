@@ -226,7 +226,6 @@ else {
             'schema = 1'
             ''
             '[[gate]]'
-            'areas = ["*"]'
             'run = "pwsh -NoProfile -Command exit 1"'
             'ci = "pwsh -NoProfile -Command exit 0"'
         )
@@ -251,9 +250,9 @@ else {
         )
         Set-Content -LiteralPath $bindingPath -Encoding utf8 -Value @(
             'schema = 1', '',
-            '[[gate]]', 'areas = ["*"]', 'run = "python3 meet.py a.mark b.mark"', '',
-            '[[gate]]', 'areas = ["*"]', 'run = "python3 meet.py b.mark a.mark"', '',
-            '[[gate]]', 'areas = ["*"]', 'run = "pwsh -NoProfile -Command exit 4"'
+            '[[gate]]', 'run = "python3 meet.py a.mark b.mark"', '',
+            '[[gate]]', 'run = "python3 meet.py b.mark a.mark"', '',
+            '[[gate]]', 'run = "pwsh -NoProfile -Command exit 4"'
         )
         $r = Invoke-GateStep -ConsumerDir $Consumer -Parallel '2'
         Assert-Equal 1 $r.Code 'parallel 2: the failing gate fails the loop'
@@ -284,7 +283,6 @@ else {
             'schema = 1'
             ''
             '[[gate]]'
-            'areas = ["*"]'
             "run = ""pwsh -NoProfile -File '$checkRootFwd' -OuroRoot '<ouro>' -ConsumerRoot '$consumerFwd'"""
         )
         $callerOutput = Join-Path $Consumer 'caller-output.txt'
@@ -305,10 +303,10 @@ else {
         New-Item -ItemType Directory -Path (Join-Path $Consumer 'private-suite-dir') | Out-Null
         Set-Content -LiteralPath (Join-Path $Consumer 'private-suite-dir/timing-fail.ps1') -Encoding utf8 -Value @('Start-Sleep -Milliseconds 180', 'exit 2')
         Set-Content -LiteralPath $bindingPath -Encoding utf8 -Value @(
-            'schema = 1', '[[gate]]', 'areas = ["*"]'
+            'schema = 1', '[[gate]]'
             'run = "pwsh -NoProfile -Command exit 0"'
             'ci = "pwsh -NoProfile -File private-suite-dir/timing-fail.ps1 TIMING_ARGUMENT_CANARY"'
-            '[[gate]]', 'areas = ["*"]', 'run = "pwsh -NoProfile -Command exit 0"'
+            '[[gate]]', 'run = "pwsh -NoProfile -Command exit 0"'
         )
         $summaryFile = Join-Path $Consumer 'timings.md'
         Set-Content -LiteralPath $summaryFile -Encoding utf8 -Value '# Previous step'
@@ -339,7 +337,6 @@ else {
             'schema = 1'
             ''
             '[[gate]]'
-            'areas = ["*"]'
             'run = "pwsh -NoProfile -Command exit 0"'
         )
         $passingBadSummary = Invoke-GateStep -ConsumerDir $Consumer -Summary $Consumer -Output $Consumer
@@ -362,7 +359,7 @@ else {
         if (Test-Path -LiteralPath $Consumer) { Remove-Item -LiteralPath $Consumer -Recurse -Force }
     }
 
-    # (d) select-by-paths, in a consumer with real commits: gate A declares ./a/, B x/ and
+    # (d) select-by-paths, in a consumer with real commits: gate A declares ./a/ less a/skip.txt, B x/ and
     # :(glob)b/**, D *.md, and C declares none. Each row commits one change on top of the base
     # commit and runs the block with the input on, as a pull_request against that base, unless the
     # row says otherwise. A skipped gate's PASS pattern is the one every full-set row matches.
@@ -374,31 +371,27 @@ else {
             if ($LASTEXITCODE -ne 0) { throw "git $args in $Sel failed (exit $LASTEXITCODE)" }
         }
         Invoke-SelGit init -q
-        foreach ($f in @('a/f.txt', 'b/f.txt', 'z/f.txt', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml', 'actions/gates-x/f.txt', '.claude/ouro.toml')) {
+        foreach ($f in @('a/f.txt', 'b/f.txt', 'z/f.txt', 'ab/f.txt', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml', 'actions/gates-x/f.txt', '.claude/ouro.toml')) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent (Join-Path $Sel $f)) | Out-Null
         }
-        foreach ($f in @('a/f.txt', 'b/f.txt', 'z/f.txt', 'top.md', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml', 'actions/gates-x/f.txt')) {
+        foreach ($f in @('a/f.txt', 'a/skip.txt', 'b/f.txt', 'z/f.txt', 'ab/f.txt', 'top.md', 'd/deep.md', '.github/workflows/w.yml', 'actions/gates/action.yml', 'actions/gates-x/f.txt')) {
             Set-Content -LiteralPath (Join-Path $Sel $f) -Encoding utf8 -Value '# base'
         }
         Set-Content -LiteralPath (Join-Path $Sel '.claude/ouro.toml') -Encoding utf8 -Value @(
             'schema = 1'
             ''
             '[[gate]]'
-            'areas = ["*"]'
             'run = "pwsh -NoProfile -Command exit 0 # gate-A"'
-            'paths = ["./a/"]'
+            'paths = ["./a/", ":(exclude)a/skip.txt"]'
             ''
             '[[gate]]'
-            'areas = ["*"]'
             'run = "pwsh -NoProfile -Command exit 0 # gate-B"'
             'paths = ["x/", ":(glob)b/**"]'
             ''
             '[[gate]]'
-            'areas = ["*"]'
             'run = "pwsh -NoProfile -Command exit 0 # gate-C"'
             ''
             '[[gate]]'
-            'areas = ["*"]'
             'run = "pwsh -NoProfile -Command exit 0 # gate-D"'
             'paths = ["*.md"]'
         )
@@ -475,6 +468,24 @@ else {
         $r = Invoke-SelectRow -Change 'actions/gates-x/f.txt'
         Assert-Selection $r @('C') @('A', 'B', 'D') 'a change under actions/gates-x/'
         Assert-NoMatch 'every gate runs' $r.Text 'a sibling of the gates Action: no full set'
+
+        # The one diff every selector reads: an exclude pathspec drops its path, a sibling sharing
+        # a prefix is another directory, and with no rename pairing a delete or a move is seen at
+        # the path it left.
+        $r = Invoke-SelectRow -Change 'a/skip.txt'
+        Assert-Selection $r @('C') @('A', 'B', 'D') 'a diff touching only the path gate A excludes'
+        $r = Invoke-SelectRow -Change 'ab/f.txt'
+        Assert-Selection $r @('C') @('A', 'B', 'D') 'a diff touching only ab/, a sibling of a/'
+        Invoke-SelGit checkout -q --detach $selBase
+        Invoke-SelGit rm -q -- a/f.txt
+        Invoke-SelGit commit -q -m 'delete a/f.txt'
+        $r = Invoke-GateStep -ConsumerDir $Sel -Select 'true' -EventName 'pull_request' -BaseSha $selBase
+        Assert-Selection $r @('A', 'C') @('B', 'D') 'a diff that deletes a/f.txt'
+        Invoke-SelGit checkout -q --detach $selBase
+        Invoke-SelGit mv -- b/f.txt z/moved.txt
+        Invoke-SelGit commit -q -m 'move b/f.txt to z/'
+        $r = Invoke-GateStep -ConsumerDir $Sel -Select 'true' -EventName 'pull_request' -BaseSha $selBase
+        Assert-Selection $r @('B', 'C') @('A', 'D') 'a diff that moves b/f.txt out of b/'
 
         # A push selects by the diff against the tip the branch had before it, github.event.before;
         # GitHub fills no pull_request base on a push.
@@ -555,221 +566,6 @@ else {
             $r = Invoke-GateStep -ConsumerDir $Sel -Select 'true' -EventName 'pull_request' -BaseSha $selBase
             Assert-Selection $r @('A', 'C') @('B', 'D') 'a pull request that commits an executable git'
             Assert-NoMatch 'FAKE-GIT-RAN' $r.Text 'a committed git at the root: the Action never runs it'
-        }
-
-        # Selection regressions use this repository's actual gate metadata, not a
-        # second set of paths. Only the commands become harmless process markers.
-        $ownBinding = Join-Path $Base '.claude/ouro.toml'
-        if (-not (Test-Path -LiteralPath $ownBinding)) {
-            Write-Host '  skip: private binding absent; private dependency-selection rows only' -ForegroundColor DarkGray
-        }
-        else {
-            $ownWorkflow = Join-Path $Base '.github/workflows/gates.yml'
-            if (Test-Path -LiteralPath $ownWorkflow) {
-                $workflowText = Get-Content -LiteralPath $ownWorkflow -Raw -Encoding utf8
-                $events = [regex]::Match($workflowText, '(?m)^on:[ \t]*\r?\n(?<events>(?:(?:[ \t]+\S.*|[ \t]*)(?:\r?\n|$))+)').Groups['events'].Value
-                $dispatch = [regex]::Match($events, '(?m)^  workflow_dispatch:[^\r\n]*(?:\r?\n|$)(?:(?:[ \t]{3,}\S.*|[ \t]*)(?:\r?\n|$))*').Value
-                Assert-Match '(?m)^  workflow_dispatch:[ \t]*\{\}[ \t]*\r?$' $dispatch 'the actual repository workflow declares manual dispatch under on'
-                Assert-NoMatch '(?m)^[ \t]+inputs[ \t]*:' $dispatch 'the actual manual dispatch declares no inputs'
-                $jobs = [regex]::Match($workflowText, '(?m)^jobs:[ \t]*\r?\n(?<jobs>(?:(?:[ \t]+\S.*|[ \t]*)(?:\r?\n|$))+)').Groups['jobs'].Value
-                $providerJob = [regex]::Match($jobs, '(?m)^  full-no-binding:[ \t]*\r?\n(?:(?:[ \t]{3,}\S.*|[ \t]*)(?:\r?\n|$))*').Value
-                Assert-Match '(?m)^    needs:[ \t]*gates[ \t]*\r?$' $providerJob 'the full No binding provider waits for the Gates matrix'
-                $condition = [regex]::Match($providerJob, '(?m)^    if:[ \t]*(.+)\r?$').Groups[1].Value.Trim()
-                Assert-NoMatch '\b(?:always|success|failure|cancelled)\(' $condition 'provider condition retains the implicit successful-needs requirement'
-                foreach ($os in 'linux', 'windows') {
-                    Assert-Match ('(?m)^      selection_' + $os + ': \$\{\{ steps\.selection\.outputs\.selection_' + $os + ' \}\}\r?$') $jobs "matrix job exposes a distinct $os output"
-                }
-                $step = [regex]::Match($jobs, '(?m)^      - name: Report selection for this OS\r?\n(?:(?:[ \t]{8,}\S.*|[ \t]*)(?:\r?\n|$))*').Value
-                Assert-Match '(?m)^        id: selection\r?$' $step 'the bridge carries the id used by both job outputs'
-                Assert-Match '(?m)^      - name: Gates from the binding\r?\n        id: gates\r?\n' $jobs 'the Action step carries the id read by the bridge'
-                Assert-Match 'SELECTION_MODE: \$\{\{ steps\.gates\.outputs\.selection-mode \}\}' $step 'bridge consumes the actual Action output through env'
-                Assert-Match 'SELECTION_OS: \$\{\{ matrix\.os \}\}' $step 'bridge takes its OS from the existing matrix'
-                $bridgeText = [regex]::Match($step, '(?m)^        run: \|\r?\n(?<script>(?:(?:[ \t]{10,}\S.*|[ \t]*)(?:\r?\n|$))+)').Groups['script'].Value
-                if (-not $bridgeText) { throw 'missing actual selection bridge script' }
-                $bridge = [scriptblock]::Create($bridgeText)
-                function Invoke-SelectionBridge([string]$Os, [string]$Mode) {
-                    $saved = @{}; foreach ($name in 'SELECTION_OS', 'SELECTION_MODE', 'GITHUB_OUTPUT') { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
-                    $output = Join-Path $Sel ('bridge-' + [guid]::NewGuid().ToString('N'))
-                    try {
-                        $env:SELECTION_OS = $Os; $env:SELECTION_MODE = $Mode; $env:GITHUB_OUTPUT = $output
-                        & $bridge | Out-Null
-                        if (Test-Path -LiteralPath $output) { [IO.File]::ReadAllText($output) } else { '' }
-                    }
-                    finally { foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) } }
-                }
-                Assert-Equal '' (Invoke-SelectionBridge 'other' 'full') 'bridge emits nothing for an unknown OS'
-                # Closed projection of this one GitHub condition, not a workflow-expression engine.
-                $projected = $condition.Replace("startsWith(github.ref, 'refs/tags/')", '$caseTag').Replace('github.event_name', '$caseEvent').
-                    Replace('needs.gates.outputs.selection_linux', '$caseLinux').Replace('needs.gates.outputs.selection_windows', '$caseWindows').
-                    Replace('||', ' -or ').Replace('&&', ' -and ').Replace('!=', ' -ine ').Replace('==', ' -ieq ').Replace('!', '-not ')
-                $unknown = [regex]::Replace($projected, "'[^']*'|\`$(?:caseTag|caseEvent|caseLinux|caseWindows)|-or|-and|-ine|-ieq|-not|[()\s]", '')
-                if ($unknown) { throw "unrecognized provider-condition syntax: $unknown" }
-                $route = [scriptblock]::Create($projected)
-                foreach ($left in 'paths', 'full', 'fallback', '', 'invalid', 'PATHS') { foreach ($right in 'paths', 'full', 'fallback', '', 'invalid', 'PATHS') {
-                    $outputs = @{ linux = (Invoke-SelectionBridge 'linux' $left); windows = (Invoke-SelectionBridge 'windows' $right) }
-                    foreach ($order in @(@('linux', 'windows'), @('windows', 'linux'))) {
-                        $combined = @{}
-                        foreach ($os in $order) {
-                            # Runner matrix aggregation ignores empty/nonemitted output values.
-                            foreach ($line in ($outputs[$os] -split "`n")) { if ($line) { $key, $value = $line.Split('=', 2); $combined[$key] = $value } }
-                        }
-                        $caseEvent = 'pull_request'; $caseTag = $false
-                        $caseLinux = [string]$combined['selection_linux']; $caseWindows = [string]$combined['selection_windows']
-                        Assert-Equal ($left -cne 'paths' -or $right -cne 'paths') ([bool](& $route)) "provider routing $left/$right, order $($order -join ',')"
-                    }
-                } }
-                foreach ($case in @(
-                    @{ Event = 'workflow_dispatch'; Tag = $true; Status = 'success'; Want = $true },
-                    @{ Event = 'schedule'; Tag = $true; Status = 'success'; Want = $true },
-                    @{ Event = 'push'; Tag = $true; Status = 'success'; Want = $false },
-                    @{ Event = 'push'; Tag = $false; Status = 'failure'; Want = $false },
-                    @{ Event = 'push'; Tag = $false; Status = 'cancelled'; Want = $false }
-                )) {
-                    $caseEvent = $case.Event; $caseTag = $case.Tag; $caseLinux = 'full'; $caseWindows = 'full'
-                    Assert-Equal $case.Want ($case.Status -ceq 'success' -and [bool](& $route)) "provider event $($case.Event), tag=$($case.Tag), needs=$($case.Status)"
-                }
-                Assert-Match '(?m)^    uses:[ \t]*\./\.github/workflows/no-binding\.yml[ \t]*\r?$' $providerJob 'the full No binding provider reuses the same-commit workflow'
-                Assert-NoMatch '(?m)^    (?:runs-on|steps|secrets)[ \t]*:' $providerJob 'the provider call adds no runner, copied steps or secrets'
-            }
-            elseif ((Get-Content -LiteralPath (Join-Path $Base 'release/export-exclude.json') -Raw -Encoding utf8) -match '"\.github/workflows/gates\.yml"') {
-                # The export's verify tree overlays the binding but leaves this workflow out by design.
-                Write-Host '  skip: the exported tree leaves out the private Gates workflow; its rows run in the private repository' -ForegroundColor DarkGray
-            }
-            else { Assert-Equal $true $false 'the private repository Gates workflow exists' }
-            $noBindingWorkflow = Join-Path $Base '.github/workflows/no-binding.yml'
-            if (Test-Path -LiteralPath $noBindingWorkflow) {
-                $calleeText = Get-Content -LiteralPath $noBindingWorkflow -Raw -Encoding utf8
-                $calleeEvents = [regex]::Match($calleeText, '(?m)^on:[ \t]*\r?\n(?<events>(?:(?:[ \t]+\S.*|[ \t]*)(?:\r?\n|$))+)').Groups['events'].Value
-                $call = [regex]::Match($calleeEvents, '(?m)^  workflow_call:[^\r\n]*(?:\r?\n|$)(?:(?:[ \t]{3,}\S.*|[ \t]*)(?:\r?\n|$))*').Value
-                Assert-Match '(?m)^  workflow_call:[ \t]*\{\}[ \t]*\r?$' $call 'the actual No binding workflow declares a reusable call under on'
-                Assert-Match '(?m)^  workflow_dispatch:[ \t]*\{\}[ \t]*\r?$' $calleeEvents 'the same No binding provider can run manually without repeating Gates'
-                Assert-NoMatch '(?m)^[ \t]+(?:inputs|secrets)[ \t]*:' $call 'the reusable No binding workflow declares no inputs or secrets'
-            }
-            else { Assert-Equal $true $false 'the actual No binding provider workflow exists' }
-            $depGates = @(& $pythonCmd.Source (Join-Path $Base 'bin/ouro-binding.py') get gate $ownBinding | ConvertFrom-Json)
-            if ($LASTEXITCODE -ne 0 -or $depGates.Count -eq 0) { throw 'cannot read the actual binding for dependency selection' }
-            $depCommands = @($depGates | ForEach-Object { $_.run })
-            $runtime = 'python3 tests/runtime/runtime.Tests.py'
-            $binding = 'python3 bin/ouro-binding.py --selftest'
-            $tokens = 'python3 bin/forbidden-tokens.py --selftest'
-            $hooks = 'pwsh -NoProfile -File tests/hooks/Test-Hooks.Tests.ps1'
-            $docs = 'pwsh -NoProfile -File bin/Test-DocsFreshness.ps1'
-            $driver = 'python3 tests/driver/driver.Tests.py'
-            $changelog = 'pwsh -NoProfile -File bin/Test-ChangelogEntry.ps1'
-            $export = 'python3 release/export.Tests.py'
-            $actionConsumer = 'pwsh -NoProfile -File tests/action-gates/Test-ActionGates.Tests.ps1'
-            $vendor = 'pwsh -NoProfile -File tests/vendor-ouro/Vendor-Ouro.Tests.ps1'
-            $provider = 'python3 release/no-binding-gate.py'
-            $direct = 'pwsh -NoProfile -File tests/land-scripts/Push-Direct.Tests.ps1'
-            $depRows = @(
-                @{ Path = '.claude/ouro.toml'; Gates = @($actionConsumer) },
-                @{ Path = '.github/workflows/gates.yml'; Gates = @($actionConsumer) },
-                @{ Path = '.github/workflows/no-binding.yml'; Gates = @($actionConsumer) },
-                @{ Path = 'bin/ouro-binding.py'; Gates = @($runtime, $tokens, $hooks, $export) },
-                @{ Path = 'bin/ouro/triage.py'; Gates = @($driver); Absent = @($runtime) },
-                @{ Path = 'bin/ouro/ops.py'; Gates = @($driver); Absent = @($runtime) },
-                @{ Path = 'bin/ouro/runtime/codex.py'; Gates = @($runtime, $driver) },
-                @{ Path = 'bin/ouro/node.py'; Gates = @($runtime, $driver) },
-                @{ Path = 'bin/ouro/validation.py'; Gates = @($runtime, $driver) },
-                @{ Path = 'bin/ouro/coordination.py'; Gates = @($runtime, $driver) },
-                @{ Path = 'bin/ouro/runtime/process.py'; Gates = @($runtime, $driver, $direct, $vendor, $provider) },
-                @{ Path = 'bin/ouro-direct.py'; Gates = @($direct, $vendor, $provider) },
-                @{ Path = 'tests/driver/coordination_cases.py'; Gates = @($runtime); Absent = @($vendor, $provider) },
-                @{ Path = 'tests/runtime/file_only_tests.py'; Gates = @($runtime); Absent = @($vendor, $provider) },
-                @{ Path = 'tests/ordinary/Retained.Tests.ps1'; Gates = @($vendor, $provider) },
-                @{ Path = 'tests/runtime-extra/Retained.Tests.py'; Gates = @($vendor, $provider) },
-                @{ Path = 'tests/driver-extra/Retained.Tests.py'; Gates = @($vendor, $provider) },
-                @{ Path = 'tests/runtime/file_only_tests.py'; Gates = @($runtime); Absent = @($vendor, $provider); Mode = 'delete' },
-                @{ Path = 'tests/driver/coordination_cases.py'; Gates = @($runtime); Absent = @($vendor, $provider); Mode = 'delete' },
-                @{ Path = 'tests/runtime/file_only_tests.py'; Gates = @($runtime, $vendor, $provider); Mode = 'rename'; To = 'tests/ordinary/Moved.Tests.py' },
-                @{ Path = 'templates/ouro.toml.example'; Gates = @($binding) },
-                @{ Path = '.claude-plugin/plugin.json'; Gates = @($binding) },
-                @{ Path = 'tests/runtime/owned_children.py'; Gates = @($runtime, $driver) },
-                @{ Path = 'hooks/hooks.json'; Gates = @($changelog) },
-                @{ Path = 'bin/forbidden-tokens.py'; Gates = @($export) },
-                @{ Path = '.gitignore'; Gates = @($docs) },
-                @{ Path = 'nested/.gitignore'; Gates = @($docs) },
-                @{ Path = 'nested/deep/.gitignore'; Gates = @($docs) },
-                @{ Path = '.gitignore'; Gates = @($docs); Mode = 'delete' },
-                @{ Path = 'nested/.gitignore'; Gates = @($docs); Mode = 'delete' },
-                @{ Path = '.gitignore'; Gates = @($docs); Mode = 'rename'; To = 'moved-ignore.txt' },
-                @{ Path = 'nested/.gitignore'; Gates = @($docs); Mode = 'rename'; To = 'nested/moved-ignore.txt' },
-                @{ Path = 'dependency-unrelated.txt'; Gates = @($docs); Mode = 'rename'; To = 'incoming/.gitignore' },
-                @{ Path = 'tests/runtime/owned_children.py'; Gates = @($driver); Mode = 'delete' },
-                @{ Path = 'tests/runtime/owned_children.py'; Gates = @($driver); Mode = 'rename'; To = 'moved-helper.py' },
-                @{ Path = 'bin/ouro/triage.py'; Gates = @($driver); Absent = @($runtime); Mode = 'delete' },
-                @{ Path = 'bin/ouro/ops.py'; Gates = @($driver); Absent = @($runtime); Mode = 'delete' },
-                @{ Path = 'bin/ouro/triage.py'; Gates = @($runtime, $driver); Mode = 'rename'; To = 'bin/ouro/renamed-triage.py' },
-                @{ Path = '.gitignore-other'; Gates = @(); Absent = @($docs) }
-            )
-            Invoke-SelGit checkout -q --detach $selBase
-            Set-Content -LiteralPath (Join-Path $Sel 'dependency-marker.py') -Encoding utf8 -Value 'import sys; print(sys.argv[1])'
-            $depPaths = @($depRows.Path | Select-Object -Unique)
-            foreach ($path in $depPaths) {
-                if ($path -ceq '.claude/ouro.toml') { continue }  # Keep the actual gate metadata valid.
-                $file = Join-Path $Sel $path
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $file) | Out-Null
-                Set-Content -LiteralPath $file -Encoding utf8 -Value '# generated dependency input'
-            }
-            Invoke-SelGit add -A
-            Invoke-SelGit add -f -- .claude/ouro.toml dependency-marker.py @depPaths
-            Invoke-SelGit commit -q -m 'generated dependency inputs'
-            $depInputsBase = (git -C $Sel rev-parse HEAD).Trim()
-            $depGroups = @($depRows | Group-Object {
-                (@($_.Gates) + @($_['Absent']) | Where-Object { $_ } | Sort-Object -Unique) -join '|'
-            })
-            foreach ($group in $depGroups) {
-                Invoke-SelGit checkout -q --detach $depInputsBase
-                $sample = $group.Group[0]
-                $wanted = @(@($sample.Gates) + @($sample['Absent']) | Where-Object { $_ } | Sort-Object -Unique)
-                $depToml = @('schema = 1', '', '[[gate]]', 'areas = ["*"]', 'run = "python3 dependency-marker.py dependency-always"')
-                for ($i = 0; $i -lt $depGates.Count; $i++) {
-                    $g = $depGates[$i]
-                    if ($wanted -cnotcontains $g.run) { continue }
-                    $marker = "python3 dependency-marker.py dependency-gate-$($i + 1)"
-                    $depToml += '', '[[gate]]', ('run = ' + (ConvertTo-Json -InputObject $marker -Compress))
-                    if ($g.PSObject.Properties['ci']) { $depToml += 'ci = ' + (ConvertTo-Json -InputObject $marker -Compress) }
-                    foreach ($key in @('areas', 'paths', 'cheap')) {
-                        if ($g.PSObject.Properties[$key]) { $depToml += "$key = " + (ConvertTo-Json -InputObject $g.$key -Compress) }
-                    }
-                }
-                Set-Content -LiteralPath (Join-Path $Sel '.claude/ouro.toml') -Encoding utf8 -Value $depToml
-                Invoke-SelGit commit -q -am 'actual consumer group with harmless markers'
-                $depBase = (git -C $Sel rev-parse HEAD).Trim()
-                foreach ($row in $group.Group) {
-                    Invoke-SelGit checkout -q --detach $depBase
-                    $file = Join-Path $Sel $row.Path
-                    if ($row['Mode'] -eq 'delete') { Remove-Item -LiteralPath $file -Force }
-                    elseif ($row['Mode'] -eq 'rename') {
-                        $target = Join-Path $Sel $row.To
-                        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-                        Move-Item -LiteralPath $file -Destination $target
-                        Invoke-SelGit add -f -- $row.To
-                    }
-                    else { Add-Content -LiteralPath $file -Encoding utf8 -Value '# changed dependency input' }
-                    Invoke-SelGit add -A
-                    Invoke-SelGit commit -q -m "dependency $($row.Path)"
-                    if ($row['Mode'] -eq 'rename') {
-                        $change = (git -C $Sel diff --name-status --find-renames $depBase HEAD) -join "`n"
-                        Assert-Match ("(?m)^R100\t" + [regex]::Escape($row.Path) + "\t" + [regex]::Escape($row.To) + '$') $change "$($row.Path): the fixture records an actual rename"
-                    }
-                    $r = Invoke-GateStep -ConsumerDir $Sel -Select 'true' -EventName 'pull_request' -BaseSha $depBase
-                    Assert-Equal 0 $r.Code "$($row.Path): marker gate step passes"
-                    Assert-Match '(?m)^dependency-always\r?$' $r.Text "$($row.Path): the unscoped process marker actually runs"
-                    Assert-NoMatch 'select-by-paths: every gate runs' $r.Text "$($row.Path): no full fallback masks a missing edge"
-                    foreach ($command in $row.Gates) {
-                        $number = [array]::IndexOf($depCommands, $command) + 1
-                        Assert-Equal $true ($number -gt 0) "$($row.Path): consumer is declared: $command"
-                        Assert-Match "(?m)^dependency-gate-$number\r?$" $r.Text "$($row.Path): consuming gate actually runs: $command"
-                    }
-                    if ($row.ContainsKey('Absent')) {
-                        foreach ($command in $row.Absent) {
-                            $number = [array]::IndexOf($depCommands, $command) + 1
-                            Assert-NoMatch "(?m)^dependency-gate-$number\r?$" $r.Text "$($row.Path): unrelated similarly named input does not select $command"
-                        }
-                    }
-                }
-            }
         }
     }
     finally {

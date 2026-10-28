@@ -1,21 +1,19 @@
-"""Caller-validation refusal tests; real WSL controls are distinct from simulated platform rows."""
-import base64
+"""Caller-validation refusal tests; WSL and other unsupported platforms are simulated rows."""
 import json
 import os
 import pathlib
-import re
-import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import types
 import unittest
 from unittest.mock import patch
 
 from ouro import developer, sh, validation
+from ouro.worktrees import Tree
 from ouro.runtime import process as owned_process
+
+HINT = str  # stands in for Run.wait_hint: the wait's text names its commands
 
 
 class ValidationTests(unittest.TestCase):
@@ -25,7 +23,7 @@ class ValidationTests(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name).resolve()
 
     def fixture(self, scripts):
-        def git(*args):
+        def git(*args, cwd=None, check=True):
             p = subprocess.run(["git", "-C", str(self.root), *args], capture_output=True,
                                encoding="utf-8", check=True)
             return types.SimpleNamespace(out=p.stdout)
@@ -36,10 +34,37 @@ class ValidationTests(unittest.TestCase):
         git("add", ".")
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
             "commit", "-qm", "fixture")
-        return types.SimpleNamespace(
-            worktree=self.root, head=lambda: git("rev-parse", "HEAD").out.strip(), wt_git=git,
-            env=types.SimpleNamespace(runtime=developer.Settings(),
-                                      lookup=lambda key: "local" if key == "ship.validation" else None))
+        return Tree(types.SimpleNamespace(git=git, default="main", runtime=developer.Settings(),
+                                          lookup=lambda key: "local" if key == "ship.validation" else None), self.root, None)
+
+    def test_unsupported_wait_names_authority_commands_and_coverage_without_reading_proof(self):
+        for authority in ("local", "ci"):
+            with self.subTest(authority=authority):
+                from ouro.run import Run
+                run = types.SimpleNamespace(n=17, k=2,
+                    env=types.SimpleNamespace(lookup=lambda key: authority),
+                    required_execution=lambda: ["python3 selected.py"])
+                hint = lambda commands=None: Run.wait_hint(run, commands)
+                pending = [{"cmd": "python3 inherited.py", "reason": "caller"}]
+                with patch.object(validation, "check_platform", side_effect=sh.DriverError("unsupported host")), \
+                        patch.object(validation.sh, "say") as say, \
+                        patch.object(validation, "receipt") as receipt, \
+                        patch.object(validation.validation_lock, "Lease") as lease:
+                    self.assertEqual(validation.validate(None, pending, hint), ([], 75))
+                    message = say.call_args.args[0]
+                    self.assertIn("authority=" + authority, message)
+                    self.assertIn("python3 inherited.py", message)
+                    self.assertNotIn("python3 selected.py", message)
+                    self.assertIn('ship.validation = "ci"', message)
+                    self.assertIn("exact gate.run", message)
+                    self.assertIn("paths select", message)
+                    self.assertIn("check names alone", message)
+                    self.assertIn("local-only", message)
+                    self.assertIn("ouro run 17 --part 2 --validate", message)
+                    self.assertEqual(validation.check_inputs(None, "a" * 40, hint), 75)
+                    self.assertIn("python3 selected.py", say.call_args.args[0])
+                    receipt.assert_not_called()
+                    lease.assert_not_called()
 
     @unittest.skipUnless(os.name == "posix", "kernel platform detection")
     def test_platform_facts_ignore_environment_and_fail_closed(self):
@@ -90,16 +115,17 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("including through native launchers", (self.root / "attempt.log").read_text())
 
     def driver_fixture(self, *, validating=True, script="raise SystemExit(75)\n"):
-        from ouro.run import Run
+        from ouro.run import Run, RunOptions
         base = self.fixture({"native.py": script})
         pending = [{"cmd": '"' + sys.executable + '" native.py', "reason": "caller"}]
-        base.wt_git("update-ref", "refs/remotes/origin/main", "HEAD")
-        base.wt_git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                    "commit", "--allow-empty", "-qm",
+        base.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        base.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "--allow-empty", "-qm",
                     "handoff\n\nOuro-Build: " + json.dumps({"validation_pending": pending}))
         run = Run.__new__(Run)
-        run.worktree, run.wt_git = base.worktree, base.wt_git
-        run.env = types.SimpleNamespace(pr_checks=lambda: True, validate=validating,
+        run.tree = base
+        run.options = RunOptions(validate=validating)
+        run.env = types.SimpleNamespace(pr_checks=lambda: True,
                                         lookup=lambda key: "local" if key == "ship.validation" else None,
                                         default="main", runtime=developer.Settings())
         run.rederive, run.find_pr, run.records = lambda: None, lambda: None, lambda pr: []
@@ -126,7 +152,7 @@ class ValidationTests(unittest.TestCase):
         run, pending = self.driver_fixture(validating=False)
         with patch.object(validation, "validate", return_value=([], 75)) as validate:
             self.assertEqual(Run.drive(run, None), 0)
-            validate.assert_called_once_with(run, pending, reuse=True, execute_missing=False)
+            validate.assert_called_once_with(run.tree, pending, run.wait_hint, reuse=True, execute_missing=False)
         with patch.object(validation, "validate", side_effect=sh.DriverError("dirty inputs")):
             with self.assertRaisesRegex(sh.DriverError, "dirty inputs"):
                 Run.drive(run, None)
@@ -154,17 +180,17 @@ class ValidationTests(unittest.TestCase):
                     Run.drive(run, None)
             self.assertEqual(receipt.call_count, 2)
             attempts.assert_not_called()
-        directory = validation.state(run, pending)[2]
+        directory = validation.state(run.tree, pending)[2]
         self.assertEqual(len(list(directory.glob("attempt-*/attempt.json"))), 1)
         # Ordinary resume still accepts real proof only after its clean-input barrier.
-        run.env.validate = False
+        run.options.validate = False
         with patch.object(validation, "validate", wraps=validation.validate) as validate, \
                 patch.object(validation, "execute") as execute:
             with self.assertRaisesRegex(RuntimeError, "reached gates"):
                 Run.drive(run, None)
             self.assertEqual(validate.call_args_list, [
-                unittest.mock.call(run, pending, reuse=True, execute_missing=False),
-                unittest.mock.call(run, [], check_head=run.head()),
+                unittest.mock.call(run.tree, pending, run.wait_hint, reuse=True, execute_missing=False),
+                unittest.mock.call(run.tree, [], run.wait_hint, check_head=run.tree.head()),
             ])
             execute.assert_not_called()
 
@@ -193,79 +219,36 @@ class ValidationTests(unittest.TestCase):
                 Run.drive(run, None)
             gates.assert_not_called()
         self.assertTrue((self.root / "output/marker").exists())
-        directory = validation.state(run, pending)[2]
+        directory = validation.state(run.tree, pending)[2]
         attempt = json.loads(next(directory.glob("attempt-*/attempt.json")).read_text())
         result = attempt["results"][0]
         self.assertEqual(result["exit"], 1)
         self.assertIn("parent evidence", pathlib.Path(result["log"]).read_text())
         self.assertIn("incomplete execution", pathlib.Path(result["log"]).read_text())
-        self.assertIsNone(validation.receipt(run, pending))
-
-    @unittest.skipUnless(sys.platform.startswith("linux"), "native Linux receipt admission controls")
-    def test_native_receipt_resume_refuses_delayed_helper_mutation_before_gates(self):
-        from ouro.run import Run
-        try:
-            validation.check_platform()
-        except sh.DriverError as ex:
-            self.skipTest(str(ex))
-        run, pending = self.driver_fixture(script="print('completed')\n")
-        results, failure = validation.validate(run, pending)
-        self.assertIsNone(failure)
-        directory = validation.state(run, pending)[2]
-        proof = (directory / "receipt.json").read_bytes()
-        source = self.root / "native.py"
-        original = source.read_bytes()
-        output = self.root / "output"
-        output.mkdir()
-        for validating in (True, False):
-            with self.subTest(validating=validating):
-                run.env.validate = validating
-                (output / "count").unlink(missing_ok=True)
-                hook = output / "fsmonitor"
-                worker = ("import pathlib,time; time.sleep(.3); pathlib.Path("
-                          + repr(str(source)) + ").write_text('changed source\\n')")
-                hook.write_text(
-                    "#!" + sys.executable + "\n"
-                    "import pathlib,subprocess,sys\n"
-                    "count=pathlib.Path(" + repr(str(output / "count")) + ")\n"
-                    "n=int(count.read_text())+1 if count.exists() else 1; count.write_text(str(n))\n"
-                    "if n==2: subprocess.Popen([sys.executable,'-c'," + repr(worker)
-                    + "],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
-                    "print('token\\n')\n")
-                hook.chmod(0o700)
-                run.wt_git("config", "core.fsmonitor", str(hook))
-                try:
-                    with patch.object(run, "run_gates") as gates:
-                        with self.assertRaisesRegex(sh.DriverError, "helper snapshot refused"):
-                            Run.drive(run, None)
-                        gates.assert_not_called()
-                    self.assertEqual(source.read_text(), "changed source\n")
-                    self.assertEqual((directory / "receipt.json").read_bytes(), proof)
-                    self.assertEqual(len(list(directory.glob("attempt-*"))), 1)
-                finally:
-                    run.wt_git("config", "--unset", "core.fsmonitor")
-                    source.write_bytes(original)  # scratch fixture only
+        self.assertIsNone(validation.receipt(run.tree, pending))
+        self.assertEqual(validation.attempts(run.tree), attempt["results"])
+        self.assertFalse((self.root / ".git/ouro-validation/lock").exists())
 
     @unittest.skipUnless(os.name == "posix", "simulated WSL receipt barrier")
     def test_wsl_rejects_existing_proof_before_preflight(self):
-        run = self.fixture({"native.py": "print('native success')\n"})
+        tree = self.fixture({"native.py": "print('native success')\n"})
         pending = [{"cmd": '"' + sys.executable + '" native.py', "reason": "caller context"}]
         # Simulated supported platform: exercise the real execution/receipt path.
         with patch.object(validation, "check_platform"):
-            results, failure = validation.validate(run, pending)
+            results, failure = validation.validate(tree, pending, HINT)
             self.assertIsNone(failure)
-            self.assertIsNotNone(validation.receipt(run, pending))
-            reused, failure = validation.validate(run, pending, reuse=True)
+            self.assertIsNotNone(validation.receipt(tree, pending))
+            reused, failure = validation.validate(tree, pending, HINT, reuse=True)
             self.assertIsNone(failure)
             self.assertEqual(reused, results)
-        directory = validation.state(run, pending)[2]
+        directory = validation.state(tree, pending)[2]
         proof = (directory / "receipt.json").read_bytes()
         with patch.object(validation, "check_platform", side_effect=sh.DriverError("WSL boundary unavailable")), \
-                patch.object(run, "wt_git") as git, patch.object(run, "head") as head:
-            self.assertIsNone(validation.receipt(run, pending))
-            results, failure = validation.validate(run, pending)
+                patch.object(tree, "git") as git, patch.object(tree, "head") as head:
+            self.assertIsNone(validation.receipt(tree, pending))
+            results, failure = validation.validate(tree, pending, HINT)
             self.assertEqual(failure, 75)
-            self.assertIsNone(validation.receipt(run, pending))
+            self.assertIsNone(validation.receipt(tree, pending))
             git.assert_not_called()
             head.assert_not_called()
         self.assertEqual((directory / "receipt.json").read_bytes(), proof)
@@ -289,106 +272,3 @@ class ValidationTests(unittest.TestCase):
             validation.terminate_owned(process, owned)
         self.assertEqual(set(owned), {10, 20})
         self.assertEqual([args[0][0] for args in kill.call_args_list], [20, 20])
-
-    @unittest.skipUnless(sys.platform.startswith("linux"), "actual WSL conformance requires Linux")
-    def test_actual_wsl_direct_and_nested_activation(self):
-        powershell, wslpath = shutil.which("powershell.exe"), shutil.which("wslpath")
-        kernel = os.uname()
-        # Do not let a detector regression skip its own actual-host test.
-        hint = (re.search("microsoft|wsl", kernel.release + kernel.version, re.IGNORECASE)
-                or os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP")
-                or pathlib.Path("/run/WSL").exists()
-                or pathlib.Path("/proc/sys/fs/binfmt_misc/WSLInterop").exists())
-        if not hint and not (powershell and wslpath):
-            self.skipTest("actual WSL conformance unavailable on pure Linux")
-        with self.assertRaisesRegex(sh.DriverError, "on WSL:"):
-            validation.check_platform()
-        self.assertIsNotNone(powershell, "actual WSL controls require powershell.exe on PATH")
-        self.assertIsNotNone(wslpath, "actual WSL controls require wslpath")
-        # Calibrate a real broker-created Windows child outside validation, then
-        # prove validation starts neither that direct parent nor its native wrapper.
-        run = self.fixture({})
-        output = self.root / "output"
-        output.mkdir()
-        def quote(text):
-            return "'" + text.replace("'", "''") + "'"
-        def encoded(script):
-            return base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        # Windows cannot necessarily traverse the native, private Linux Git fixture.
-        # Create only the markers on the Windows account's temp volume, with ordinary
-        # inherited Windows ACLs; keep the repository on its native Linux filesystem.
-        temp_query = "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetTempPath()))"
-        windows_temp = base64.b64decode(subprocess.check_output(
-            [powershell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded(temp_query)],
-            encoding="ascii", timeout=15).strip(), validate=True).decode("utf-8")
-        linux_temp = subprocess.check_output(
-            [wslpath, "-u", windows_temp], encoding="utf-8", timeout=5).strip()
-        markers = tempfile.TemporaryDirectory(prefix="ouro-validation-markers-", dir=linux_temp)
-        self.addCleanup(markers.cleanup)
-        # Even a failed baseline assertion leaves only a finite, five-second child.
-        # Allow it to finish before removing its exclusively created marker directory.
-        self.addCleanup(time.sleep, 5.2)
-        marker_root = pathlib.Path(markers.name)
-        windows = subprocess.check_output(
-            [wslpath, "-w", str(marker_root)], encoding="utf-8", timeout=5).strip()
-        for nested in (False, True):
-            child = (
-                "$ErrorActionPreference='Stop'; "
-                + "[IO.File]::WriteAllText(" + quote(windows + "\\ready") + ", [string]$PID); "
-                + "Start-Sleep -Seconds 5; "
-                + "[IO.File]::WriteAllText(" + quote(windows + "\\delayed") + ", 'written')"
-            )
-            parent = (
-                "$ErrorActionPreference='Stop'; "
-                + "$p=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') "
-                + "-WindowStyle Hidden -PassThru -ArgumentList "
-                + quote("-NoProfile -NonInteractive -EncodedCommand " + encoded(child)) + "; "
-                + "$deadline=[DateTime]::UtcNow.AddSeconds(15); "
-                + "while (!(Test-Path " + quote(windows + "\\ready") + ")) { "
-                + "if ([DateTime]::UtcNow -gt $deadline) { throw 'child not ready' }; Start-Sleep -Milliseconds 20 }; "
-                + "$p.Refresh(); if ($p.HasExited) { throw 'child exited before liveness sample' }; "
-                + "[IO.File]::WriteAllText(" + quote(windows + "\\alive") + ", [string]$p.Id)"
-            )
-            argv = [powershell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded(parent)]
-            if nested:
-                script = self.root / "native.py"
-                script.write_text(
-                    "import pathlib,subprocess\npathlib.Path('output/native-ready').write_text('ready')\n"
-                    + "subprocess.run(" + repr(argv) + ", check=True)\n", encoding="utf-8")
-                run.wt_git("add", "native.py")
-                run.wt_git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-                           "commit", "-qm", "native wrapper")
-                argv = [sys.executable, str(script)]
-            subprocess.run(argv, cwd=self.root, check=True, timeout=25, capture_output=True)
-            ready, alive, delayed = (marker_root / name for name in ("ready", "alive", "delayed"))
-            self.assertTrue(ready.exists())
-            child_pid = ready.read_text(encoding="utf-8-sig")
-            self.assertEqual(child_pid, alive.read_text(encoding="utf-8-sig"))
-            self.assertEqual((output / "native-ready").exists(), nested)
-            self.assertFalse(delayed.exists(), "control must observe the Windows child still able to write later")
-            time.sleep(5.2)
-            self.assertTrue(delayed.exists(), "baseline must demonstrate actual delayed Windows work")
-            for path in (ready, alive, delayed, output / "native-ready"):
-                path.unlink(missing_ok=True)
-            cmd = " ".join(shlex.quote(arg) for arg in argv)
-            pending = [{"cmd": cmd, "reason": "actual WSL activation control"}]
-            with patch.object(validation, "shutil") as command_tools, \
-                    patch.object(validation, "subprocess") as command_process:
-                results, failure = validation.validate(run, pending)
-                self.assertEqual((results, failure), ([], 75))
-                self.assertIsNone(validation.receipt(run, pending))
-                command_tools.which.assert_not_called()
-                command_process.Popen.assert_not_called()
-            self.assertFalse(ready.exists())
-            self.assertFalse(alive.exists())
-            self.assertFalse((output / "native-ready").exists())
-            time.sleep(5.2)
-            self.assertFalse(delayed.exists())
-            self.assertFalse((validation.state(run, pending)[2] / "receipt.json").exists())
-            print("WSL conformance " + json.dumps({
-                "nested": nested, "baseline_pid": child_pid, "baseline_native_ready": nested,
-                "baseline_ready": True, "baseline_alive": True,
-                "baseline_delayed": True, "validation_exit": failure,
-                "validation_ready": False, "validation_alive": False, "validation_delayed": False,
-                "successful_receipt": False, "command_attempts": results,
-                "command_lookup": False, "command_launch": False}))

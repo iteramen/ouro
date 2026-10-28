@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from . import developer, node, ops, run, sh, triage, worktrees
-from .coordination import worker_env
+from .runtime.process import worker_env
 from .sh import DriverError, Env, Refused, Stopped
 from .runtime import diagnostics
 
@@ -81,11 +81,7 @@ def main(argv):
         if args.cmd in ("run", "triage"):
             worktrees.sweep(env)
         if args.cmd == "run":
-            env.validate = args.validate
-            env.recover_build = args.recover_build
-            env.override_claim = args.override_claim
-            env.adopt_pr = args.pr
-            return run.main(env, args.n, args.part)
+            return run.main(env, args.n, args.part, run.RunOptions(args.validate, args.recover_build, args.override_claim, args.pr))
         if args.cmd == "triage":
             return triage.triage(env, args.n, args.dry_run)
         if args.cmd == "weekly":

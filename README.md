@@ -23,7 +23,9 @@ the loop it ships.
 Normal PR delivery can use repository-owned CI validation: set `ship.validation = "ci"` and
 name the exact required checks in `ship.validation_checks`. Their successful execution at the
 final PR head covers selected nonlocal gates, including a build toolchain available only in
-Windows CI; private-token checks still run locally. See
+Windows CI; private-token checks still run locally. macOS coordinators with admitted workers
+use this route. Local proof still needs native Linux; prepared Mac builds can resume there or
+use explicit CI coverage. The existing-PR migration recipe preserves prepared source. See
 [validation authority](docs/binding.md#validation-authority).
 
 If an issue cannot be written so that a stranger could execute it without asking, ouro will not
@@ -105,9 +107,8 @@ binding and onboarding installer.
 
    ```toml
    [[gate]]
-   areas = ["*"]                                  # every issue, or a list of your area labels
    run = "pwsh -NoProfile -File tests/Run-All.ps1"
-   paths = ["src/", "tests/"]                     # optional: run only when the diff touches these
+   paths = ["src/", "tests/"]                     # optional: run only when the diff touches these; none: every change
    ```
 
 4. Check it: `python3 <ouro>/bin/ouro-binding.py check`. The schema, every rule the check
@@ -318,9 +319,8 @@ apply is `docs/binding.md`; this is the map.
 | `repo.checkout` | an absolute path | none | the canonical local checkout; per-machine, so it belongs in the overlay |
 | `repo.release_notes` | regexes | a `CHANGELOG.md` basename | the release-note paths: out of the S shape's file count, and named to the reviewer as the entries to verify |
 | `labels.scope` | labels | `[]` | scope or effort labels that may ride on any state |
-| `labels.area` | labels | `[]` | the area labels a gate's `areas` selects on; the shape gate wants at least one per `agent-ready` issue |
+| `labels.area` | labels | `[]` | the area labels triage and coordination read, never a gate selector; the shape gate wants at least one per `agent-ready` issue |
 | `labels.type` | labels | `[]` | the type labels; exactly one per `agent-ready` issue; disjoint from `area` |
-| `gate.areas` | area labels or `"*"` | required per entry | which issues select the gate; `"*"` is all |
 | `gate.run` | a command line | required per entry | the verify command, from the repository root; `<ouro>` is the plugin root |
 | `gate.ci` | a pwsh command line | `run` | what CI runs in place of `run`; one that only prints a skip makes the driver run `run` locally |
 | `gate.paths` | git pathspecs | none | run only when the diff changes one of them |

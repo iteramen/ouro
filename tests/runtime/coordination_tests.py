@@ -16,6 +16,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from ouro import coordination as co, developer, sh
+from ouro.worktrees import Tree
 from ouro.runtime import READ, claude, codex, process
 
 KEY = "fixture-board-secret-sentinel"
@@ -248,10 +249,11 @@ class CoordinationTests(unittest.TestCase):
             config = self.config(person="person --> suffix", credential_env=VARIABLE)
             root = pathlib.Path(directory)
             env = SimpleNamespace(runtime=developer.Settings(backend="codex", coordination=config),
-                                  dry=False, main=root, slug="fixture/project", override_claim=False,
+                                  dry=False, main=root, slug="fixture/project",
                                   viewer=lambda: "github-actor",
                                   git=lambda *a, **kw: SimpleNamespace(out="a" * 40))
-            run = SimpleNamespace(env=env, n=1, k=None, branch="area/change", worktree=root / "absent")
+            run = SimpleNamespace(env=env, n=1, k=None, branch="area/change", tree=SimpleNamespace(path=root / "absent"),
+                                  options=SimpleNamespace(override_claim=False))
             claim = co.Claim(run)
             claim.data = dict(identity=dict(person=config.person, session="repository-session"),
                               correlation="run-correlation")
@@ -488,7 +490,7 @@ else:
             cfg = developer.Settings(coordination=self.config(credential_env=VARIABLE))
             with patch.dict(os.environ, {VARIABLE: KEY, "OURO_TEST_OTHER": "preserved",
                                          "PATH": str(tools) + os.pathsep + os.environ["PATH"]}):
-                exclusions = co.worker_env(cfg)
+                exclusions = process.worker_env(cfg)
                 result = process.run([sys.executable, "-c", "import time; time.sleep(.12)"], cwd=root, env=exclusions)
                 self.assertEqual(result.code, 0, result.text)
                 # Component test only: a harmless child, no caller receipt or claim of WSL support.
@@ -576,7 +578,8 @@ else:
                     env = sh.Env(repo, ob, data, False, profile)
                     self.addCleanup(env.close)
                     run = driver.Run.__new__(driver.Run)
-                    run.env, run.worktree, run.flow = env, repo, "full"
+                    run.env, run.tree, run.flow, run.in_lane = env, Tree(env, repo, None), "full", False
+                    run.caller_execution_results, run.n, run.k = [], 1, None
                     run.select_gates = lambda flow: ([(cmd("gate"), None)], [])
                     run.required_execution = lambda: [cmd("gate")]
                     run.validation_commands = lambda: [cmd("gate")]
@@ -585,15 +588,15 @@ else:
                     inherited = variable.upper() if os.name == "nt" else variable
                     with patch.dict(os.environ, {inherited: KEY, "OURO_TEST_OTHER": "preserved"}):
                         run.setup_tree(repo)
-                        result = run.run_gates(run.head())
+                        result = run.run_gates(run.tree.head())
                         gate_pending = [{"cmd": cmd("gate"), "reason": "fixture"}]
                         if lifecycle_available:
                             self.assertIsNone(result)
                             self.assertEqual([r["cmd"] for r in run.execution_results], [cmd("gate")])
-                            self.assertIsNotNone(validation.receipt(run, gate_pending))
+                            self.assertIsNotNone(validation.receipt(run.tree, gate_pending))
                         else:
                             self.assertEqual(result, 75)
-                            self.assertIsNone(validation.receipt(run, gate_pending))
+                            self.assertIsNone(validation.receipt(run.tree, gate_pending))
                             self.assertFalse((repo / "seen-gate").exists())
                         hooks = repo / ".git" / "hooks"
                         hook = hooks / "pre-commit"
@@ -602,14 +605,14 @@ else:
                         env.git("commit", "-q", "--allow-empty", "-m", "hook fixture")
                         for mode in ("success", "failure"):
                             pending = [{"cmd": cmd(mode), "reason": "fixture"}]
-                            results, failure = validation.validate(run, pending)
+                            results, failure = validation.validate(run.tree, pending, run.wait_hint)
                             if not lifecycle_available:
                                 self.assertEqual(failure, 75)
-                                self.assertIsNone(validation.receipt(run, pending))
+                                self.assertIsNone(validation.receipt(run.tree, pending))
                                 self.assertFalse((repo / ("seen-" + mode)).exists())
                             else:
                                 self.assertEqual(failure, None if mode == "success" else 1)
-                                self.assertEqual(bool(validation.receipt(run, pending)), mode == "success")
+                                self.assertEqual(bool(validation.receipt(run.tree, pending)), mode == "success")
                                 self.assertEqual(results[0]["exit"], 0 if mode == "success" else 1)
                         self.assertEqual(os.environ[inherited], KEY)
                     for mode in ("setup", "hook", *(("gate",) if lifecycle_available else ())):
@@ -639,7 +642,7 @@ else:
                     env = SimpleNamespace(runtime=cfg, run=lambda *a, **k: sh.run(*a, **k), default="main",
                                           lookup=lambda key: cli if key == "ship.external_cli" else None)
                     run = driver.Run.__new__(driver.Run)
-                    run.env, run.worktree = env, root
+                    run.env, run.tree, run.ci_execution_checks = env, Tree(env, root, None), []
                     run.reader_goal = lambda: "public fixture"
                     run.build_facts = lambda: {"validation_results": [], "validation_attempts": []}
                     run.add_note = self.fail

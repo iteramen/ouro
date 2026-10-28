@@ -18,45 +18,15 @@ SNAPSHOT_SECONDS = 60
 CHUNK = 65536
 
 
-def ci_mode(run):
-    """Repository-owned PR validation; independent of the selected worker backend."""
-    return (not getattr(run, "in_lane", False) and "checkpoint" not in getattr(run, "labels", [])
-            and run.env.lookup("ship.validation") == "ci")
-
-
-def ci_commands(run, *, selected=True):
-    """The owner's aggregate checks cover these exact gate runs, never new branch policy."""
-    if not ci_mode(run):
-        return set()
-    if not run.env.pr_checks():
-        raise sh.DriverError("CI validation requires a pull_request workflow on the default branch")
-    if run.gate_entries() != run.env.data.get("gate", []):
-        raise sh.DriverError("CI gate coverage changed: update the owner's invoking binding before resuming")
-    return {cmd for cmd, gate in run.area_gates(tree=False)
-            if not run.locally_run(cmd, gate)
-            and (not selected or not gate.get("paths") or run.touches(gate["paths"]))}
-
-
-def check_ci(run, pr, head, *, direct_gates=None):
-    """Fresh GitHub results, not a local receipt or a successful notice in a gate command."""
-    run.ci_execution_head, run.ci_execution_commands, run.ci_execution_checks = None, set(), []
-    if direct_gates is None:
-        commands = ci_commands(run)
-    else:
-        # Only an actual direct PR's trusted structural obligations use this
-        # route. Normal BUILD/in-lane admission and selection stay unchanged.
-        if run.env.lookup("ship.validation") != "ci" or not run.env.pr_checks():
-            raise sh.DriverError("direct CI validation requires the owner's PR validation checks")
-        if run.gate_entries() != run.env.data.get("gate", []):
-            raise sh.DriverError("CI gate coverage changed: update the owner's invoking binding before resuming")
-        commands = {cmd for cmd, gate in direct_gates if not run.locally_run(cmd, gate)}
-    view = run.env.gh_json("pr", "view", str(pr["number"]), "--json", "headRefOid,statusCheckRollup")
-    names = run.env.lookup("ship.validation_checks") or []
+def ci_checks(env, pr, head):
+    """Fresh GitHub results, not a local receipt or a successful notice in a gate command: the evidence, or None to wait."""
+    view = env.gh_json("pr", "view", str(pr["number"]), "--json", "headRefOid,statusCheckRollup")
+    names = env.lookup("ship.validation_checks") or []
     if not names:
         raise sh.DriverError("CI validation requires nonempty ship.validation_checks")
     if view.get("headRefOid") != head:
         sh.say(f"waiting for CI validation at {head}: the pull request head changed")
-        return False
+        return None
     rows = view.get("statusCheckRollup") or []
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise sh.DriverError("GitHub returned malformed CI check results; nothing is validated")
@@ -68,18 +38,17 @@ def check_ci(run, pr, head, *, direct_gates=None):
                                   or (row.get("__typename") == "StatusContext" and row.get("context") == name
                                       and row.get("state") == "SUCCESS")) for row in matches):
             sh.say(f"waiting for CI validation at {head}: required check {name!r} has no successful completion")
-            return False
+            return None
         evidence.extend({"name": name, "sha": head, "url": row.get("detailsUrl", row.get("targetUrl", ""))}
                         for row in matches)
-    run.ci_execution_head, run.ci_execution_commands, run.ci_execution_checks = head, commands, evidence
-    return True
+    return evidence
 
 
-def ci_inputs(run, head):
+def ci_inputs(tree, head):
     """Visible clean inputs for the portable local part of repository CI validation."""
     from . import validation
-    validation.clean(run, head)
-    entries = run.wt_git("ls-files", "-v", "-z").out.split("\0")
+    validation.clean(tree, head)
+    entries = tree.git("ls-files", "-v", "-z").out.split("\0")
     if any(row[:1].islower() or row.startswith("S ") for row in entries):
         raise sh.Refused("CI validation requires visible local inputs; preserve and resolve assume-unchanged/skip-worktree entries")
 
@@ -287,28 +256,27 @@ def snapshot(root, git, budget, depth, identity=None):
         return hashlib.sha256(json.dumps(rows, ensure_ascii=True).encode()).hexdigest()
 
 
-def directory(run):
-    return Path(run.wt_git("rev-parse", "--absolute-git-dir").out.strip()) / "ouro-execution"
+def directory(tree):
+    return tree.admin() / "ouro-execution"
 
 
-def retain(run, calls, *, recheck=None):
-    """Only the driver writes these receipts; BUILD answers cannot provide observations."""
-    inputs = fingerprint(run.worktree)
-    previous = [{"tool": "run", "command": cmd, "exit": 0, "inputs": inputs} for cmd in proven(run)]
+def retain(tree, calls, requirements, *, recheck=None):
+    """Only the driver writes these receipts; BUILD answers cannot provide observations. None `requirements`: the branch's own."""
+    inputs = fingerprint(tree.path)
+    previous = [{"tool": "run", "command": cmd, "exit": 0, "inputs": inputs} for cmd in proven(tree)]
     latest = {c["command"]: c for c in [*previous, *calls] if c.get("tool") == "run"
               and isinstance(c.get("command"), str)}
     results = [c for c in latest.values() if inputs and c.get("inputs") == inputs
                and not c.get("error") and type(c.get("exit")) is int and c["exit"] == 0]
-    root = directory(run)
+    root = directory(tree)
     root.mkdir(exist_ok=True)
-    head = run.head()
+    head = tree.head()
     if root.is_symlink() or any((root / (head + suffix)).is_symlink() for suffix in (".json", ".sha256")):
         raise sh.DriverError("aliased execution evidence directory or file")
-    requirements = getattr(run, "execution_grants", None)
     if requirements is None:
-        requirements = grants(run)
+        requirements = grants(tree)
     data = {"sha": head, "inputs": inputs, "results": results, "grants": requirements,
-            "recheck": list(recheck) if recheck is not None else candidates(run)}
+            "recheck": list(recheck) if recheck is not None else candidates(tree)}
     raw = json.dumps(data).encode("utf-8")
     (root / (head + ".json")).write_bytes(raw)
     (root / (head + ".sha256")).write_text(hashlib.sha256(raw).hexdigest(), encoding="utf-8")
@@ -323,13 +291,13 @@ def load(path):
     return json.loads(raw)
 
 
-def grants(run):
+def grants(tree):
     """Obligations survive descendant heads; results never do."""
-    heads = run.wt_git("rev-list", "HEAD", "--not", f"origin/{run.env.default}").out.split()
+    heads = tree.git("rev-list", "HEAD", "--not", f"origin/{tree.env.default}").out.split()
     values = {}
     for head in heads:
         try:
-            data = load(directory(run) / (head + ".json"))
+            data = load(directory(tree) / (head + ".json"))
             value = data.get("grants")
             if data["sha"] == head and isinstance(value, list):
                 for row in value:
@@ -341,25 +309,25 @@ def grants(run):
     return list(values.values())
 
 
-def candidates(run):
+def candidates(tree):
     """Pre-commit observations authorize a re-run, never a pass at a new head."""
     try:
-        data = load(directory(run) / (run.head() + ".json"))
-        if data["sha"] == run.head() and data["inputs"] == fingerprint(run.worktree):
+        data = load(directory(tree) / (tree.head() + ".json"))
+        if data["sha"] == tree.head() and data["inputs"] == fingerprint(tree.path):
             return [cmd for cmd in data.get("recheck", []) if isinstance(cmd, str)]
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return []
 
 
-def proven(run):
-    head = run.head()
-    path = directory(run) / (head + ".json")
+def proven(tree):
+    head = tree.head()
+    path = directory(tree) / (head + ".json")
     try:
         if path.is_symlink() or path.parent.is_symlink():
             return set()
         data = load(path)
-        inputs = fingerprint(run.worktree)
+        inputs = fingerprint(tree.path)
         if not inputs or data["sha"] != head or data["inputs"] != inputs:
             return set()
         return {r["command"] for r in data["results"] if r["inputs"] == inputs

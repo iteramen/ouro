@@ -240,7 +240,7 @@ try {
             }
         }
 
-        # Area labels select gates, so a change spanning areas carries each; a type is one classification.
+        # A change spanning areas carries each area label, for triage and coordination; a type is one classification.
         foreach ($set in @(@{ Name = 'area'; Set = $AreaLabels; Exact = $false }, @{ Name = 'type'; Set = $TypeLabels; Exact = $true })) {
             if (-not $set.Set -or $set.Set.Count -eq 0) { continue }
             $on = @($names | Where-Object { $set.Set -contains $_ })

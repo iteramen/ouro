@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .. import sh
-from ..coordination import worker_env
+from .process import worker_env
 from . import Capabilities
 
 FLAGS = ("--output-format", "--model", "--allowedTools", "--disallowedTools", "--permission-mode", "--json-schema", "--settings")

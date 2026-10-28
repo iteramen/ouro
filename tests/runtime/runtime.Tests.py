@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -23,6 +24,7 @@ from git_capability_tests import GitCapabilityTests
 
 from codex_capture_tests import CodexCaptureTests
 from network_tests import NetworkReadinessTests
+from records_tests import RecordsTests
 from file_only_tests import FileOnlyReadinessTests
 from validation_tests import ValidationTests
 from execution_tests import ExecutionTests, FingerprintTests
@@ -771,7 +773,7 @@ class RuntimeTests(unittest.TestCase):
     def test_denied_configuration_alias_keeps_manual_handoff(self):
         from ouro.run import Run
         runner = object.__new__(Run)
-        runner.worktree = self.root
+        runner.tree = SimpleNamespace(path=self.root)
         runner.manual_paths = lambda: []
         bridge = Bridge({**self.policy, "edit": True})
         aliases = [".CODEX/config.toml"] + ([".codex./config.toml"] if os.name == "nt" else [])
@@ -808,7 +810,7 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bridge.call("write", {"path": path, "content": "blocked"})
         runner = object.__new__(Run)
-        runner.worktree = self.root
+        runner.tree = SimpleNamespace(path=self.root)
         runner.manual_paths = lambda: []
         self.assertEqual(runner.manual_steps({"manual": [{"path": path, "edit": "owner edit"}],
                                              "_denied": [{"tool_input": {"file_path": path}}]}),

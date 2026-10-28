@@ -38,6 +38,12 @@ def child_env(overrides=None):
     return values
 
 
+def worker_env(settings):
+    """None removes the inherited credential at the subprocess boundary."""
+    config = settings.coordination
+    return {config.credential_env: None} if config else {}
+
+
 def check_platform():
     """Caller validation needs a lifecycle boundary, independent of command environment."""
     if os.name == "nt":

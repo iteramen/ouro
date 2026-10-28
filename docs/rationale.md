@@ -40,7 +40,7 @@ step aside: autonomy is a value a repository sets, and the driver's unattended m
 on the pull request. The driver's own watch, merge at the head SHA and branch removal need no
 branch protection; protection is a guard against hand pushes, not the merge gate.
 Repo-agnostic means a multi-project repository and a one-project private repository both bind,
-which the binding's areas and gates already carry.
+which the binding's area labels and gate paths already carry.
 
 ## Four kinds of context
 

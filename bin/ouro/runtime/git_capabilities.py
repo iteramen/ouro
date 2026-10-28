@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .. import sh
-from ..coordination import worker_env
+from .process import worker_env
 from .git_probe import ProbeParent, remove_probe
 from .tools import git_environment, git_readiness
 

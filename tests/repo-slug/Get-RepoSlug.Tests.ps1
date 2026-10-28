@@ -101,7 +101,6 @@ schema = 1
 slug = "$Slug"
 default_branch = "master"
 [[gate]]
-areas = ["*"]
 run = "x"
 [ship]
 policy = "stop-at-pr"

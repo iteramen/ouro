@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 from . import sh, validation
+from .records import FIX_CAP, needs_fix
 
 REFERENCE = ".ouro-build-recovery"
 PROTECTED = {".git", ".claude", ".codex", ".agents", ".aws", ".github", REFERENCE}
@@ -40,13 +41,13 @@ def read_file(root, parts, limit):
             return data
 
 
-def snapshot(run, selections):
+def snapshot(tree, selections):
     """Read only explicitly selected changed regular files, never aliases or instructions."""
     if not 1 <= len(selections) <= MAX_FILES or len(set(selections)) != len(selections):
         raise sh.Refused("BUILD recovery requires 1-32 distinct explicitly selected paths")
-    root = run.worktree.resolve(strict=True)
-    changed = set(run.wt_git("diff", "--name-only", "-z", "HEAD", "--").out.split("\0"))
-    changed.update(run.wt_git("ls-files", "--others", "--exclude-standard", "-z").out.split("\0"))
+    root = tree.path.resolve(strict=True)
+    changed = set(tree.git("diff", "--name-only", "-z", "HEAD", "--").out.split("\0"))
+    changed.update(tree.git("ls-files", "--others", "--exclude-standard", "-z").out.split("\0"))
     files, total = {}, 0
     for value in selections:
         path = PurePosixPath(value)
@@ -75,16 +76,16 @@ def snapshot(run, selections):
     return files
 
 
-def idle_source(run):
+def idle_source(tree):
     """No original process is killed. Known/uncertain caller leases always refuse."""
     validation.check_platform()
     if not sys.platform.startswith("linux"):
         raise sh.Refused("BUILD recovery needs native Linux process observation; preserve the original for manual inspection")
-    admin = Path(run.wt_git("rev-parse", "--absolute-git-dir").out.strip())
+    admin = tree.admin()
     state = admin / "ouro-validation"
     if state.is_symlink() or (state / "lock").exists() or (state / "lock").is_symlink():
         raise sh.Refused("BUILD recovery preserves a live or uncertain validation lease; inspect ouro validation-lock first")
-    root = run.worktree.resolve(strict=True)
+    root = tree.path.resolve(strict=True)
     unknown = False
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
@@ -136,31 +137,31 @@ def exclude_reference(checkout):
 
 
 def prepare(run, pr, selections):
-    """Create a private clean checkout; never move, reset or detach the dirty original."""
+    """Create a private clean checkout; never move, reset or detach the dirty original. Returns (checkout, files, source record)."""
     if any(name in os.environ for name in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                                            "GIT_OBJECT_DIRECTORY", "GIT_SHALLOW_FILE")):
         raise sh.Refused("BUILD recovery cannot isolate repository directory/file overrides; preserve the original for manual inspection")
     if run.flow == "direct" or not pr or pr.get("state") != "OPEN":
         raise sh.Refused("BUILD recovery requires an open issue pull request on the normal worktree path")
-    source = run.worktree.resolve(strict=True)
+    tree = run.tree
+    source = tree.path.resolve(strict=True)
     if not source.is_relative_to(run.env.main.resolve(strict=True)):
         raise sh.Refused("BUILD recovery source resolves outside the repository")
-    head = run.head()
-    if run.wt_git("branch", "--show-current").out.strip() != run.branch:
+    head = tree.head()
+    if tree.git("branch", "--show-current").out.strip() != run.branch:
         raise sh.Refused("BUILD recovery source is not on this issue's branch")
-    if pr.get("headRefOid") != head or run.origin_tip() != head:
+    if pr.get("headRefOid") != head or tree.origin_tip() != head:
         raise sh.Refused("BUILD recovery source differs from the current PR/remote head; reconcile it before retrying")
     records = run.records(pr)
     at_head = [record for record in records if record["sha"] == head]
-    from .run import FIX_CAP, needs_fix
     if not at_head or not needs_fix(at_head[-1]):
         raise sh.Refused("BUILD recovery requires current-head review findings, never a new acceptance record")
-    spent = max(0, int(run.wt_git("rev-list", "--count", "--no-merges", f"origin/{run.env.default}..HEAD").out.strip()) - 1)
+    spent = max(0, int(tree.git("rev-list", "--count", "--no-merges", f"origin/{run.env.default}..HEAD").out.strip()) - 1)
     if spent >= FIX_CAP:
         raise sh.Refused("BUILD recovery cannot bypass the fix-round cap; keep the normal manual handoff")
-    admin = idle_source(run)
-    files = snapshot(run, selections)
-    old_main, old_worktree = run.env.main, run.worktree
+    admin = idle_source(tree)
+    files = snapshot(tree, selections)
+    old_main, old_worktree = run.env.main, tree.path
     parent = admin / "ouro-build-recovery"
     if parent.is_symlink():
         raise sh.Refused("BUILD recovery state must be Git-private directories")
@@ -188,17 +189,16 @@ def prepare(run, pr, selections):
     if not effective.is_absolute() or effective.resolve() != checkout.resolve():
         raise sh.Refused("BUILD recovery Git configuration redirects the private checkout; preserve it for inspection")
     run.env.git("checkout", "-q", run.env.default, cwd=checkout)
-    idle_source(run)
-    if run.head() != head or snapshot(run, selections) != files or run.origin_tip() != head:
+    idle_source(tree)
+    if tree.head() != head or snapshot(tree, selections) != files or tree.origin_tip() != head:
         raise sh.Refused("BUILD recovery inputs moved during preparation; private checkout and original are preserved")
-    run.env.main = checkout
-    run.worktree = checkout / ".claude" / "worktrees" / run.dirname
-    from .coordination import Claim
-    run.claim = Claim(run)  # A new clone never adopts/copies the original claim cache.
-    run.claim.enter()  # A known original claim still requires the person's explicit override.
-    run.ensure_worktree()
-    reference = run.worktree / REFERENCE
-    if reference.exists() or run.wt_git("ls-tree", "--name-only", "HEAD", "--", REFERENCE).out:
+    return checkout, files, original
+
+
+def offer(tree, checkout, files, original):
+    """Place the selected files in the private checkout's issue worktree as references, never as its content."""
+    reference = tree.path / REFERENCE
+    if reference.exists() or tree.git("ls-tree", "--name-only", "HEAD", "--", REFERENCE).out:
         raise sh.Refused("BUILD recovery reference path is already occupied; preserve it for inspection")
     exclude_reference(checkout)
     reference.mkdir(mode=0o700)
@@ -208,30 +208,30 @@ def prepare(run, pr, selections):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
     (reference / "source.json").write_text(json.dumps(original, indent=2), encoding="utf-8")
-    run.wt_git("config", "--local", "ouro.recoveryReference", REFERENCE)
-    validation.clean(run, head)
+    tree.git("config", "--local", "ouro.recoveryReference", REFERENCE)
+    validation.clean(tree, original["head"])
     sh.say("Recovery inputs are references only. Normal committed-head validation, BUILD, review and shipping still apply.")
 
 
-def brief(run):
+def brief(tree, n, k):
     """A preserved input can assist a normal resume; it never chooses a workflow stage."""
-    root = run.worktree / REFERENCE
+    root = tree.path / REFERENCE
     if not root.exists():
         return ""
     # Local Git configuration points only to an owner-created input, never to a
     # workflow stage. Ordinary repositories with this directory keep their behavior.
-    approved = run.wt_git("config", "--local", "--get", "ouro.recoveryReference", check=False)
+    approved = tree.git("config", "--local", "--get", "ouro.recoveryReference", check=False)
     if approved.code != 0 or approved.out.strip() != REFERENCE:
         return ""
     if not sys.platform.startswith("linux"):
         raise sh.DriverError("BUILD recovery reference validation requires native Linux")
     try:
-        data = json.loads(read_file(run.worktree, (REFERENCE, "source.json"), 65536))
-        if data["head"] != run.head():
+        data = json.loads(read_file(tree.path, (REFERENCE, "source.json"), 65536))
+        if data["head"] != tree.head():
             return ""  # A new head expires old inputs before consulting archived metadata.
-        if data != json.loads(read_file(run.env.main.parent, ("source.json",), 65536)):
+        if data != json.loads(read_file(tree.env.main.parent, ("source.json",), 65536)):
             raise ValueError()
-        if (data["issue"], data["part"], data["branch"]) != (run.n, run.k, run.branch):
+        if (data["issue"], data["part"], data["branch"]) != (n, k, tree.branch):
             raise ValueError()
         rows = data["files"]
         if not 1 <= len(rows) <= MAX_FILES:
@@ -243,7 +243,7 @@ def brief(run):
                     or value.name.lower() in ("agents.md", "claude.md")):
                 raise ValueError()
             if not row["deleted"]:
-                if hashlib.sha256(read_file(run.worktree, (REFERENCE, "files", *value.parts), MAX_FILE)).hexdigest() != row["sha256"]:
+                if hashlib.sha256(read_file(tree.path, (REFERENCE, "files", *value.parts), MAX_FILE)).hexdigest() != row["sha256"]:
                     raise ValueError()
     except (OSError, KeyError, TypeError, ValueError):
         raise sh.DriverError("BUILD recovery reference is malformed or changed; preserve it for inspection") from None

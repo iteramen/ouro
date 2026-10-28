@@ -1,6 +1,6 @@
 """A stand-in for the external CLI `grok` (tests/driver/driver.Tests.py): prints the k-th canned answer.
 
-Env: FAKE_GROK_DIR holds grok.<k>.json (else grok.json) as {"stdout": text, "exit": n}, and
+Env: FAKE_GROK_DIR holds grok.<k>.json (else grok.json) as {"stdout": text, "stderr": text, "exit": n}, and
 this call's arguments are appended to calls.txt there, one line per call.
 """
 import json
@@ -18,4 +18,5 @@ if not answer.is_file():
     answer = d / "grok.json"
 ans = json.loads(answer.read_text(encoding="utf-8"))
 sys.stdout.write(ans.get("stdout", ""))
+sys.stderr.write(ans.get("stderr", ""))
 sys.exit(ans.get("exit", 0))

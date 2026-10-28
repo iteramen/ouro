@@ -11,7 +11,8 @@ import uuid
 from unittest.mock import patch
 
 from ouro import developer, execution, sh, validation
-from ouro.run import Run
+from ouro.run import Run, RunOptions
+from ouro.worktrees import Tree
 
 
 class GateExecutionTests(unittest.TestCase):
@@ -19,10 +20,10 @@ class GateExecutionTests(unittest.TestCase):
         old = ("python3 old_gate.py", {"cheap": True})
         added = ("python3 new_gate.py", {"cheap": True})
         run = Run.__new__(Run)
-        run.body = ""
+        run.body, run.tree = "", None  # execution.grants is patched: no tree is read
         run.spec_amendments = lambda: []
         run.env = types.SimpleNamespace(pr_checks=lambda: True, lookup=lambda key: "local" if key == "ship.validation" else None)
-        run.area_gates = lambda tree=True: [added, added] if tree else [old]
+        run.bound_gates = lambda tree=True: [added, added] if tree else [old]
         for cached in ([old], [], None):
             with self.subTest(cached=cached), patch.object(execution, "grants", return_value=[old]) as history:
                 run.execution_grants = cached
@@ -35,7 +36,7 @@ class GateExecutionTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="ouro-gate-proof-")
         self.addCleanup(temporary.cleanup)
         root = pathlib.Path(temporary.name).resolve()
-        def git(*args, check=True):
+        def git(*args, cwd=None, check=True):
             result = sh.run(["git", "-C", str(root), *args], timeout=10)
             if check and result.code:
                 raise AssertionError(result.err)
@@ -48,16 +49,17 @@ class GateExecutionTests(unittest.TestCase):
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
         git("update-ref", "refs/remotes/origin/main", "HEAD")
         command = sh.cmdline([sys.executable, "gate.py"])
-        run = types.SimpleNamespace(worktree=root, wt_git=git,
-            head=lambda: git("rev-parse", "HEAD").out.strip(),
-            env=types.SimpleNamespace(default="main", validate=caller, runtime=developer.Settings(),
-                                      lookup=lambda key: "local" if key == "ship.validation" else None),
+        env = types.SimpleNamespace(git=git, default="main", runtime=developer.Settings(), ob=sh.load_binding_module(),
+                                    lookup=lambda key: "local" if key == "ship.validation" else None)
+        run = Run.__new__(Run)
+        run.__dict__.update(tree=Tree(env, root, None), in_lane=False, execution_results=[], caller_execution_results=[],
+            options=RunOptions(validate=caller), env=env, n=1, k=None,
             required_execution=lambda: [command], validation_commands=lambda: [command])
         return run, command
 
     def test_changed_path_selection_does_not_execute_configured_diff_helpers(self):
         run, _ = self.fixture("print('old')\n")
-        git, root = run.wt_git, run.worktree
+        git, root = run.tree.git, run.tree.path
         (root / ".gitattributes").write_text("gate.py diff=fixture\n", encoding="utf-8")
         git("add", ".gitattributes")
         commit = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm")
@@ -80,9 +82,9 @@ class GateExecutionTests(unittest.TestCase):
         git("diff", "--ext-diff", "origin/main...HEAD", "--", "gate.py", check=False)
         self.assertTrue(marker.exists(), "configured external helper was not calibrated")
         marker.unlink()
-        self.assertTrue(Run.touches(run, ["gate.py"]))
+        self.assertTrue(run.tree.touches(["gate.py"]))
         self.assertFalse(marker.exists(), "read-only path selection executed an external helper")
-        self.assertFalse(Run.touches(run, ["absent.py"]))
+        self.assertFalse(run.tree.touches(["absent.py"]))
         self.assertEqual((root / ".git" / "config").read_bytes(), config)
         self.assertEqual((root / ".gitignore").read_bytes(), ignores)
 
@@ -99,7 +101,7 @@ class GateExecutionTests(unittest.TestCase):
         for code in (0, 7):
             with self.subTest(code=code):
                 run, command = self.fixture(f"raise SystemExit({code})\n")
-                result = Run.settled_gates(run, run.head(), [(command, {})], [])
+                result = Run.settled_gates(run, run.tree.head(), [(command, {})], [])
                 self.assertEqual(result is None, code == 0)
                 self.assertEqual(Run.missing_execution(run), [] if code == 0 else [command])
                 self.assertEqual(run.execution_results[-1]["exit"], code)
@@ -116,12 +118,12 @@ class GateExecutionTests(unittest.TestCase):
             "deadline=time.monotonic()+3\n"
             "while not pathlib.Path('output/ready').exists() and time.monotonic()<deadline: time.sleep(.01)\n"
             "assert pathlib.Path('output/ready').exists()\n")
-        result = Run.settled_gates(run, run.head(), [(command, {})], [])
+        result = Run.settled_gates(run, run.tree.head(), [(command, {})], [])
         self.assertIsInstance(result, tuple)
         self.assertEqual(result[:2], (command, 1))
         self.assertIn("owned descendants", result[2])
         self.assertEqual(Run.missing_execution(run), [command])
-        self.assertFalse(list((run.worktree / ".git" / "ouro-validation").glob("*/receipt.json")))
+        self.assertFalse(list((run.tree.path / ".git" / "ouro-validation").glob("*/receipt.json")))
 
     def test_final_proof_has_real_time_and_output_bounds(self):
         self.native()
@@ -130,7 +132,7 @@ class GateExecutionTests(unittest.TestCase):
                  {"OUTPUT_LIMIT": 512})):
             with self.subTest(options=options), patch.multiple(validation, **options):
                 run, command = self.fixture(source)
-                result = Run.settled_gates(run, run.head(), [(command, {})], [])
+                result = Run.settled_gates(run, run.tree.head(), [(command, {})], [])
                 self.assertEqual(result[:2], (command, 124))
                 self.assertIn("time/output limit", result[2])
                 self.assertEqual(Run.missing_execution(run), [command])
@@ -140,25 +142,25 @@ class GateExecutionTests(unittest.TestCase):
         run, command = self.fixture(
             "from pathlib import Path\np=Path('output/count'); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')\n")
         with patch.object(execution, "candidates", return_value=[command]):
-            self.assertEqual(Run.settled_gates(run, run.head(), [], []), 75)
-            self.assertFalse((run.worktree / "output/count").exists())
-            run.env.validate = True
-            self.assertIsNone(Run.settled_gates(run, run.head(), [], []))
+            self.assertEqual(Run.settled_gates(run, run.tree.head(), [], []), 75)
+            self.assertFalse((run.tree.path / "output/count").exists())
+            run.options.validate = True
+            self.assertIsNone(Run.settled_gates(run, run.tree.head(), [], []))
             self.assertEqual(Run.missing_execution(run), [])
         # Losing candidate metadata does not invalidate an intact validator receipt.
-        run.env.validate = False
+        run.options.validate = False
         with patch.object(execution, "candidates", return_value=[]):
-            self.assertIsNone(Run.settled_gates(run, run.head(), [], []))
+            self.assertIsNone(Run.settled_gates(run, run.tree.head(), [], []))
             self.assertEqual(Run.missing_execution(run), [])
-        self.assertEqual((run.worktree / "output/count").read_text(), "1")
+        self.assertEqual((run.tree.path / "output/count").read_text(), "1")
 
     def test_candidate_cannot_expand_the_invoking_caller_allowlist(self):
         self.native()
         run, command = self.fixture("from pathlib import Path\nPath('output/ran').touch()\n", caller=True)
         run.validation_commands = lambda: []
         with patch.object(execution, "candidates", return_value=[command]):
-            self.assertIsNone(Run.settled_gates(run, run.head(), [], []))
-        self.assertFalse((run.worktree / "output/ran").exists())
+            self.assertIsNone(Run.settled_gates(run, run.tree.head(), [], []))
+        self.assertFalse((run.tree.path / "output/ran").exists())
         self.assertEqual(Run.missing_execution(run), [command])
 
     def test_private_observations_alone_never_clear_the_final_barrier(self):
@@ -168,15 +170,15 @@ class GateExecutionTests(unittest.TestCase):
 
     def test_non_linux_posix_refuses_before_any_unowned_lease_or_launch(self):
         run, command = self.fixture("raise SystemExit(0)\n", caller=True)
-        head = run.head()
+        head = run.tree.head()
         for system in ("Darwin", "FreeBSD"):
             kernel = types.SimpleNamespace(sysname=system, release="fixture", version="fixture")
             with self.subTest(system=system), patch.object(validation.os, "name", "posix"), \
                     patch.object(validation.os, "uname", create=True, return_value=kernel), \
                     patch.object(validation.validation_lock, "Lease") as lease, \
                     patch.object(validation.subprocess, "Popen") as launch:
-                self.assertEqual(validation.validate(run, [{"cmd": command, "reason": "fixture"}]), ([], 75))
-                self.assertEqual(validation.check_inputs(run, head), 75)
+                self.assertEqual(validation.validate(run.tree, [{"cmd": command, "reason": "fixture"}], run.wait_hint), ([], 75))
+                self.assertEqual(validation.check_inputs(run.tree, head, run.wait_hint), 75)
                 self.assertEqual(Run.settled_gates(run, head, [(command, {})], []), 75)
                 lease.assert_not_called()
                 launch.assert_not_called()
@@ -184,14 +186,14 @@ class GateExecutionTests(unittest.TestCase):
     def test_input_check_has_no_command_attempt_or_receipt_and_preserves_dirty_inputs(self):
         self.native()
         run, _ = self.fixture("print('input')\n")
-        head = run.head()
-        self.assertIsNone(validation.check_inputs(run, head))
-        source = run.worktree / "gate.py"
+        head = run.tree.head()
+        self.assertIsNone(validation.check_inputs(run.tree, head, run.wait_hint))
+        source = run.tree.path / "gate.py"
         source.write_text("changed input\n", encoding="utf-8")
-        self.assertEqual(validation.check_inputs(run, head), 1)
-        self.assertEqual(validation.check_inputs(run, "0" * 40), 1)
+        self.assertEqual(validation.check_inputs(run.tree, head, run.wait_hint), 1)
+        self.assertEqual(validation.check_inputs(run.tree, "0" * 40, run.wait_hint), 1)
         self.assertEqual(source.read_text(), "changed input\n")
-        state = run.worktree / ".git" / "ouro-validation"
+        state = run.tree.path / ".git" / "ouro-validation"
         self.assertFalse(list(state.glob("*/attempt-*")))
         self.assertFalse(list(state.glob("*/receipt.json")))
         self.assertFalse((state / "lock").exists())
@@ -203,7 +205,7 @@ class GateExecutionTests(unittest.TestCase):
         run.stop_issue = Mock(side_effect=sh.Stopped(3))
         with patch.object(validation, "validate") as batch, patch.object(validation, "check_platform") as platform:
             with self.assertRaises(sh.Stopped) as stopped:
-                Run.settled_gates(run, run.head(), [(missing, {})], [])
+                Run.settled_gates(run, run.tree.head(), [(missing, {})], [])
             self.assertEqual(stopped.exception.args, (3,))
             self.assertEqual(run.stop_issue.call_args.args[0], "gate uncovered")
             self.assertEqual(run.stop_issue.call_args.args[2], 3)
@@ -216,18 +218,18 @@ class GateExecutionTests(unittest.TestCase):
         missing = "ouro-fixture-missing-" + uuid.uuid4().hex
         run.required_execution = run.validation_commands = lambda: [missing]
         with patch.object(execution, "candidates", return_value=[missing]):
-            self.assertEqual(Run.settled_gates(run, run.head(), [], []), 75)
+            self.assertEqual(Run.settled_gates(run, run.tree.head(), [], []), 75)
         self.assertEqual(run.execution_results[-1]["exit"], 75)
         self.assertEqual(Run.missing_execution(run), [missing])
 
     def resumed_run(self):
         base, command = self.fixture("print('complete')\n")
-        proof, failure = validation.validate(base, [{"cmd": command, "reason": "genuine resume proof"}])
+        proof, failure = validation.validate(base.tree, [{"cmd": command, "reason": "genuine resume proof"}], base.wait_hint)
         self.assertIsNone(failure)
         self.assertEqual(proof[0]["exit"], 0)
         run = Run.__new__(Run)
         run.__dict__.update(vars(base))
-        head = run.head()
+        head = run.tree.head()
         pr = {"state": "OPEN", "isDraft": False, "number": 1}
         run.env.pr_checks = lambda: True
         run.commits_past_base = lambda: 1
@@ -236,7 +238,7 @@ class GateExecutionTests(unittest.TestCase):
         run.records = lambda _: [{"sha": head, "round": 1, "findings": []}]
         run.build_facts = lambda **_: {"validation_pending": []}
         run.select_gates = lambda _: ([(command, {})], [])
-        run.origin_tip = lambda: head
+        run.tree.origin_tip = lambda: head
         run.checks = lambda *_: "green"
         run.flow, run.primary, run.copilot, run.in_lane = "standard", "node", False, False
         run.n, run.k, run.gated = 1, None, set()
@@ -267,7 +269,7 @@ class GateExecutionTests(unittest.TestCase):
             os.kill(witness["pid"], 9)
 
     def fsmonitor(self, run, *, only_without_lock):
-        probe = run.worktree / ".git" / ("input-probe-" + uuid.uuid4().hex)
+        probe = run.tree.path / ".git" / ("input-probe-" + uuid.uuid4().hex)
         probe.mkdir()
         nonce = uuid.uuid4().hex
         child = probe / "child.py"
@@ -280,22 +282,22 @@ class GateExecutionTests(unittest.TestCase):
             f"deadline=time.monotonic()+{5 if only_without_lock else .4}\n"
             "while not (probe/'release').exists() and time.monotonic()<deadline: time.sleep(.01)\n"
             "if (probe/'release').exists():\n"
-            f" source=pathlib.Path({str(run.worktree / 'gate.py')!r})\n"
+            f" source=pathlib.Path({str(run.tree.path / 'gate.py')!r})\n"
             " source.write_text(source.read_text()+'# delayed fixture mutation\\n')\n"
             " (probe/'delayed').touch()\n", encoding="utf-8")
         hook = probe / "hook.py"
         hook.write_text(
             "import pathlib,subprocess,sys,time\n"
-            f"probe=pathlib.Path({str(probe)!r}); lock=pathlib.Path({str(run.worktree / '.git/ouro-validation/lock')!r})\n"
+            f"probe=pathlib.Path({str(probe)!r}); lock=pathlib.Path({str(run.tree.path / '.git/ouro-validation/lock')!r})\n"
             f"if ({not only_without_lock!r} or not lock.exists()) and not (probe/'ready.json').exists():\n"
-            f" subprocess.Popen([sys.executable,{str(child)!r}],cwd={str(run.worktree)!r},start_new_session=True,"
+            f" subprocess.Popen([sys.executable,{str(child)!r}],cwd={str(run.tree.path)!r},start_new_session=True,"
             "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
             " deadline=time.monotonic()+3\n"
             " while not (probe/'ready.json').exists() and time.monotonic()<deadline: time.sleep(.01)\n"
             " assert (probe/'ready.json').exists(),'generated child did not become ready'\n"
             "sys.stdout.buffer.write(b'fixture-token\\0/\\0')\n", encoding="utf-8")
-        run.wt_git("config", "core.fsmonitor", sh.cmdline([sys.executable, hook]))
-        run.wt_git("config", "core.fsmonitorHookVersion", "2")
+        run.tree.git("config", "core.fsmonitor", sh.cmdline([sys.executable, hook]))
+        run.tree.git("config", "core.fsmonitorHookVersion", "2")
         self.addCleanup(self.finish_probe, probe)
         return probe, nonce
 
@@ -306,7 +308,7 @@ class GateExecutionTests(unittest.TestCase):
             with self.subTest(legacy=legacy):
                 run, state = self.resumed_run()
                 probe, nonce = self.fsmonitor(run, only_without_lock=True)
-                def raw_inputs(current, head):
+                def raw_inputs(current, head, hint):
                     return None if validation.inputs_match(current, head) else 1
                 if legacy:
                     with patch.object(validation, "check_inputs", side_effect=raw_inputs):
@@ -316,18 +318,18 @@ class GateExecutionTests(unittest.TestCase):
                     self.assertEqual(json.loads((probe / "ready.json").read_text())["nonce"], nonce)
                     self.finish_probe(probe)
                     self.assertTrue((probe / "delayed").exists())
-                    self.assertIn("delayed fixture mutation", (run.worktree / "gate.py").read_text())
+                    self.assertIn("delayed fixture mutation", (run.tree.path / "gate.py").read_text())
                 else:
                     self.assertEqual(Run.drive(run, None), 0)
                     self.assertTrue(state["ready"])
                     self.assertFalse((probe / "ready.json").exists())
                     self.assertFalse(self.probe_live(probe))
-                    self.assertNotIn("delayed fixture mutation", (run.worktree / "gate.py").read_text())
+                    self.assertNotIn("delayed fixture mutation", (run.tree.path / "gate.py").read_text())
 
     def test_leased_guard_rejects_an_incomplete_fsmonitor_snapshot(self):
         self.native()
         run, state = self.resumed_run()
-        private = run.worktree / ".git" / "ouro-validation"
+        private = run.tree.path / ".git" / "ouro-validation"
         before = {str(path.relative_to(private)): path.read_bytes() for path in private.rglob("*") if path.is_file()}
         probe, nonce = self.fsmonitor(run, only_without_lock=False)
         with self.assertRaisesRegex(sh.DriverError, "helper snapshot refused"):
@@ -340,7 +342,7 @@ class GateExecutionTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "actual Windows unsupported caller boundary")
     def test_actual_windows_refuses_proof_before_launch_even_with_consent(self):
         run, command = self.fixture("from pathlib import Path\nPath('output/ran').touch()\n", caller=True)
-        self.assertEqual(Run.settled_gates(run, run.head(), [(command, {})], []), 75)
+        self.assertEqual(Run.settled_gates(run, run.tree.head(), [(command, {})], []), 75)
         self.assertEqual(run.execution_results, [])
-        self.assertFalse((run.worktree / "output/ran").exists())
-        self.assertFalse((run.worktree / ".git" / "ouro-validation").exists())
+        self.assertFalse((run.tree.path / "output/ran").exists())
+        self.assertFalse((run.tree.path / ".git" / "ouro-validation").exists())

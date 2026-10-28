@@ -104,9 +104,10 @@ runs:
         $gates = @(python3 $tool get gate | ConvertFrom-Json)
         if ($gates.Count -eq 0) { Write-Host '::error::the binding declares no [[gate]] entries'; exit 1 }
 
-        # git's own pathspec matching decides what a diff touches: diff --quiet exits 1 on a change
-        # and 0 on none, and any other exit is a diff it could not read. An empty base is caught
-        # first, because "...HEAD" reads as no change at all.
+        # ouro-binding.py's gates --changed is the one selection rule the driver and the direct lane
+        # read too: the diff from the merge base, a gate with no paths on every change, and a nonzero
+        # exit on a diff it cannot read. An empty base is caught first, because "...HEAD" reads as
+        # no change at all.
         $toRun = $gates
         $skipped = @()
         $selection = 'full'
@@ -115,26 +116,6 @@ runs:
           $eventName = '${{ github.event_name }}'
           $base = '${{ github.event.pull_request.base.sha }}'
           $before = '${{ github.event.before }}'
-          $touches = {
-            param([string[]]$Spec)
-            # Started directly, by the path pwsh's lookup resolves: pwsh on Linux and macOS globs a
-            # native argument against the working directory, and git must see each entry as written;
-            # .NET there tries a bare name in that directory before PATH, and a PR can commit a git.
-            try {
-              $gitPath = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-              $psi = [System.Diagnostics.ProcessStartInfo]::new($gitPath)
-              $psi.UseShellExecute = $false
-              $psi.WorkingDirectory = (Get-Location).ProviderPath
-              foreach ($a in @('diff', '--quiet', "$base...HEAD", '--') + $Spec) { $psi.ArgumentList.Add($a) }
-              $p = [System.Diagnostics.Process]::Start($psi)
-            }
-            catch { throw "the diff against $base cannot be read (git did not start: $($_.Exception.Message))" }
-            $p.WaitForExit()
-            $code = $p.ExitCode
-            $p.Dispose()
-            if ($code -notin 0, 1) { throw "the diff against $base cannot be read (git exit $code)" }
-            $code -eq 1
-          }
           $why = $null
           if ($eventName -eq 'pull_request') {
             if (-not $base) { $why = 'the pull request has no base commit' }
@@ -146,18 +127,17 @@ runs:
           }
           else { $why = "the event is $eventName, not pull_request or push" }
           if (-not $why) {
-            try {
-              if (& $touches 'actions/gates/') {
-                $why = 'the diff touches actions/gates/'
-              }
-              else {
-                $toRun = @()
-                foreach ($g in $gates) {
-                  if (-not $g.paths -or (& $touches @($g.paths))) { $toRun += $g } else { $skipped += $g }
-                }
-              }
+            # A change to this Action runs every gate; the query answers for the binding's own gates.
+            $own = @(python3 $tool gates --changed $base --json)
+            if ($LASTEXITCODE) { $why = "the diff against $base cannot be read" }
+            elseif (& git diff --name-only --no-renames --no-ext-diff --no-textconv "$base...HEAD" -- actions/gates/) {
+              $why = 'the diff touches actions/gates/'
             }
-            catch { $why = $_.Exception.Message }
+            else {
+              $keys = @($own | ConvertFrom-Json | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 9 })
+              $toRun = @($gates | Where-Object { $keys -ccontains ($_ | ConvertTo-Json -Compress -Depth 9) })
+              $skipped = @($gates | Where-Object { $toRun -notcontains $_ })
+            }
           }
           if ($why) {
             $selection = 'fallback'

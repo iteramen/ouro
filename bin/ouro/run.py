@@ -5,7 +5,6 @@ first state not yet reached; optional board metadata caches only claim correlati
 asked only at the CHECKPOINT, BUILD, REVIEW and FOLLOWUP nodes (TRIAGE is `triage N`'s); everything else is a call to
 a script under bin/ or to git/gh.
 """
-import hashlib
 import json
 import os
 import posixpath
@@ -15,27 +14,26 @@ import shutil
 import stat
 import time
 import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import briefs, execution, node, sh, validation, worktrees
+from . import briefs, execution, node, recovery, sh, validation, worktrees
 from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, empty_list
-from .coordination import Claim, worker_env
+from .coordination import Claim
+from .records import (
+    BUILD_LINE, FIX_CAP, MIN_TIME, ORDER, PENDING_MARK, RELEASE_NOTES, body_line, derive_flow, derive_size,
+    drawn_body, failure_extract, filed_follow_ups, is_copilot, may_merge, needs_fix, newest_trusted_triage,
+    outside, parse_direct, parse_parts, pending_follow_ups, pending_json, read_record, reader_findings,
+    release_notes, restamped, review_comment, review_line, review_plan, review_records, sev, slugify,
+    tighter, unchanged_findings, when, without_build_lines)
+from .runtime.process import worker_env
 from .runtime.tools import caller_source_writable
 from .sh import DriverError, Refused, Stopped, argv_for, say, script
 
-FIX_CAP = 3
-ORDER = ["direct", "express", "standard", "full"]
 MODE = {"express": "light", "standard": "sized", "full": "probe"}
 STOP_REASONS = ("review cap", "open decision", "dead anchor", "gate uncovered", "acceptance unrunnable")
-FULL_PREFIXES = (".github/workflows/", ".github/actions/", "actions/", "hooks/", "release/", ".claude/ouro")
-EXEC_EXT = (".ps1", ".py", ".sh", ".yml", ".yaml", ".json", ".toml", ".js", ".ts", ".cs", ".cmd", ".bat")
 DOCS_EXT = (".md", ".txt", ".rst", ".adoc", ".png", ".jpg", ".jpeg", ".gif", ".svg")  # what a docs-only diff may hold: nothing a reader probes
-REVIEW_MARK = re.compile(r"\*\*Review\*\* round ([0-9]+): (CLEAN|FINDINGS) @ ([0-9a-f]{40})")
-PART_ITEM = re.compile(r"(?m)^- \[([ xX])\] ([0-9]+)\. (\*\*.+?\(Flow: \w+\)\.\*\*.*)$")  # the contract's part form alone: a plain task list is no checklist
-RECORD = re.compile(r"<!-- ouro-record: (.*?) -->", re.DOTALL)
 BAD_RUN = re.compile(r"(\d+):(failure|cancelled|timed_out|action_required|startup_failure|stale)")
-SEVERITY = {"blocker": "H", "major": "M", "minor": "L"}
 EDITS_QUERY = ("query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){issue(number:$n){"
                "userContentEdits(first:100,after:$c){nodes{editedAt editor{login}}pageInfo{hasNextPage endCursor}}}}}")
 COPILOT_STATE_QUERY = ("query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){id "
@@ -45,10 +43,8 @@ THREADS_QUERY = ("query($o:String!,$r:String!,$n:Int!,$c:String){repository(owne
                  "reviewThreads(first:100,after:$c){nodes{id isResolved comments(first:50){totalCount "
                  "nodes{databaseId author{login} body path line}}}pageInfo{hasNextPage endCursor}}}}}")
 REVIEW_DENIED = ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"]
-BUILD_LINE = "Ouro-Build: "
 NO_REPLY = "No reply came from the build for this thread; nothing was changed for it."
 ONE_ROUND = "Copilot's one review round on this pull request is spent; this thread is left for the merger."
-MIN_TIME = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def watch_limit():
@@ -59,376 +55,11 @@ def poll_seconds():
     return int(os.environ.get("OURO_POLL_SECONDS", "15"))
 
 
-# ---- pure helpers (unit-tested directly) -------------------------------------------------------
-
-def may_merge(policy, unattended_classes, issue_labels, flow):
-    """Whether the effective policy lets the driver merge: the binding's value, narrowed by the issue."""
-    if policy == "merge-on-green":
-        return flow in (["express", "standard"] if unattended_classes is None else unattended_classes)
-    if policy == "trivial-merge":
-        return "trivial" in set(issue_labels)
-    return False
-
-
-def slugify(title):
-    words = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-").split("-")[:5]
-    return "-".join(words)[:40].strip("-") or "change"
-
-
-def parse_parts(body):
-    return [(int(m.group(2)), m.group(1) in "xX", m.group(3)) for m in PART_ITEM.finditer(body)]
-
-
-def body_line(body, key):
-    m = re.search(rf"(?m)^{key}:[^\S\r\n]*(\S+)", body)
-    return m.group(1) if m else None
-
-
-def derive_flow(paths, gate_files):
-    """The class a diff's paths imply; Flow only tightens, so the caller takes the greater."""
-    if any(p.startswith(FULL_PREFIXES) or p in gate_files for p in paths):
-        return "full"
-    if any(p.endswith(EXEC_EXT) for p in paths):
-        return "standard"
-    return "express"
-
-
-def tighter(a, b):
-    return a if ORDER.index(a) >= ORDER.index(b) else b
-
-
-def sev(f):
-    return str(f.get("severity", "")).strip().upper()[:1] if isinstance(f, dict) else ""
-
-
-def outside(f):
-    """A verification finding in lines no fix touched: a follow-up, never a fix round (contract section 7)."""
-    return isinstance(f, dict) and str(f.get("scope", "")).strip().upper() == "OUTSIDE"
-
-
-def stands(f):
-    """A verification's re-report of a finding an earlier round made: counted in that round, still a fix to make."""
-    return isinstance(f, dict) and str(f.get("scope", "")).strip().upper() == "STANDS"
-
-
-def unchanged_findings(records):
-    """The H or M findings the last verification re-raised with the file, claim and evidence of the verification before it: a fix
-    that moved nothing of them, stopped before the cap. The first review is no verification, so its findings count once re-raised."""
-    verifs = [r for r in records if r.get("round", 1) > 1 and not r.get("ruled")]
-    if len(verifs) < 2 or verifs[-1].get("round") != verifs[-2].get("round", 0) + 1:
-        return []
-    before = {(f.get("file"), f.get("claim"), f.get("evidence")) for f in verifs[-2]["findings"] if sev(f) in ("H", "M") and not outside(f)}
-    return [f for f in verifs[-1]["findings"] if sev(f) in ("H", "M") and not outside(f) and (f.get("file"), f.get("claim"), f.get("evidence")) in before]
-
-
-def needs_fix(rec):
-    """An H or M finding a fix must answer, unless an approver ruled the record; a first review has no fix, so its scope is ignored."""
-    verifying = rec.get("round", 1) > 1
-    return not rec.get("ruled") and any(sev(f) in ("H", "M") and not (verifying and outside(f)) for f in rec["findings"])
-
-
-def parse_review_comment(c, trusted):
-    """A `**Review** round k: CLEAN|FINDINGS @ <sha>` record, only from a trusted author, line 1 alone."""
-    login = str((c.get("author") or {}).get("login") or "").lower()
-    if login not in trusted:
-        return None
-    body = str(c.get("body") or "").replace("\r\n", "\n")
-    m = REVIEW_MARK.fullmatch(body.split("\n", 1)[0])
-    if not m:
-        return None
-    ans = {}
-    fences = re.findall(r"```json\n(.*?)\n```", body, re.DOTALL)
-    if fences:
-        try:
-            ans = json.loads(fences[-1])
-        except ValueError:
-            ans = {}
-    return {"round": int(m.group(1)), "verdict": m.group(2), "sha": m.group(3), "body": body,
-            "findings": ans.get("findings") or [], "false": ans.get("false_record_sentences"), "reader": ans.get("reader")}
-
-
-def review_records(comments, trusted, approvers=()):
-    """The records in order of round; an approver's `**Ruling**` comment marks the newest record posted before it as ruled."""
-    seen, out, last = {}, [], None
-    for c in comments:
-        r = parse_review_comment(c, trusted)
-        if r:
-            key = (r["round"], r["sha"])
-            if key not in seen:
-                seen[key] = r
-                out.append(r)
-            last = seen[key]
-            continue
-        who = str((c.get("author") or {}).get("login") or "")
-        if last and who.lower() in approvers and str(c.get("body") or "").split("\n", 1)[0].strip().startswith("**Ruling**"):
-            last["ruled"] = who
-    return sorted(out, key=lambda r: r["round"])
-
-
-PENDING_MARK = "<!-- ouro-pending: "
-
-
-def pending_json(items):
-    """The unfiled follow-up items as one-line JSON an HTML comment can hold: no `>` reaches the comment's closer, and
-    non-ASCII text stays itself (escaped, it grows six-fold against the comment's size limit)."""
-    return json.dumps(items, ensure_ascii=False).replace(">", "\\u003e")
-
-
-def pending_follow_ups(body):
-    """The items a `**Follow-ups filed**` comment carries as unfiled, or none."""
-    m = re.search(re.escape(PENDING_MARK) + r"(.*?) -->", body, re.S)
-    return json.loads(m.group(1)) if m else []
-
-
-def filed_follow_ups(body):
-    """The entries a `**Follow-ups filed**` comment lists as filed: its bullets before any `Not filed` line."""
-    head = body.split("\nNot filed", 1)[0]
-    return [l[2:] for l in head.splitlines() if l.startswith("- ")]
-
-
-def review_line(records, reviewer_on):
-    if not reviewer_on:
-        return "Review: none"
-    fixes = sum(1 for r in records if needs_fix(r)) - (1 if records and needs_fix(records[-1]) else 0)
-    counts, seen = {k: 0 for k in "HML"}, set()
-    for r in records:
-        for f in r["findings"]:
-            key = (sev(f), str(f.get("file")), str(f.get("line")), " ".join(str(f.get("claim") or "").split()))
-            # counted once, in the round that first reported it; a verification's OUTSIDE finding is a follow-up, not a
-            # finding of the change, and a later round's restatement of it is the same finding
-            if sev(f) in counts and key not in seen:
-                seen.add(key)
-                if not ((stands(f) or outside(f)) and r.get("round", 1) > 1):
-                    counts[sev(f)] += 1
-    falses = [r["false"] for r in records if isinstance(r["false"], int) and not isinstance(r["false"], bool)]
-    return (f"Review: rounds:{fixes} findings:H{counts['H']}/M{counts['M']}/L{counts['L']} "
-            f"false-sentences:{sum(falses) if falses else 'unread'}")
-
-
-def review_comment(rnd, ans, sha):
-    findings = ans.get("findings") or []
-    verdict = "FINDINGS" if needs_fix({"round": rnd, "findings": findings}) else "CLEAN"
-    lines = [f"**Review** round {rnd}: {verdict} @ {sha}", "", f"{len(findings)} finding(s).", ""]
-    for f in findings:
-        lines.append(f"- {sev(f) or '?'} {f.get('file', '')}:{f.get('line', '')} {f.get('claim', '')} ({f.get('evidence', '')})")
-    lines += ["", "```json", json.dumps(ans, indent=1), "```", ""]
-    return "\n".join(lines)
-
-
-def render_body(rec, review):
-    c = rec.get("changes") or []
-    gates = rec.get("gates") or []
-    raw = json.dumps(rec).replace("--", "-\\u002d")
-    out = [rec.get("part_line", ""), rec.get("fixes_line", ""), review]
-    out = [x for x in out if x]
-    out += ["## Merge danger", f"- **Door:** {rec.get('door', 'unstated')}", f"- **Blast radius:** {rec.get('blast', 'unstated')}"]
-    if rec.get("manual"):
-        out.append("## Manual steps")
-        for m in rec["manual"]:
-            out.append(f"- `{m.get('path')}`" + ("" if m.get("edit") else ": the node gave no edit; make it by hand"))
-            if m.get("edit"):
-                fence = "`" * max(3, max((len(x) for x in re.findall(r"`+", str(m["edit"]))), default=0) + 1)
-                out += ["", "  " + fence, *["  " + l for l in str(m["edit"]).splitlines()], "  " + fence, ""]
-    out += ["## Summary", rec.get("summary", ""), "## Changes", *[f"- {x}" for x in c],
-            "<details><summary>Verification</summary>", ""]
-    out += [f"- Gates at {g['sha'][:7]}: `{g['cmd']}` exit {g['exit']}" for g in gates]
-    if rec.get("checked"):
-        out.append("- Gates the pull request's checks run: " + ", ".join(f"`{c}`" for c in rec["checked"]))
-    elif not gates:
-        out.append("- Gates: none selected")
-    out += [f"- Gate skipped, the diff touches none of its paths: `{s}`" for s in rec.get("skipped", [])]
-    out += [f"- Observed successful execution @ {rec.get('execution_head')}: `{cmd}`; "
-            f"evidence `{rec.get('execution_evidence')}`" for cmd in rec.get("execution_commands", [])]
-    out += [f"- BUILD reported `{g.get('cmd')}`: exit {g.get('exit')}" for g in rec.get("build_gates") or []]
-    out += [f"- Driver validation @ {g['sha']}: `{g['cmd']}` exit {g['exit']}; evidence `{g['log']}`"
-            for g in rec.get("validation_results") or []]
-    out += [f"- Driver validation attempt @ {g['sha']}: `{g['cmd']}` exit {g['exit']}; evidence `{g['log']}`"
-            for g in rec.get("validation_attempts") or [] if g not in (rec.get("validation_results") or [])]
-    out += [f"- CI validation @ {g['sha']}: `{g['name']}` succeeded; {g['url']}"
-            for g in rec.get("ci_validation") or []]
-    if rec.get("note"):
-        out.append(f"- {rec['note']}")
-    out += [f"- {review}", ""]
-    if rec.get("usage"):
-        out += [rec["usage"], ""]
-    out += ["</details>", "", "## Follow-up", *[f"- {x}" for x in rec.get("residue", [])], f"<!-- ouro-record: {raw} -->", ""]
-    return "\n".join(out)
-
-
-PYTEST_SECTION = re.compile(r"^={3,} (.+?) ={3,}$")
-PYTEST_KEEP = re.compile(r"^(FAILED|ERROR) |^={3,} (short test summary info|.*\b(failed|errors?)\b.*) ={3,}$")
-LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?|\x1b\[[0-9;]*m")  # gh's job, step and timestamp; a colour
-ERROR_MARK = re.compile(r"\b(error|failed|failure|fatal|panic|traceback|exception)\b", re.I)
-
-
-def failure_extract(log, cap=200, tail=60):
-    """What a fix round reads of a red log: pytest's FAILURES and ERRORS sections with the FAILED and ERROR lines and the
-    result line, or else every line an error marker names, with two lines of context, then the log's tail. Over `cap`
-    lines it cuts from the middle; a fixed tail misses a failure that a long SKIPPED list follows."""
-    lines = log.strip().splitlines()
-    text = [LOG_PREFIX.sub("", l) for l in lines]
-    keep, inside, pytest = [], False, False
-    for i, t in enumerate(text):
-        if m := PYTEST_SECTION.match(t):
-            inside = m.group(1) in ("FAILURES", "ERRORS")
-            pytest = pytest or inside
-        if inside or (pytest and PYTEST_KEEP.search(t)):
-            keep.append(i)
-    if not pytest:
-        keep = sorted({j for i, t in enumerate(text) if ERROR_MARK.search(t) for j in range(max(0, i - 2), i + 3) if j < len(lines)})
-    if len(keep) > cap:
-        keep = keep[:cap // 2] + keep[-(cap // 2):]
-    if not pytest:
-        keep = sorted(set(keep) | set(range(max(0, len(lines) - tail), len(lines))))
-    out, last = [], -1
-    for i in keep:
-        if i > last + 1:
-            out.append(f"[... {i - last - 1} line(s) left out ...]")
-        out.append(lines[i])
-        last = i
-    return "\n".join(out)
-
-
-def body_sections(body):
-    """{`## ` heading: its section's text} of a pull request body, the record comment cut and line ends as git writes them."""
-    parts = re.split(r"(?m)^(?=## )", RECORD.sub("", (body or "").replace("\r\n", "\n")))
-    return {p.split("\n", 1)[0]: "\n".join(l.rstrip() for l in p.strip().splitlines()) for p in parts if p.startswith("## ")}
-
-
-def drawn_body(rec, review, body=""):
-    """render_body, keeping each section of `body` a person edited since the driver drew it: the record holds a digest of
-    each section as drawn, and a section that no longer matches its digest is theirs, kept as they left it."""
-    digest = lambda t: hashlib.sha256(t.encode("utf-8")).hexdigest()[:16]
-    drawn = rec.get("drawn") or {}
-    kept = {h: t for h, t in body_sections(body).items() if h in drawn and digest(t) != drawn[h]}
-    rec["drawn"] = {}
-    fresh = body_sections(render_body(rec, review))
-    rec["drawn"] = {h: digest(t) for h, t in fresh.items()}
-    out = render_body(rec, review)
-    for h, t in kept.items():
-        if h in fresh:
-            out = out.replace(fresh[h], t, 1)
-    return out
-
-
-def without_build_lines(text):
-    return "\n".join(l for l in text.splitlines() if not l.startswith(BUILD_LINE)).strip()
-
-
 def acceptance_source(run):
     """Only explicit fields in approved spec comments extend the body's grants."""
     comments = getattr(run, "spec_amendments", lambda: [])()
     declared = [command for comment in comments for command in acceptance_declarations(str(comment.get("body") or ""))]
     return run.body + ("\n## Acceptance commands\n" + "\n".join(f"Acceptance command: `{cmd}`" for cmd in declared) if declared else "")
-
-
-def read_record(body):
-    m = RECORD.search(body or "")
-    return json.loads(m.group(1)) if m else {}
-
-
-def review_plan(value, size):
-    """(the reviewer that reads first, Copilot after it) for a ship.review value and a Size: the rows of the binding doc's table."""
-    if size == "S":
-        return {"adversarial-review": ("node", False), "copilot": (None, True), "external-audit": ("reader", False)}.get(value, (None, False))
-    return ("node", value == "copilot")
-
-
-RELEASE_NOTES = [r"(^|/)CHANGELOG\.md$"]  # repo.release_notes unset
-
-
-def release_notes(paths, patterns=RELEASE_NOTES):
-    """The paths a repo.release_notes pattern matches, searched case-sensitively as git compares paths."""
-    return [p for p in paths if any(re.search(x, p) for x in patterns)]
-
-
-def derive_size(paths, lines, patterns=RELEASE_NOTES):
-    """('M', why) when a diff is over the S shape (contract section 4), else ('S', ''); release notes count toward the lines only."""
-    notes = release_notes(paths, patterns)
-    counted = [p for p in paths if p not in notes]
-    why = []
-    if len(counted) > 3:
-        why.append(f"{len(counted)} files")
-    if lines > 60:
-        why.append(f"{lines} changed lines")
-    why += [f"a workflow ({p})" for p in paths if p.startswith(".github/workflows/")][:1]
-    return ("M", " and ".join(why)) if why else ("S", "")
-
-
-def when(text):
-    try:
-        t = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-
-
-def newest_trusted_triage(comments, trusted, mark="**Triage**"):
-    """When the newest `mark` comment from a trusted author was made (the epoch when it carries no time), else None."""
-    best = None
-    for c in comments:
-        login = str((c.get("author") or {}).get("login") or "").lower()
-        first = str(c.get("body") or "").replace("\r\n", "\n").split("\n", 1)[0].strip()
-        if login in trusted and first == mark:
-            t = when(c.get("createdAt")) or MIN_TIME
-            best = t if best is None or t > best else best
-    return best
-
-
-def is_copilot(login):
-    return str(login or "").lower().startswith("copilot-pull-request-reviewer")
-
-
-def parse_direct(out):
-    """What Push-Direct.ps1 printed: its vehicle and whether a push happened."""
-    m = re.search(r"(?m)^vehicle: (push|pr)\s*$", out)
-    return {"vehicle": m.group(1) if m else None, "pushed": re.search(r"(?m)^pushed \S+ to origin at ", out) is not None}
-
-
-def reader_findings(verdict):
-    """The external reader's critiques as findings: blocker H, major M, minor L; an unknown severity is M."""
-    out = []
-    for c in verdict.get("critiques") or []:
-        ev = str(c.get("evidence") or "")
-        m = re.search(r"([\w./-]+\.\w+):(\d+)", ev)
-        out.append({"severity": SEVERITY.get(str(c.get("severity", "")).lower(), "M"), "file": m.group(1) if m else "",
-                    "line": int(m.group(2)) if m else 0, "claim": str(c.get("claim") or ""), "evidence": ev})
-    return out
-
-
-def restamped(e, body, findings):
-    """The body with each anchor line under its `Anchors` heading that the findings name re-pointed at the one tracked file of the same
-    suffix at the default branch's tip that holds every fragment on it, and the `Anchors @ <sha>` stamp set to that tip; the body as it is
-    when no line can be re-pointed. A Deliverable clause is never re-pointed: one naming a deleted file is stale (contract section 3)."""
-    ref = f"origin/{e.default}"
-    dead = set()
-    for f in findings:
-        m = re.match(r"path does not resolve: '(.+)'$", f) or re.match(r"fragment no longer greps in '(.+?)': ", f)
-        if m:
-            dead.add(m.group(1))
-    out, moved, anchors, fenced = [], 0, False, False
-    for line in body.splitlines():
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        if line.startswith("#") and not fenced:
-            anchors = bool(re.match(r"#+\s*Anchors\b", line))
-        m = re.match(r"^(\s*(?:[-*+]|\d+[.)])\s[^`\r\n]*`)([^`\r\n]+)(`.*)$", line) if anchors else None
-        span = m.group(2) if m else ""
-        base = re.split(r"[:#]", span, 1)[0]  # the gate cuts a span at its first : or # (`path:171`, `path#L171`)
-        if span and any(d == base or d.endswith("/" + base) for d in dead):
-            files = None
-            for frag in re.findall(r'"((?:[^"\\]|\\.)*)"', line):
-                frag = frag.replace('\\"', '"')
-                if 12 <= len(frag) <= 120:
-                    hits = {l[len(ref) + 1:] for l in e.git("grep", "-F", "-l", "-z", "-e", frag.strip("`"), ref, check=False).out.split("\0") if l.startswith(ref + ":")}
-                    files = hits if files is None else files & hits
-            if files and len(files) == 1 and (new := next(iter(files))) != base and Path(new).suffix == Path(base).suffix:
-                line, moved = m.group(1) + new + span[len(base):] + m.group(3), moved + 1
-        out.append(line)
-    if not moved:
-        return body
-    sha = e.git("rev-parse", "--short=7", ref).out.strip()
-    return re.sub(r"(Anchors\s*@\s*)[0-9a-f]{7,40}", lambda m: m.group(1) + sha, "\n".join(out) + ("\n" if body.endswith("\n") else ""))
 
 
 # ---- the run ----------------------------------------------------------------------------------
@@ -437,9 +68,17 @@ PRINTS = re.compile(r"\s*(?:echo|pwsh -NoProfile -Command [\"']Write-Host)\b", r
 SKIPS = re.compile(r"\s*(?:echo|pwsh -NoProfile -Command [\"']Write-Host)\s+(?:-\w+\s+\S+\s+)*[\"']?skip", re.I)
 
 
+@dataclass
+class RunOptions:
+    validate: bool = False
+    recover_build: list = field(default_factory=list)
+    override_claim: bool = False
+    adopt_pr: int | None = None
+
+
 class Run:
-    def __init__(self, env, n, part_arg):
-        self.env, self.n, self.part_arg = env, n, part_arg
+    def __init__(self, env, n, part_arg, options):
+        self.env, self.n, self.part_arg, self.options = env, n, part_arg, options
         self.gated = set()
         self.committed_here = set()
         self.pending = []  # review comments held until the express draft opens
@@ -447,7 +86,11 @@ class Run:
         self.synced = set()
         self.fresh = False
         self.notes = []  # sentences the record carries: a tightening, a reader that was unavailable
-        self.in_lane = False
+        self.in_lane, self.reader_skipped = False, False
+        self.execution_grants, self.skipped = None, None  # None: not read from history yet, no gate ran in this invocation
+        self.execution_results, self.caller_execution_results, self.gate_log = [], [], []
+        self.ci_execution_head, self.ci_execution_commands, self.ci_execution_checks = None, set(), []
+        self.lane_build, self.lane_build_record = ("parent", None), None
         self.messages, self.ancestry = {}, {}  # facts about full commit ids, which never change
         self.claim = Claim(self)
 
@@ -490,8 +133,11 @@ class Run:
         prefix = self.env.lookup("repo.branch_prefix") or (self.areas + [l for l in self.labels if l in types] + ["ouro"])[0]
         self.dirname = f"{self.n}-{slugify(self.title)}{suffix}"
         self.branch = f"{prefix}/{self.dirname}"
-        self.worktree = self.env.main / ".claude" / "worktrees" / self.dirname
+        self.tree = self.issue_tree()
         self.fixes = self.k is None or self.k == self.parts_n
+
+    def issue_tree(self):
+        return worktrees.Tree(self.env, self.env.main / ".claude" / "worktrees" / self.dirname, self.branch)
 
     def part_scope(self, node):
         """The brief text that pins a checklist part's node to that part; empty on a deliverable with no checklist."""
@@ -521,7 +167,7 @@ class Run:
         self.branch = p["headRefName"]
         # its own worktree: the derived one may hold an earlier run's tree on another branch
         self.dirname = f"{self.n}-pr{number}"
-        self.worktree = self.env.main / ".claude" / "worktrees" / self.dirname
+        self.tree = self.issue_tree()
         say(f"  adopting pull request #{number} from {self.branch}")
 
     def refuse_other_pr(self):
@@ -560,7 +206,7 @@ class Run:
         if not fp:
             return None
         try:
-            root = self.worktree.resolve()
+            root = self.tree.path.resolve()
             raw = root / Path(str(fp))
             resolved = Path(os.path.abspath(raw.resolve())).relative_to(root)
             lexical = Path(os.path.abspath(raw))
@@ -656,14 +302,14 @@ class Run:
             if parts and all(done for _, done, _ in parts):
                 self.part_arg = parts[-1][0]
         self.plan_part()
-        if getattr(e, "adopt_pr", None):
-            self.adopt(e.adopt_pr)
+        if self.options.adopt_pr:
+            self.adopt(self.options.adopt_pr)
         say(f"#{self.n} {self.title}")
         say(f"  class {self.flow}, size {self.size}, branch {self.branch}")
         if not coordination:
             e.git("fetch", "origin", check=False)
         pr = self.find_pr()
-        if getattr(e, "recover_build", []) and (self.flow == "direct" or not pr or pr["state"] != "OPEN"):
+        if self.options.recover_build and (self.flow == "direct" or not pr or pr["state"] != "OPEN"):
             raise Refused("BUILD recovery requires an open normal-path issue pull request; it cannot start a fresh or direct BUILD")
         if not pr and coordination:
             pr = self.find_pr(states=("CLOSED",))
@@ -711,18 +357,18 @@ class Run:
         if coordination and not published and not lane_pr and (self.issue.get("state") == "CLOSED" and not (pr and pr["state"] == "MERGED")
                                  or pr and pr["state"] == "CLOSED"):
             self.claim.update("closed externally without merge", close=True)
-            worktrees.sweep(e, only=self.worktree)
+            worktrees.sweep(e, only=self.tree.path)
             say("[2] work closed externally; claim reconciled")
             return 0
         if pr and pr["state"] == "CLOSED":
-            worktrees.sweep(e, only=self.worktree)
+            worktrees.sweep(e, only=self.tree.path)
             say("[2] pull request closed externally: nothing to do")
             return 0
         if coordination:
             e.git("fetch", "origin", check=False)
         say(f"[1] bind: {e.slug}, default branch {e.default}, policy {e.lookup('ship.policy')}, review {e.lookup('ship.review')}")
         if published and published[2] == "revert":
-            self.in_lane, self.worktree = True, e.main
+            self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
             return self.lane_revert_stop(published[0], published[1])
         if pr is None and not branch_known and lane_pr is None and not published:
             if self.issue.get("state") == "CLOSED":
@@ -741,7 +387,7 @@ class Run:
                 say(f"[2a] direct: not taken, {why}; the run continues as express from a worktree")
                 self.flow = "express"
             self.require_acceptance()
-            if not self.build_commands()[1] and not execution.ci_commands(self, selected=False):
+            if not self.build_commands()[1] and not self.ci_commands(selected=False):
                 self.stop_issue("gate uncovered", empty_list(self.body), 3)
         else:
             say("[2] verify: skipped, the run already has a branch or a pull request")
@@ -754,19 +400,24 @@ class Run:
             if not (pr and pr["state"] == "MERGED"):
                 self.check_spec_trust()  # the body the nodes read on this pass, not the one the fresh run checked
         if published:
-            self.in_lane, self.worktree = True, e.main
+            self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
             return self.lane_after(*published)
         if lane_pr:
             return self.lane_resume(lane_pr)
         if pr and pr["state"] == "MERGED":
             return self.after_merge(pr)
         if e.dry:
-            if getattr(e, "recover_build", []):
+            if self.options.recover_build:
                 say("  would: preserve the dirty original and offer only explicitly selected files in a private recovery checkout; normal validation/review/caps still apply")
             return self.plan(pr, branch_known)
-        if getattr(e, "recover_build", []):
-            from . import recovery
-            recovery.prepare(self, pr, e.recover_build)
+        if self.options.recover_build:
+            checkout, files, original = recovery.prepare(self, pr, self.options.recover_build)
+            e.main = checkout
+            self.tree = self.issue_tree()
+            self.claim = Claim(self)  # A new clone never adopts/copies the original claim cache.
+            self.claim.enter()  # A known original claim still requires the person's explicit override.
+            self.ensure_worktree()
+            recovery.offer(self.tree, checkout, files, original)
         else:
             self.ensure_worktree()
         return self.drive(pr)
@@ -877,9 +528,6 @@ class Run:
             self.body = body
             say("[2] verify: anchors re-pointed at the file their fragments moved to, the body re-stamped")
         say("[2] verify: agent-ready, shape green, anchors resolve")
-        miss = [a for a in self.areas if not any("*" in g.get("areas", []) or a in g.get("areas", []) for g in e.data.get("gate", []))]
-        if miss and not checkpoint:
-            self.stop_issue("gate uncovered", f"No `[[gate]]` covers the area label(s): {', '.join(miss)}.", 3)
 
     def check_spec_trust(self):
         """The spec is the body as the newest trusted Triage comment left it: a later edit by anyone else stops the run."""
@@ -915,23 +563,23 @@ class Run:
 
     def ensure_worktree(self):
         e = self.env
-        worktrees.use(e, self.worktree)
+        worktrees.use(e, self.tree.path)
         def readiness(base):
-            node.worktree_readiness(e.runtime, e.main, self.worktree, self.branch, base)
-        if (self.worktree / ".git").exists():
+            node.worktree_readiness(e.runtime, e.main, self.tree.path, self.branch, base)
+        if (self.tree.path / ".git").exists():
             readiness("HEAD")
-            say(f"[3] worktree: {self.worktree} exists")
-            if self.catch_up("HEAD", self.worktree, before_move=readiness):
+            say(f"[3] worktree: {self.tree.path} exists")
+            if self.catch_up("HEAD", self.tree.path, before_move=readiness):
                 readiness("HEAD")  # Check the final actual inputs before setup, without replacing an occupied tree.
-            self.setup_tree(self.worktree, fresh=False)  # a tree an older driver or an interrupted setup left is set up once, and kept
+            self.setup_tree(self.tree.path, fresh=False)  # a tree an older driver or an interrupted setup left is set up once, and kept
             return
         # git check-ignore refuses a path beyond a symlink, so a symlinked .claude/worktrees is checked at its target
-        real = self.worktree.resolve()
+        real = self.tree.path.resolve()
         if not real.is_relative_to(e.main.resolve()):
-            raise DriverError(f"{self.worktree} resolves to {real}, outside the repository: point .claude/worktrees at a directory inside it")
+            raise DriverError(f"{self.tree.path} resolves to {real}, outside the repository: point .claude/worktrees at a directory inside it")
         rel = real.relative_to(e.main.resolve()).as_posix()
-        if self.worktree.exists() or self.worktree.is_symlink():
-            raise DriverError(f"worktree path already exists without Git metadata: {self.worktree}")
+        if self.tree.path.exists() or self.tree.path.is_symlink():
+            raise DriverError(f"worktree path already exists without Git metadata: {self.tree.path}")
         r = e.git("check-ignore", "-q", "--no-index", rel + "/", check=False)
         if r.code != 0:
             raise DriverError(f"{rel} is not ignored (git check-ignore exit {r.code}): add {rel.rsplit('/', 1)[0]}/ to the repo's .gitignore")
@@ -948,8 +596,8 @@ class Run:
             argv = ["worktree", "add", rel, "-b", self.branch, f"origin/{e.default}"]
         say(f"[3] worktree: git {' '.join(argv)}")
         e.git(*argv)
-        worktrees.created(e, self.worktree, self.branch, self.n, self.k)
-        self.setup_tree(self.worktree)
+        worktrees.created(e, self.tree.path, self.branch, self.n, self.k)
+        self.setup_tree(self.tree.path)
 
     def fetch_branch(self):
         """Whether origin has the branch, its tip fetched to origin/<branch>; a failed read is a driver error, never a stale ref."""
@@ -1021,12 +669,12 @@ class Run:
             self.stop_issue("gate uncovered", f"The driver cannot run the binding's `repo.setup` `{setup}`: `{argv[0] if argv else ''}` is not on PATH.", 3)
         def status():
             return [x for x in e.git("status", "--porcelain", "-z", "--untracked-files=all", cwd=tree).out.split("\0") if x]
-        before = set(status()) if tree == self.worktree else set()
+        before = set(status()) if tree == self.tree.path else set()
         r = self.env.run([exe, *argv[1:]], cwd=tree)
         say(f"[3] setup `{setup}` in {tree.name}: exit {r.code}")
-        left = [x for x in status() if x not in before] if tree == self.worktree else []
+        left = [x for x in status() if x not in before] if tree == self.tree.path else []
         if r.code != 0 or left:
-            if fresh and tree == self.worktree:  # a tree set up by half is not resumed as done: the next run creates it anew
+            if fresh and tree == self.tree.path:  # a tree set up by half is not resumed as done: the next run creates it anew
                 e.git("worktree", "remove", "--force", str(tree), check=False)
             # the build commits with add -A: `??` is a file to ignore or write elsewhere, ` M` a tracked file setup rewrote
             listed = ("\n\nIt left entries in `" + tree.name + "` that the build would commit (`??` untracked and not ignored, ` M` a tracked file it rewrote):\n\n"
@@ -1037,18 +685,8 @@ class Run:
             self.stop_issue("gate uncovered", f"The binding's `repo.setup` `{setup}` exited {r.code} in `{tree.name}`, so no gate can run there:\n\n```\n{tail}\n```{listed}\n", 3)
         marker.write_text("", encoding="utf-8")
 
-    def wt_git(self, *args, check=True):
-        return self.env.git(*args, cwd=self.worktree, check=check)
-
-    def head(self):
-        return self.wt_git("rev-parse", "HEAD").out.strip()
-
     def commits_past_base(self):
-        return int(self.wt_git("rev-list", "--count", f"origin/{self.env.default}..HEAD").out.strip() or 0)
-
-    def changed_paths(self):
-        out = self.wt_git("diff", "--name-only", "-z", f"origin/{self.env.default}...HEAD").out
-        return [p for p in out.split("\0") if p]
+        return int(self.tree.git("rev-list", "--count", f"origin/{self.env.default}..HEAD").out.strip() or 0)
 
     # ---- the drive loop (transitions 4-9)
     def drive(self, pr):
@@ -1066,18 +704,18 @@ class Run:
                 continue
             records = self.records(pr)
             pending = self.build_facts(evidence=False)["validation_pending"]
-            covered = execution.ci_commands(self)
+            covered = self.ci_commands()
             pending = [p for p in pending if p["cmd"] not in covered]
             if pending:
                 validation.requests(pending, self.validation_commands())
-                if not getattr(e, "validate", False):
-                    results, failure = validation.validate(self, pending, reuse=True, execute_missing=False)
+                if not self.options.validate:
+                    results, failure = validation.validate(self.tree, pending, self.wait_hint, reuse=True, execute_missing=False)
                     if failure is not None:
                         say(f"waiting for validation: invoke `ouro run {self.n}"
                             + (f" --part {self.k}" if self.k else "") + " --validate`")
                         return 0
                 else:
-                    results, failure = validation.validate(self, pending, reuse=True)
+                    results, failure = validation.validate(self.tree, pending, self.wait_hint, reuse=True)
                     if failure == 75:
                         say("waiting for validation: execution unavailable; no owner ruling or fix round")
                         return 0
@@ -1087,7 +725,7 @@ class Run:
                         self.fix_round(f"validation `{failed['cmd']}` exited {failure} @ {failed['sha']}; "
                                        f"evidence {failed['log']}:\n{tail}", records)
                         continue
-            head = results[0]["sha"] if pending else self.head()
+            head = results[0]["sha"] if pending else self.tree.head()
             inputs = self.check_inputs(head)
             if inputs == 75:
                 say("waiting for validation: execution requires a supported lifecycle boundary")
@@ -1113,10 +751,11 @@ class Run:
                 return 0
             if inputs is not None:
                 raise Refused("execution evidence requires clean unchanged inputs after driver gates; preserve and resolve the worktree edits")
-            if execution.ci_mode(self):
+            if self.ci_mode():
+                self.require_ci_acceptance()
                 # CI cannot validate an unpublished head. This repository policy
                 # deliberately opens a draft before express review, never Ready.
-                if self.origin_tip() != head:
+                if self.tree.origin_tip() != head:
                     self.sync_and_push(records)
                     continue
                 if pr is None:
@@ -1124,7 +763,7 @@ class Run:
                 state = self.checks(pr, head)
                 if state in ("fix", "conflict"):
                     continue
-                if state != "green" or not execution.check_ci(self, pr, head):
+                if state != "green" or not self.check_ci(pr, head):
                     return 0
                 self.check_inputs(head)
             missing = self.missing_execution(results if pending else [])
@@ -1135,7 +774,7 @@ class Run:
                 e.comment_issue(self.n, "**Execution finding**\n\n" + finding + "\n")
                 self.fix_round(finding, records, record_ok=True)
                 continue
-            if self.origin_tip() != head and not (pr is None and self.fresh_review_needed(records, head)):
+            if self.tree.origin_tip() != head and not (pr is None and self.fresh_review_needed(records, head)):
                 if not self.sync_and_push(records):
                     continue
                 # the sync may have merged the base: the next pass reads the new head, its gates and its review
@@ -1168,7 +807,7 @@ class Run:
                     return 0
                 if state == "fix":
                     continue
-            state = "green" if execution.ci_mode(self) else self.checks(pr, head)
+            state = "green" if self.ci_mode() else self.checks(pr, head)
             if state == "running":
                 say(f"checks on #{pr['number']} are still running: invoke `run {self.n}` again")
                 return 0
@@ -1185,10 +824,6 @@ class Run:
         """Express reviews the local range before any push: the draft opens at convergence."""
         return self.flow == "express" and bool(self.primary) and not any(r["sha"] == head and not needs_fix(r) for r in records)
 
-    def origin_tip(self):
-        out = self.env.git("ls-remote", "--heads", "origin", f"refs/heads/{self.branch}", check=False).out.split()
-        return out[0] if out else ""
-
     def require_acceptance(self):
         problems = acceptance_problems(acceptance_source(self), self.validation_commands())
         if problems:
@@ -1198,12 +833,25 @@ class Run:
                               "A trusted triage/spec amendment may use the explicit Acceptance command field. "
                               "Approved commands blocked only by the environment still use validation_pending.", 3)
 
+    def require_ci_acceptance(self):
+        """Stop before the push when an acceptance command only the pull request's checks may run has no gate this diff selects:
+        the BUILD node is not granted it, and CI skips a gate whose paths the change does not touch."""
+        skipped = self.ci_commands(selected=False) - self.ci_commands()
+        unproved = [cmd for cmd in acceptance_commands(acceptance_source(self)) if cmd in skipped]
+        if unproved:
+            paths = {run: g.get("paths") or [] for run, g in self.bound_gates(tree=False) if run in unproved}
+            self.stop_issue("acceptance unrunnable", "Required acceptance is run only by the pull request's checks, and this change "
+                            "selects none of its gates, so CI skips it and the BUILD node is not granted it:\n\n"
+                            + "\n".join(f"- `{cmd}`: its gate runs when the change touches " + ", ".join(f"`{p}`" for p in paths[cmd])
+                                        for cmd in unproved)
+                            + "\n\nTouch one of those paths, give the gate no `paths`, or name an acceptance command the BUILD node runs.", 3)
+
     def acceptance_answer(self, ans, name):
         stop = ans.get("stop")
         if stop:
             reason = "acceptance unrunnable" if isinstance(stop, dict) and stop.get("reason") == "acceptance unrunnable" else "open decision"
             self.stop_issue(reason, self.stop_text(stop), 3)
-        required = set(acceptance_commands(acceptance_source(self))) - execution.ci_commands(self, selected=False)
+        required = set(acceptance_commands(acceptance_source(self))) - self.ci_commands(selected=False)
         refused = [str((denial.get("tool_input") or {}).get("command") or "")
                    for denial in ans.get("_denied") or [] if isinstance(denial, dict)]
         if node.USAGE and node.USAGE[-1].get("node") == name:
@@ -1218,10 +866,10 @@ class Run:
 
     def build_commands(self):
         """(the brief's command list, the commands the node may run): contract section 4's Gates bullet."""
-        covered = execution.ci_commands(self, selected=False)
+        covered = self.ci_commands(selected=False)
         runnable = [cmd for cmd in acceptance_commands(acceptance_source(self)) if cmd not in covered]
         lines = [f"- `{c}` (acceptance)" for c in runnable]
-        for run, g in self.area_gates(tree=not self.in_lane):
+        for run, g in self.bound_gates(tree=not self.in_lane):
             if self.in_lane and not (g.get("cheap") is True or g.get("direct_code_check") is True):
                 continue  # Inline publication has the trusted minimal floor, not the full BUILD suite.
             if run in covered:
@@ -1245,36 +893,34 @@ class Run:
     def required_execution(self):
         """Recompute obligations from trusted grants and final changed paths, including resumed heads."""
         commands = acceptance_commands(acceptance_source(self))
-        if execution.ci_mode(self):
-            commands += [cmd for cmd, gate in self.area_gates(tree=False)
+        if self.ci_mode():
+            commands += [cmd for cmd, gate in self.bound_gates(tree=False)
                          if gate.get("cheap") is True and self.locally_run(cmd, gate)
-                         or not gate.get("paths") or self.touches(gate["paths"])]
+                         or not gate.get("paths") or self.tree.touches(gate["paths"])]
             return list(dict.fromkeys(commands))
-        gates = getattr(self, "execution_grants", None)
-        if gates is None:
-            gates = execution.grants(self)
-        for cmd, gate in [*gates, *self.area_gates()]:
+        gates = execution.grants(self.tree) if self.execution_grants is None else self.execution_grants
+        for cmd, gate in [*gates, *self.bound_gates()]:
             paths = gate.get("paths")
             if gate.get("cheap") is True or ((not self.notice(gate) or not self.env.pr_checks())
-                    and (not paths or self.touches(paths))
+                    and (not paths or self.tree.touches(paths))
                     and (not self.env.pr_checks() or self.locally_run(cmd, gate) or paths)):
                 commands.append(cmd)
         return list(dict.fromkeys(commands))
 
     def missing_execution(self, validated=()):
-        head = self.head()
+        head = self.tree.head()
         # Self-reports never establish completion. Repository-CI results stay
         # distinct from driver results and explicitly leased caller receipts.
-        proven = {r["cmd"] for r in [*validated, *getattr(self, "execution_results", [])]
+        proven = {r["cmd"] for r in [*validated, *self.execution_results]
                   if r["sha"] == head and type(r["exit"]) is int and r["exit"] == 0}
-        if execution.ci_mode(self) and getattr(self, "ci_execution_head", None) == head:
+        if self.ci_mode() and self.ci_execution_head == head:
             proven.update(self.ci_execution_commands)
         return [cmd for cmd in self.required_execution() if cmd not in proven]
 
     def validation_commands(self):
         """Approval comes from the invoking binding, never from a BUILD-edited branch binding."""
         here = not self.env.pr_checks()  # no workflow names pull_request: the BUILD brief grants every selected gate
-        return acceptance_commands(acceptance_source(self)) + sorted(execution.ci_commands(self, selected=False)) + [run for run, g in self.area_gates(tree=False) if g.get("cheap") is True
+        return acceptance_commands(acceptance_source(self)) + sorted(self.ci_commands(selected=False)) + [run for run, g in self.bound_gates(tree=False) if g.get("cheap") is True
                 or (here or not self.notice(g)) and (here or self.locally_run(run, g) or g.get("paths"))]
 
     def build(self, findings=None, threads=None, track=True, record_ok=False):
@@ -1285,26 +931,25 @@ class Run:
         if not self.in_lane:
             self.require_acceptance()
         cmds, gates = self.build_commands()
-        previous = getattr(self, "execution_grants", None)
+        previous = self.execution_grants
         if previous is None and self.commits_past_base():
-            previous = execution.grants(self)
+            previous = execution.grants(self.tree)
             if previous is None:
-                previous = list(self.area_gates(tree=False))
+                previous = list(self.bound_gates(tree=False))
         self.execution_grants = list({json.dumps(row, sort_keys=True): row
-                                      for row in [*(previous or []), *self.area_gates()]}.values())
-        if not self.in_lane and not gates and not execution.ci_commands(self, selected=False):
+                                      for row in [*(previous or []), *self.bound_gates()]}.values())
+        if not self.in_lane and not gates and not self.ci_commands(selected=False):
             self.stop_issue("gate uncovered", empty_list(self.body), 3)
         contract = briefs.contract_sections(e, (4, 7))
         prompt = briefs.render("build", number=self.n, title=self.title, body=self.body, part=self.part_scope("build"),
-                               comments=self.spec_comments(), manual=self.manual_block(), anchors=briefs.anchors_block(self.worktree, self.body),
-                               implement_docs=briefs.implement_docs(e, self.worktree), flow=self.flow,
+                               comments=self.spec_comments(), manual=self.manual_block(), anchors=briefs.anchors_block(self.tree.path, self.body),
+                               implement_docs=briefs.implement_docs(e, self.tree.path), flow=self.flow,
                                commands=cmds, findings=findings or "(none)", contract=contract)
-        from . import recovery
-        prompt += recovery.brief(self)
+        prompt += recovery.brief(self.tree, self.n, self.k)
         tools = node.builder(gates)
         model = self.build_model()
         say(f"[4] BUILD node ({model})" + (" fix round" if findings else ""))
-        ans = node.run_node("BUILD", prompt, model, tools, str(self.worktree), node.TIMEOUTS["BUILD"], runtime=e.runtime)
+        ans = node.run_node("BUILD", prompt, model, tools, str(self.tree.path), node.TIMEOUTS["BUILD"], runtime=e.runtime)
         observations = (node.USAGE[-1].get("tool_calls", []) if node.USAGE
                         and node.USAGE[-1].get("node") == "BUILD" else [])
         self.acceptance_answer(ans, "BUILD")
@@ -1320,7 +965,7 @@ class Run:
         if not subject:
             raise DriverError("node BUILD answered no subject")
         steps = self.manual_steps(ans)
-        if not self.wt_git("status", "--porcelain", "-z").out:
+        if not self.tree.git("status", "--porcelain", "-z").out:
             if threads and ans.get("replies"):
                 self.last_build = ans
                 return None
@@ -1335,37 +980,36 @@ class Run:
             facts["validation_pending"] = pending
         if self.in_lane:
             msg = re.sub(r"(?m)^Ouro-Direct: .*\n?", "", msg)
-            msg += (self.lane_build_record if hasattr(self, "lane_build_record") else
-                    self.lane_record(*getattr(self, "lane_build", ("parent", None))))
+            msg += self.lane_build_record or self.lane_record(*self.lane_build)
         msg += f"\n{BUILD_LINE}{json.dumps(facts)}\n"
         f = e.body_file("commit-msg.txt", msg)
-        inputs = execution.fingerprint(self.worktree)
+        inputs = execution.fingerprint(self.tree.path)
         latest = {call.get("command"): call for call in observations if call.get("tool") == "run"}
         recheck = [cmd for cmd, call in latest.items() if cmd in gates and inputs
                    and call.get("inputs") == inputs and not call.get("error")
                    and type(call.get("exit")) is int and call["exit"] == 0]
-        self.wt_git("add", "-A")
-        self.wt_git("commit", "-q", "--allow-empty", "-F", f)
-        execution.retain(self, [], recheck=recheck)
-        self.committed_here.add(self.head())
+        self.tree.git("add", "-A")
+        self.tree.git("commit", "-q", "--allow-empty", "-F", f)
+        execution.retain(self.tree, [], self.execution_grants, recheck=recheck)
+        self.committed_here.add(self.tree.head())
         self.last_build = ans
         say(f"  committed: {subject}")
         if findings is None and track:
             self.rederive()
-        return self.head()
+        return self.tree.head()
 
     def rederive(self):
         e = self.env
         gate_files = set(e.ob.gate_paths({"gate": self.gate_entries()}))
-        derived = derive_flow(self.changed_paths(), gate_files)
+        derived = derive_flow(self.tree.changed(), gate_files)
         new = tighter(self.flow, derived)
         if new != self.flow:
             self.add_note(f"Flow tightened from {self.flow} to {new} by the diff's paths.")
             self.flow = new
         if self.size == "S":
-            numstat = self.wt_git("diff", "--numstat", "--no-renames", "-z", f"origin/{e.default}...HEAD").out
+            numstat = self.tree.git("diff", "--numstat", "--no-renames", "-z", f"origin/{e.default}...HEAD").out
             lines = sum(int(a) + int(d) for a, d, _ in (x.split("\t", 2) for x in numstat.split("\0") if x) if a.isdigit() and d.isdigit())
-            size, why = derive_size(self.changed_paths(), lines, e.lookup("repo.release_notes", RELEASE_NOTES))
+            size, why = derive_size(self.tree.changed(), lines, e.lookup("repo.release_notes", RELEASE_NOTES))
             if size != "S":
                 self.add_note(f"Size tightened from S to {size}: the diff has {why}.")
                 self.size = size
@@ -1376,7 +1020,7 @@ class Run:
 
     def docs_only(self, derived):
         """A diff the driver would grade express whose every path is a docs file: the external reader has nothing to probe in it."""
-        paths = self.changed_paths()
+        paths = self.tree.changed()
         return derived == "express" and bool(paths) and all(p.lower().endswith(DOCS_EXT) for p in paths)
 
     def add_note(self, sentence):
@@ -1385,7 +1029,7 @@ class Run:
 
     def fix_round(self, findings, records, record_ok=False):
         """A fix is a commit past the first build's, so the rounds already taken are read from the branch."""
-        done = max(0, int(self.wt_git("rev-list", "--count", "--no-merges", f"origin/{self.env.default}..HEAD").out.strip() or 0) - 1)
+        done = max(0, int(self.tree.git("rev-list", "--count", "--no-merges", f"origin/{self.env.default}..HEAD").out.strip() or 0) - 1)
         if done >= FIX_CAP:
             pr = self.find_pr()
             where = (f"the branch `{self.branch}` and pull request #{pr['number']} stay as they are, with the review record. A fix commit pushed to the branch"
@@ -1393,16 +1037,46 @@ class Run:
             self.stop_issue("review cap", "Three fix rounds are spent and the change is not clean.\n\n" + findings +
                             f"\n\nThe hand-off: {where}, `agent-ready` back in place of `needs-ruling`, and `ouro run {self.n}` verify it as any fix round.", 3)
         self.build(findings=findings, record_ok=record_ok)
-        if getattr(self, "reader_skipped", False):  # a fix with no reviewer (a red gate or check) may add what a reader probes
+        if self.reader_skipped:  # a fix with no reviewer (a red gate or check) may add what a reader probes
             gate_files = set(self.env.ob.gate_paths({"gate": self.gate_entries()}))
-            if not self.docs_only(derive_flow(self.changed_paths(), gate_files)):
+            if not self.docs_only(derive_flow(self.tree.changed(), gate_files)):
                 self.add_note("A fix added a path the driver reads as executable, so the external reader is back on.")
                 self.primary, self.reader_skipped = "reader", False
 
     # ---- gates
+    def ci_mode(self):
+        """Repository-owned PR validation; independent of the selected worker backend."""
+        return (not getattr(self, "in_lane", False) and "checkpoint" not in getattr(self, "labels", [])
+                and self.env.lookup("ship.validation") == "ci")
+
+    def ci_commands(self, *, selected=True):
+        """The owner's aggregate checks cover these exact gate runs, never new branch policy."""
+        if not self.ci_mode():
+            return set()
+        if not self.env.pr_checks():
+            raise DriverError("CI validation requires a pull_request workflow on the default branch")
+        if self.gate_entries() != self.env.data.get("gate", []):
+            raise DriverError("CI gate coverage changed: update the owner's invoking binding before resuming")
+        return {cmd for cmd, gate in self.bound_gates(tree=False)
+                if not self.locally_run(cmd, gate)
+                and (not selected or not gate.get("paths") or self.tree.touches(gate["paths"]))}
+
+    def check_ci(self, pr, head, commands=None):
+        """Whether the PR's fresh checks cover `commands` (default: the CI-covered gates) at `head`; the run keeps that evidence."""
+        self.ci_execution_head, self.ci_execution_commands, self.ci_execution_checks = None, set(), []
+        commands = self.ci_commands() if commands is None else commands
+        evidence = execution.ci_checks(self.env, pr, head)
+        if evidence is not None:
+            self.ci_execution_head, self.ci_execution_commands, self.ci_execution_checks = head, commands, evidence
+        return evidence is not None
+
+    def wait_hint(self, commands=None):
+        return validation.wait_hint(self.env, self.n, self.k, self.required_execution() if commands is None else commands)
+
     def gate_entries(self, tree=True):
-        """The [[gate]] entries of the binding at the tree's HEAD, as CI reads them; the main checkout's when `tree` is off, or there is no worktree yet (a dry run), or the commit has none."""
-        r = self.wt_git("show", "HEAD:.claude/ouro.toml", check=False) if tree and self.worktree.is_dir() else None  # the commit's, not the file's: a sync conflict leaves markers in the file
+        """The [[gate]] entries of the binding at the tree's HEAD, as CI reads them; the main checkout's when `tree` is off, or there is no worktree yet (a dry run), or the commit has none. `tree` may name another Tree."""
+        tree = self.tree if tree is True else tree
+        r = tree.git("show", "HEAD:.claude/ouro.toml", check=False) if tree and tree.path.is_dir() else None  # the commit's, not the file's: a sync conflict leaves markers in the file
         if r is None or r.code != 0:
             return list(self.env.data.get("gate", []))
         try:
@@ -1410,14 +1084,12 @@ class Run:
         except ValueError as x:
             raise DriverError(f"the branch's .claude/ouro.toml cannot be read: {x}")
 
-    def area_gates(self, tree=True):
-        """Every [[gate]] the issue's area labels select, `<ouro>` replaced by the plugin root."""
+    def bound_gates(self, tree=True):
+        """Every [[gate]], `<ouro>` replaced by the plugin root: its paths, never the issue's labels, decide whether a change runs it."""
         e = self.env
         root = Path(e.ob.plugin_root() or sh.PLUGIN).as_posix()
         for g in self.gate_entries(tree):
-            ga = g.get("areas", [])
-            if "*" in ga or set(self.areas) & set(ga):
-                yield str(g.get("run", "")).replace(e.ob.OURO_TOKEN, root), g
+            yield str(g.get("run", "")).replace(e.ob.OURO_TOKEN, root), g
 
     @staticmethod
     def locally_run(run, g):
@@ -1441,9 +1113,9 @@ class Run:
     def select_gates(self, flow):
         """(gates to run here, gates skipped for their paths): contract section 4's rule per class."""
         chosen, skipped = [], []
-        for run, g in self.area_gates():
+        for run, g in self.bound_gates():
             gp = g.get("paths")
-            if gp and not self.touches(gp) and not (execution.ci_mode(self)
+            if gp and not self.tree.touches(gp) and not (self.ci_mode()
                     and g.get("cheap") is True and self.locally_run(run, g)):
                 skipped.append(run)
             elif self.runs_here(run, g, flow):
@@ -1452,41 +1124,36 @@ class Run:
 
     def checked_gates(self):
         """The selected gates the pull request's checks run, each as CI runs it (`ci` where declared, else `run` as bound): what the record names where the driver ran none."""
-        return [str(g.get("ci") or g.get("run") or "") for run, g in self.area_gates()
-                if not self.runs_here(run, g, self.flow) and not (g.get("paths") and not self.touches(g["paths"]))]
-
-    def touches(self, entries):
-        r = self.wt_git("diff", "--quiet", "--no-ext-diff", "--no-textconv",
-                        f"origin/{self.env.default}...HEAD", "--", *entries, check=False)
-        return r.code != 0
+        return [str(g.get("ci") or g.get("run") or "") for run, g in self.bound_gates()
+                if not self.runs_here(run, g, self.flow) and not (g.get("paths") and not self.tree.touches(g["paths"]))]
 
     def run_gates(self, head):
         chosen, skipped = self.select_gates(self.flow)
-        ci = execution.ci_mode(self)
-        if not getattr(self, "in_lane", False) and not ci:
+        ci = self.ci_mode()
+        if not self.in_lane and not ci:
             return self.settled_gates(head, chosen, skipped)
-        return self.portable_gates(head, chosen, skipped, ci=ci)
+        return self.portable_gates(head, chosen, skipped, ci=ci, tree=self.tree)
 
-    def portable_gates(self, head, chosen, skipped, *, ci):
+    def portable_gates(self, head, chosen, skipped, *, ci, tree):
         """Run existing driver-owned gates, including the local part of a direct PR."""
         # Binding-selected local checks use the existing portable driver runner.
         # They confer no caller-validation receipt or worker admission authority.
         rec_gates = []
         for i, (run, _) in enumerate(chosen):
             if ci:
-                execution.ci_inputs(self, head)
+                execution.ci_inputs(tree, head)
             argv = shlex.split(run)
             exe = shutil.which(argv[0]) if argv else None
             if not exe:
                 self.stop_issue("gate uncovered", f"The driver cannot run the gate `{run}`: `{argv[0] if argv else ''}` is not on PATH.", 3)
             argv[0] = exe
-            r = self.env.run(argv, cwd=self.worktree, **({"timeout": validation.TIMEOUT} if ci else {}))
+            r = self.env.run(argv, cwd=tree.path, **({"timeout": validation.TIMEOUT} if ci else {}))
             log = self.env.scratch / f"gate-{i}.log"
             sh.write_bytes(log, r.out + r.err)
             say(f"[5] gate `{run}`: exit {r.code}")
             rec_gates.append({"cmd": run, "exit": r.code, "sha": head})
             if ci:
-                execution.ci_inputs(self, head)
+                execution.ci_inputs(tree, head)
             if r.code != 0:
                 self.gate_log = rec_gates
                 return (run, r.code, failure_extract(r.out + r.err))
@@ -1497,10 +1164,10 @@ class Run:
         return None
 
     def check_inputs(self, head):
-        if execution.ci_mode(self):
-            execution.ci_inputs(self, head)
+        if self.ci_mode():
+            execution.ci_inputs(self.tree, head)
             return None
-        return validation.check_inputs(self, head)
+        return validation.check_inputs(self.tree, head, self.wait_hint)
 
     def settled_gates(self, head, chosen, skipped):
         """Use the existing bounded validator for every final BUILD execution proof.
@@ -1510,7 +1177,7 @@ class Run:
         observing a worker command never widens caller permissions.
         """
         self.execution_results, self.gate_log, self.skipped = [], [], skipped
-        caller = {r["cmd"]: r for r in getattr(self, "caller_execution_results", [])
+        caller = {r["cmd"]: r for r in self.caller_execution_results
                   if r["sha"] == head and type(r["exit"]) is int and r["exit"] == 0}
         selected = list(dict.fromkeys(cmd for cmd, _ in chosen))
         automatic = [cmd for cmd in selected if cmd not in caller]
@@ -1522,7 +1189,7 @@ class Run:
             try:
                 validation.check_platform()
             except DriverError as error:
-                say(str(error))
+                say(f"{error}; {self.wait_hint()}")
                 return 75
         for cmd in selected:
             if cmd in caller:
@@ -1532,7 +1199,7 @@ class Run:
         def batch(commands, *, execute_missing):
             pending = [{"cmd": cmd, "reason": "final committed-input execution evidence"} for cmd in commands]
             validation.requests(pending, commands)
-            results, failure = validation.validate(self, pending, reuse=True, execute_missing=execute_missing)
+            results, failure = validation.validate(self.tree, pending, self.wait_hint, reuse=True, execute_missing=execute_missing)
             self.execution_results.extend(results)
             self.gate_log.extend(results)
             for result in results:
@@ -1550,14 +1217,14 @@ class Run:
                 return failed
         proven = {*caller, *(r["cmd"] for r in self.execution_results if r["exit"] == 0)}
         missing = [cmd for cmd in self.required_execution() if cmd not in proven]
-        candidates = set(execution.candidates(self))
+        candidates = set(execution.candidates(self.tree))
         allowed = set(self.validation_commands())
         # Unobserved/malformed/failed commands still take the bounded finding path.
         # A complete set of observed candidates can instead reuse genuine proof,
         # or wait for the explicit --validate consent to execute them as caller.
         if missing and all(cmd in allowed for cmd in missing):
             observed = all(cmd in candidates for cmd in missing)
-            failed = batch(missing, execute_missing=observed and bool(getattr(self.env, "validate", False)))
+            failed = batch(missing, execute_missing=observed and self.options.validate)
             # Existing genuine proof survives loss of worker-candidate metadata.
             # Absent proof without observed candidates still needs a BUILD fix.
             return None if failed == 75 and not observed else failed
@@ -1566,25 +1233,25 @@ class Run:
     # ---- push and the pull request
     def sync_and_push(self, records):
         e = self.env
-        r = self.env.run(script("Sync-Branch.ps1"), cwd=self.worktree)
+        r = self.env.run(script("Sync-Branch.ps1"), cwd=self.tree.path)
         if r.code != 0:
-            merging = self.wt_git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0
+            merging = self.tree.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0
             if not merging:
                 raise DriverError(f"{sh.cmdline(r.argv)} failed (exit {r.code}): {r.text}")
             if self.sync_tried:
-                self.wt_git("merge", "--abort", check=False)
+                self.tree.git("merge", "--abort", check=False)
                 self.stop_issue("open decision", f"The branch conflicts with `{e.default}` and the second attempt did not resolve it.\n\n{r.text}", 3)
             self.sync_tried = True
             say("[6] sync conflict: the BUILD node gets it as a finding, once")
-            conflicted = [x for x in self.wt_git("diff", "--name-only", "--diff-filter=U", "-z").out.split("\0") if x]
+            conflicted = [x for x in self.tree.git("diff", "--name-only", "--diff-filter=U", "-z").out.split("\0") if x]
             self.build(findings=f"Resolve this merge conflict with `origin/{e.default}` in the tree and leave no markers:\n{r.text}")
-            left = [x for x in conflicted if re.search(r"(?m)^<{7} ", (self.worktree / x).read_text(encoding="utf-8", errors="replace"))]
+            left = [x for x in conflicted if re.search(r"(?m)^<{7} ", (self.tree.path / x).read_text(encoding="utf-8", errors="replace"))]
             if left:
                 self.stop_issue("open decision", "The resolution still holds conflict markers in: " + ", ".join(left), 3)
             return False
         lease = re.search(r"(?m)^lease: (\S+)\s*$", r.out)  # Sync-Branch's own line, not a merged commit subject
         args = ["-Lease", lease.group(1)] if lease else []
-        p = self.env.run(script("Push-Branch.ps1", *args), cwd=self.worktree)
+        p = self.env.run(script("Push-Branch.ps1", *args), cwd=self.tree.path)
         if p.code != 0:
             raise DriverError(f"{sh.cmdline(p.argv)} failed (exit {p.code}): {p.text}")
         say("[6] pushed " + self.branch)
@@ -1592,11 +1259,11 @@ class Run:
 
     def open_pr(self, head):
         e = self.env
-        subject = self.wt_git("log", "-1", "--format=%s", self.first_commit()).out.strip()
+        subject = self.tree.git("log", "-1", "--format=%s", self.first_commit()).out.strip()
         rec = {"subject": subject, "flow": self.flow, "part_line": f"Part {self.k}/{self.parts_n} of #{self.n}" if self.k else "",
                "fixes_line": f"Fixes #{self.n}" if self.fixes else "", **self.build_facts(),
-               "changes": self.wt_git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines(),
-               "gates": getattr(self, "gate_log", []), "skipped": getattr(self, "skipped", []), "checked": self.checked_gates(),
+               "changes": self.tree.git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines(),
+               "gates": self.gate_log, "skipped": self.skipped or [], "checked": self.checked_gates(),
                "note": " ".join(self.notes), "usage": node.usage_table()}
         review = review_line(self.pending, bool(self.primary))
         f = e.body_file("pr-body.md", drawn_body(rec, review))
@@ -1617,7 +1284,7 @@ class Run:
     def commit_facts(self, sha):
         """What the BUILD node answered that a later invocation needs, from the `Ouro-Build:` line of one commit, checked
         once here: a person can reword a commit, and what reads these lists trusts their shape."""
-        for line in reversed(self.wt_git("log", "-1", "--format=%B", sha).out.splitlines()):
+        for line in reversed(self.tree.git("log", "-1", "--format=%B", sha).out.splitlines()):
             if line.startswith(BUILD_LINE):
                 try:
                     facts = json.loads(line[len(BUILD_LINE):])
@@ -1637,7 +1304,7 @@ class Run:
     def build_facts(self, *, evidence=True):
         """The record's door, blast, summary, residue and build_gates: the newest BUILD answer on the branch, which describes the whole branch; its manual steps, the union over the branch's answers."""
         # Metadata-only callers must not collect receipt/state evidence before validation owns a lease.
-        shas = self.wt_git("rev-list", f"origin/{self.env.default}..HEAD").out.split()
+        shas = self.tree.git("rev-list", f"origin/{self.env.default}..HEAD").out.split()
         facts = [(s, self.commit_facts(s)) for s in shas]
         sha, f = next(((s, x) for s, x in facts if x), (shas[-1], {}))  # no facts anywhere: the first commit's body
         manual = {}
@@ -1649,25 +1316,25 @@ class Run:
             for m in x.get("manual") or []:
                 manual[m["path"]] = {"path": m["path"], "edit": str(m.get("edit") or "") or manual.get(m["path"], {}).get("edit", "")}
         requested = list(pending.values())
-        covered = execution.ci_commands(self)
+        covered = self.ci_commands()
         caller = [p for p in requested if p["cmd"] not in covered]
         return {"door": str(f.get("door") or "") or "unstated", "blast": str(f.get("blast_radius") or "") or "unstated",
-                "summary": without_build_lines(self.wt_git("log", "-1", "--format=%b", sha).out),
+                "summary": without_build_lines(self.tree.git("log", "-1", "--format=%b", sha).out),
                 "residue": [str(x) for x in f.get("residue") or []], "build_gates": f.get("gates_run") or [], "manual": list(manual.values()),
-                "validation_pending": requested, "validation_results": validation.receipt(self, caller) if caller and evidence else [],
-                "validation_attempts": validation.attempts(self) if caller and evidence else [],
-                "execution_commands": sorted(execution.proven(self)) if evidence else [],
-                "execution_head": shas[0], "execution_evidence": str(execution.directory(self) / (shas[0] + ".json")) if evidence else ""}
+                "validation_pending": requested, "validation_results": validation.receipt(self.tree, caller) if caller and evidence else [],
+                "validation_attempts": validation.attempts(self.tree) if caller and evidence else [],
+                "execution_commands": sorted(execution.proven(self.tree)) if evidence else [],
+                "execution_head": shas[0], "execution_evidence": str(execution.directory(self.tree) / (shas[0] + ".json")) if evidence else ""}
 
     def evidence_lines(self):
         """The validation and CI evidence a reviewer reads, from one fingerprint."""
         facts = self.build_facts()
         return ("\nDriver validation evidence: " + json.dumps(facts["validation_results"])
                 + "\nHistorical validation attempts (each at its own head): " + json.dumps(facts["validation_attempts"])
-                + "\nRepository CI validation evidence: " + json.dumps(getattr(self, "ci_execution_checks", [])))
+                + "\nRepository CI validation evidence: " + json.dumps(self.ci_execution_checks))
 
     def first_commit(self):
-        return self.wt_git("rev-list", "--reverse", f"origin/{self.env.default}..HEAD").out.split()[0]
+        return self.tree.git("rev-list", "--reverse", f"origin/{self.env.default}..HEAD").out.split()[0]
 
     def refresh_body(self, pr, records):
         e = self.env
@@ -1676,11 +1343,11 @@ class Run:
         if not rec:
             return
         rec.update(self.build_facts())
-        rec["gates"] = getattr(self, "gate_log", None) or rec.get("gates", [])
-        rec["skipped"], rec["checked"] = getattr(self, "skipped", rec.get("skipped", [])), self.checked_gates()
-        rec["changes"] = self.wt_git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines()
+        rec["gates"] = self.gate_log or rec.get("gates", [])
+        rec["skipped"], rec["checked"] = rec.get("skipped", []) if self.skipped is None else self.skipped, self.checked_gates()
+        rec["changes"] = self.tree.git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines()
         rec["flow"] = self.flow
-        rec["ci_validation"] = getattr(self, "ci_execution_checks", [])
+        rec["ci_validation"] = self.ci_execution_checks
         rec["usage"] = node.usage_table() or rec.get("usage", "")
         rec["note"] = " ".join([rec.get("note", "")] + [s for s in self.notes if s not in rec.get("note", "")]).strip()
         f = e.body_file("pr-body.md", drawn_body(rec, review_line(records, bool(self.primary)), body))
@@ -1711,7 +1378,7 @@ class Run:
             return ""
         since, prior = records[-1]["sha"], records[-1]["body"]
         ruled = records[-1].get("ruled")  # an approver ruled those findings: the brief shows the range, not the findings
-        r = self.wt_git("diff", f"{since}..{head}", check=False)
+        r = self.tree.git("diff", f"{since}..{head}", check=False)
         if r.code != 0 or len(r.out) > 60000:
             if ruled:
                 return f"The diff `{since}..{head}` cannot be shown whole, so leave `scope` empty on every finding."
@@ -1726,7 +1393,7 @@ class Run:
 
     def node_review(self, pr, head, records, rnd):
         e = self.env
-        diff = self.wt_git("diff", f"origin/{e.default}...HEAD").out
+        diff = self.tree.git("diff", f"origin/{e.default}...HEAD").out
         if len(diff) > 150000:
             diff = diff[:150000] + "\n(diff cut at 150000 characters; read the rest from the worktree)"
         rp = briefs.PROMPTS / "REVIEWER-PROMPT.md"
@@ -1736,12 +1403,12 @@ class Run:
         prompt = briefs.render("review", mode=MODE.get(self.flow, "sized"), number=self.n, head=head, title=self.title, part=self.part_scope("review"),
                                range=f"origin/{e.default}...{head}", diff=diff, body=self.body, comments=self.spec_comments(), record=record,
                                verification=prior,
-                               release_notes=", ".join(f"`{p}`" for p in release_notes(self.changed_paths(), e.lookup("repo.release_notes", RELEASE_NOTES))) or "none",
+                               release_notes=", ".join(f"`{p}`" for p in release_notes(self.tree.changed(), e.lookup("repo.release_notes", RELEASE_NOTES))) or "none",
                                reviewer_prompt=rp.read_text(encoding="utf-8") if rp.is_file() else "(REVIEWER-PROMPT.md is not in this tree)",
                                contract=briefs.contract_sections(e, (7,)))
         model = node.model(e, "reviewer", "opus")
         say(f"[7] REVIEW node round {rnd} ({model}, {MODE.get(self.flow, 'sized')})")
-        tools, denied, cwd, copy = node.READ, None, self.worktree, None
+        tools, denied, cwd, copy = node.READ, None, self.tree.path, None
         if self.flow in ("standard", "full"):
             copy = e.scratch / f"review-{rnd}"
             node.worktree_readiness(e.runtime, e.main, copy, None, head, scratch=e.scratch)
@@ -1771,12 +1438,12 @@ class Run:
         if e.lookup("ship.external_effort"):
             args += ["--effort", e.lookup("ship.external_effort")]
         if spent:
-            fix_sha, fix_subject = self.wt_git("log", "-1", "--no-merges", "--format=%H%n%s", head).out.strip().split("\n", 1)
+            fix_sha, fix_subject = self.tree.git("log", "-1", "--no-merges", "--format=%H%n%s", head).out.strip().split("\n", 1)
             digest = "\n\n".join(f"{f.get('claim')}\n  the fix commit {fix_sha[:7]}: {fix_subject}" for f in spent[-1]["findings"]) or "no findings"
             args += ["--resume", spent[-1]["reader"]["session"], "--digest", e.body_file("reader-digest.md", digest)]
         say(f"[7] external reader round {len(spent) + 1} ({cli})")
         for _ in range(2):
-            r = self.env.run(script("external-audit.py", *args), cwd=self.worktree, timeout=700, env=worker_env(e.runtime))
+            r = self.env.run(script("external-audit.py", *args), cwd=self.tree.path, timeout=700, env=worker_env(e.runtime))
             if r.code != 3:
                 break
         out = re.search(r"external-audit: session (\S+) round (\d+) -> (.+)", r.out)
@@ -1788,7 +1455,9 @@ class Run:
                                  or not isinstance(stop.get("question"), str) or not stop["question"].strip()):
             raise DriverError("the configured external reader returned a malformed acceptance stop; no fix round or replacement review was started")
         if r.code not in (0, 2) or not (found and sess):
-            self.add_note(f"The external reader ({cli}) was unavailable (exit {r.code}), so the REVIEW node reviewed in its place.")
+            why = next((line.strip() for line in reversed(r.err.splitlines()) if line.strip()), "")
+            self.add_note(f"The external reader ({cli}) was unavailable (exit {r.code}" + (f": {why[:200]}" if why else "")
+                          + "), so the REVIEW node reviewed in its place.")
             return None
         answer = {"verdict": "CLEAN" if r.code == 0 else "FINDINGS", "findings": reader_findings(found),
                   "files_read": found.get("files_read") or [], "reader": {"cli": cli, "session": sess.group(1), "round": len(spent) + 1}}
@@ -1893,7 +1562,7 @@ class Run:
     def committed_replies(self):
         """{comment id: reply} from the `Ouro-Build:` lines of the branch's commits, `<sha>` filled with that commit's; the newest wins."""
         said = {}
-        for sha in self.wt_git("rev-list", "--reverse", f"origin/{self.env.default}..HEAD").out.split():
+        for sha in self.tree.git("rev-list", "--reverse", f"origin/{self.env.default}..HEAD").out.split():
             for item in self.commit_facts(sha).get("replies") or []:
                 said[int(item["comment_id"])] = str(item["reply"]).replace("<sha>", sha[:7])
         return said
@@ -1933,7 +1602,7 @@ class Run:
                 say(f"[8] #{n}'s head on GitHub still reads {now}, not the pushed head {head}")
                 return "running"
             time.sleep(poll_seconds())
-        r = self.watch_pr(n, head, self.worktree)
+        r = self.watch_pr(n, head, self.tree.path)
         if r.code is None:
             return "running"
         if r.code == 0:
@@ -1955,7 +1624,7 @@ class Run:
                         argv_for("gh", "run", "rerun", run_id, "-R", e.slug, "--failed"))
                 retried[run_id] = attempt + 1
         if retried and not e.dry:
-            r2 = self.watch_pr(n, head, self.worktree)
+            r2 = self.watch_pr(n, head, self.tree.path)
             if r2.code is None:
                 return "running"
             # a flake only when each re-run attempt itself concluded success, read by its number: the watcher reads the
@@ -2014,7 +1683,7 @@ class Run:
     def decide(self, pr, head, records):
         e = self.env
         n = pr["number"]
-        if execution.ci_mode(self) and not execution.check_ci(self, pr, head):
+        if self.ci_mode() and not self.check_ci(pr, head):
             return 0
         policy = e.lookup("ship.policy")
         classes = e.lookup("ship.unattended_classes")
@@ -2053,7 +1722,7 @@ class Run:
         subject = re.sub(r"\s*\(#\d+\)\s*$", "", pr["title"]) + f" (#{n})"
         tail = f"Fixes #{self.n}" if self.fixes else f"Part {self.k}/{self.parts_n} of #{self.n}"
         bf = e.body_file("merge-body.md", (rec.get("summary", "") + "\n\n" + "\n".join(f"- {c}" for c in rec.get("changes", [])) + f"\n\n{tail}\n"))
-        sha = self.merge_pr(n, subject, bf, self.worktree, head)
+        sha = self.merge_pr(n, subject, bf, self.tree.path, head)
         if sha is None:
             return self.conflicted(head, 9, "the merge")
         e.comment_pr(n, f"**Landed unattended** by ouro run at {sha}: checks {n_green} green, {line}, class {self.flow}" + (f"\n{facts.splitlines()[-1]}" if "\nRuled: " in facts else "") + "\n")
@@ -2108,7 +1777,7 @@ class Run:
             return 0  # keep the current checklist part resumable while its claim is open
         if claim_ready:
             self.claim.update(f"landed: {sha}", close=True)
-        if self.branch_exists() or self.worktree.exists():
+        if self.branch_exists() or self.tree.path.exists():
             r = self.env.run(script("Remove-LandedBranch.ps1", "-Pr", str(n)), cwd=e.main)
             if r.code != 0:
                 raise DriverError(f"{sh.cmdline(r.argv)} failed (exit {r.code}): {r.text}")
@@ -2264,11 +1933,11 @@ class Run:
                  if ahead else f"  would: BUILD node in the main checkout, gates the diff selects, commit with Fixes #{self.n} on {e.default}, ")
                 + f"{sh.cmdline(script('Push-Direct.ps1', '-Issue', str(self.n)))}, watch the default branch's run")
             return 0
-        self.in_lane, self.worktree = True, e.main
+        self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
         before = e.git("rev-parse", f"origin/{e.default}").out.strip()
         if overlap:
             say(f"[2a] direct: {overlap}; using the ordinary PR flow before BUILD")
-            return self.lane_fallback(self.head())
+            return self.lane_fallback(self.tree.head())
         if ahead:
             say("[2a] direct: the main checkout holds this issue's unpushed commit(s): shipped without a build")
         else:
@@ -2286,7 +1955,7 @@ class Run:
         if ahead and (self.lane_coordinated() or self.lane_is_revert("HEAD")
                       or "Ouro-Direct: " in e.git("log", "-1", "--format=%B").out):
             trace = self.lane_provenance("HEAD")
-        publication_head = self.head()
+        publication_head = self.tree.head()
         sha = self.lane_ship(before, stage=trace["stage"])
         if trace["stage"] == "revert":
             return self.lane_revert_stop(sha, trace["parent"])
@@ -2302,7 +1971,7 @@ class Run:
             say("  would: watch its checks, merge it, watch the default branch's run on the merge commit" if e.pr_checks() else
                 f"  would: leave it to the owner's merge, since no workflow at origin/{e.default} names pull_request")
             return 0
-        self.in_lane, self.worktree = True, e.main
+        self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
         if not self.lane_coordinated():
             head = e.gh_json("pr", "view", str(pr["number"]), "--json", "headRefOid")["headRefOid"]
             message = e.git("log", "-1", "--format=%B", head).out
@@ -2370,7 +2039,7 @@ class Run:
             self.lane_build = ("fix", sha)
             self.lane_build_record = self.lane_record("fix", sha)
             self.build(findings=f"the default branch's run {url} is red at {sha[:7]}; the failure in its log:\n{tail}", track=False)
-        publication_head = self.head()
+        publication_head = self.tree.head()
         fix = self.lane_ship(publication_base, stage="fix")
         if fix is None:
             return self.lane_fallback(publication_head)
@@ -2529,19 +2198,12 @@ class Run:
         return self.lane_provenance(head)["parent"]
 
     def lane_prepare(self, base, head, stage, *, check=True):
-        """Reconstruct actual scope from Git and reviewed policy for publication or a resumed wait."""
+        """Reconstruct actual scope from Git and the issue's area labels for publication or a resumed wait."""
         e = self.env
         if not (self.claim.config and not e.dry and os.environ.get(self.claim.config.credential_env)):
             return
         paths = [x for x in e.git("diff", "--no-renames", "--name-only", "-z", f"{base}..{head}").out.split("\0") if x]
-        policy_ref = f"origin/{e.default}" if check else base
-        policy = e.ob.tomllib.loads(e.git("show", f"{policy_ref}:.claude/ouro.toml").out)
-        areas = set()
-        for gate in policy.get("gate", []):
-            specs = gate.get("paths")
-            if not specs or e.git("diff", "--no-renames", "--name-only", "-z", f"{base}..{head}", "--", *specs).out:
-                areas.update(a for a in gate["areas"] if a != "*")
-        self.claim.prepare(base, head, paths, areas, stage, check=check)
+        self.claim.prepare(base, head, paths, self.areas, stage, check=check)
 
     def lane_ship(self, prev, stage="parent"):
         """The public publisher checks the whole range, then ships or selects the existing PR fallback."""
@@ -2650,7 +2312,7 @@ class Run:
         except (ValueError, OSError) as error:
             raise DriverError(f"direct resume command relocation is unproved ({error}); nothing merged") from error
         copy = e.scratch / ("direct-check-" + uuid.uuid4().hex)
-        preserve, original = getattr(e, "preserve_scratch", False), self.worktree
+        preserve, checked_tree = getattr(e, "preserve_scratch", False), worktrees.Tree(e, copy, branch)
         e.preserve_scratch = True
         def directory(path, expected=None):
             info = path.lstat()
@@ -2672,7 +2334,6 @@ class Run:
         try:
             if policy.get("repo", {}).get("setup"):
                 self.setup_tree(copy)
-            self.worktree = copy
             checked = e.run(script("ouro-direct.py", "--repo", str(copy), "--base", base, "--head", head), cwd=copy)
             try:
                 plan = json.loads(checked.out)
@@ -2694,16 +2355,22 @@ class Run:
             except (ValueError, KeyError, TypeError, IndexError):
                 raise DriverError("direct PR has no complete trusted structural mandatory-check plan; nothing merged") from None
             if e.lookup("ship.validation") == "ci":
-                if any(not self.locally_run(cmd, gate) and gate.get("paths") and not self.touches(gate["paths"])
+                if any(not self.locally_run(cmd, gate) and gate.get("paths") and not checked_tree.touches(gate["paths"])
                        for cmd, gate in gates):
                     raise DriverError("direct PR CI coverage is unproved: a mandatory historical gate is not selected by the final diff; nothing merged")
-                if self.portable_gates(head, [(cmd, g) for cmd, g in gates if self.locally_run(cmd, g)], [], ci=True):
+                if self.portable_gates(head, [(cmd, g) for cmd, g in gates if self.locally_run(cmd, g)], [], ci=True, tree=checked_tree):
                     raise DriverError("direct PR local mandatory check failed; nothing merged")
-                execution.ci_inputs(self, head)
+                execution.ci_inputs(checked_tree, head)
                 settled = True
-                if not execution.check_ci(self, {"number": n}, head, direct_gates=gates):
+                # Only an actual direct PR's trusted structural obligations use this
+                # route. Normal BUILD/in-lane admission and selection stay unchanged.
+                if not e.pr_checks():
+                    raise DriverError("direct CI validation requires the owner's PR validation checks")
+                if self.gate_entries(checked_tree) != e.data.get("gate", []):
+                    raise DriverError("CI gate coverage changed: update the owner's invoking binding before resuming")
+                if not self.check_ci({"number": n}, head, {cmd for cmd, gate in gates if not self.locally_run(cmd, gate)}):
                     raise Stopped(0)
-                execution.ci_inputs(self, head)
+                execution.ci_inputs(checked_tree, head)
             else:
                 checked = e.run(script("ouro-direct.py", "--repo", str(copy), "--base", base, "--head", head, "--check"), cwd=copy)
                 try:
@@ -2722,7 +2389,6 @@ class Run:
             unchanged()
             say(f"[2a] direct: resumed mandatory checks passed at {head[:7]}")
         finally:
-            self.worktree = original
             if not settled:
                 say(f"[2a] direct: incomplete checks; preserved {copy}")
             else:
@@ -2852,9 +2518,9 @@ class Run:
                 or any(a and b and (a == b or a.startswith(b + "/") or b.startswith(a + "/"))
                        for a in ignored for b in restore)):
             raise Refused("direct fallback has hidden or overlapping ignored inputs; preserve and reconcile the main checkout")
-        inputs = execution.fingerprint(self.worktree)
+        inputs = execution.fingerprint(self.tree.path)
         observations = [{"tool": "run", "command": cmd, "exit": 0, "inputs": inputs}
-                        for cmd in execution.proven(self)]
+                        for cmd in execution.proven(self.tree)]
         # The existing issue branch preserves H before leaving the default
         # checkout. Ordinary checkouts preserve late edits/ignored collisions;
         # the expected-old update cannot erase a concurrent default-branch H2.
@@ -2883,9 +2549,9 @@ class Run:
                 pass  # No forced return/cleanup can discard the owner's late work.
         self.in_lane = False
         self.claim.prepared = None  # direct trace remains on the board; subsequent PR records use their own head
-        self.worktree = e.main / ".claude" / "worktrees" / self.dirname
+        self.tree = self.issue_tree()
         self.ensure_worktree()
-        execution.retain(self, observations)
+        execution.retain(self.tree, observations, self.execution_grants)
         self.flow = "express"
         self.rederive()
         return self.drive(None)
@@ -2905,7 +2571,7 @@ class Run:
             say(f"[4] BUILD: skipped, pull request #{pr['number']} exists")
         else:
             say(f"[4] BUILD: would run node BUILD ({self.build_model()}) in the worktree, then git add -A and git commit -F <message>")
-        chosen = [r for r, g in self.area_gates() if self.runs_here(r, g, self.flow)]
+        chosen = [r for r, g in self.bound_gates() if self.runs_here(r, g, self.flow)]
         say("[5] gates: " + ("; ".join(chosen) if chosen else "none selected for the class beyond the pull request's checks") + " (a gate with paths runs only when the diff touches them)")
         say(f"[6] push: {sh.cmdline(script('Sync-Branch.ps1'))} then {sh.cmdline(script('Push-Branch.ps1'))}; "
             f"would open a draft pull request" + (" at convergence" if self.flow == "express" else " at the first push"))
@@ -2925,8 +2591,8 @@ class Run:
         return 0
 
 
-def main(env, n, part):
-    run = Run(env, n, part)
+def main(env, n, part, options):
+    run = Run(env, n, part, options)
     try:
         code = run.go()
         if code == 0:
@@ -2938,7 +2604,7 @@ def main(env, n, part):
             run.claim.update("waiting" if ex.args[0] == 0 else "stopped", close=ex.args[0] != 0)
         return ex.args[0]
     except Refused:
-        run.claim.update("refused", close=not getattr(run, "in_lane", False))
+        run.claim.update("refused", close=not run.in_lane)
         raise
     except BaseException:
         run.claim.update("interrupted; outcome unknown, resume required")

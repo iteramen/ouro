@@ -48,8 +48,9 @@ hook    A Claude Code PreToolUse hook, registered by `hooks/hooks.json`, which t
         precede the noun and flags may sit between noun and verb; git options before `commit`
         are included. For such a call it checks the whole command text, a heredoc included, and
         the contents of a file named by `--body-file`, `-F` or `--file` (spaced or `=` form
-        anywhere, `-F<file>` attached only between the publishing call and the end of its line,
-        relative to the event's `cwd`). A value of `-`, or a path under `/dev/` or `/proc/` once
+        anywhere, `-F<file>` attached only outside quotes in the publishing call's own statement,
+        resolved as the shell would: `~`, a Git Bash drive path on Windows, and a relative path
+        under each directory the call lands in). A value of `-`, or a path under `/dev/` or `/proc/` once
         slashes, `.` and `..` are normalised (as given and joined to the event's `cwd`), is input
         the hook cannot see and passes only when the whole command is one publishing gh or git
         call whose first line ends in a quoted heredoc delimiter, `<<'DELIM'` or `<<"DELIM"`
@@ -67,8 +68,8 @@ hook    A Claude Code PreToolUse hook, registered by `hooks/hooks.json`, which t
         the reason named, a body file it cannot read, a body it cannot see,
         a payload it cannot parse, or any error of its own. Any other nonzero exit would let the
         call run, so this mode has none. It does not see `gh api`, nor a value expanded at run
-        time. A body file is read from the session's working directory before the command runs,
-        so a `cd` or a write to the same file earlier in that command is not seen. A body or
+        time. A body file is read before the command runs, so a write to it earlier in that command
+        is not seen. A body or
         later command that mentions `--file`, `--body-file` or a spaced `-F` in prose is read as
         a file name and blocks. A hook whose `python3` cannot be found exits 127, and one that
         exceeds Claude Code's hook timeout does not block either: Claude Code treats both as
@@ -224,6 +225,7 @@ PUBLISH = re.compile(
 BODY_FILE = re.compile(
     r"""(?<!\S)(--body-file|--file|-F)(?:=|(?:\\\r?\n|\s)+)("[^"]*"|'[^']*'|[^\s;&|)]+)""")
 ATTACHED = re.compile(r"""(?<!\S)(-F)(?=[^\s=])("[^"]*"|'[^']*'|[^\s;&|)]+)""")
+STATEMENT_END = re.compile(r"&&|\|\||;|\n|\||(?<![<>&])&(?![>&])")
 HEREDOC_LINE = re.compile(r"""(?<=\s)<<(-?)(?:'([^'\n]*)'|"([^"\n]*)")\s*\Z""")
 
 
@@ -255,12 +257,17 @@ def lone_heredoc(command):
 
 def body_flags(command):
     """(flag, value) for each body file flag: spaced and `=` forms anywhere, the attached `-F<file>`
-    only between a publishing match and the end of its line."""
+    only outside quotes in a publishing call's own statement, which ends at the first unquoted `&&`,
+    `||`, `;`, `|`, `&` or line break (at the end of its line when the quotes do not balance)."""
     found = [(m.start(), m.group(1), m.group(2)) for m in BODY_FILE.finditer(command)]
+    spans = quoted_spans(command)
+    quoted = lambda at: spans is not None and any(s <= at < e for s, e in spans)
     for p in PUBLISH.finditer(command):
         eol = command.find("\n", p.start())
         end = len(command) if eol < 0 else eol
-        found += [(m.start(), m.group(1), m.group(2)) for m in ATTACHED.finditer(command, p.start(), end)]
+        if spans is not None:
+            end = next((m.start() for m in STATEMENT_END.finditer(command, p.end()) if not quoted(m.start())), len(command))
+        found += [(m.start(), m.group(1), m.group(2)) for m in ATTACHED.finditer(command, p.start(), end) if not quoted(m.start())]
     return [(f, v) for _, f, v in sorted(set(found))]
 
 
@@ -724,9 +731,14 @@ def hook_check(payload):
                 reasons.append(f"the file {flag} names, line {lineno}: entry {n}")
             for n in wrapped(text, entries, found):
                 reasons.append(f"the file {flag} names: entry {n}, across a line break")
-    if reasons and all(check_off(d, command, protects, deadline) for d in [cwd] + target_dirs(command, cwd)):
+    landed = landing_dirs(command, cwd) if reasons else {}
+    if reasons and all(check_off(d, command, protects, deadline) for d in [cwd, *landed]):
         return []
-    return reasons
+    # A binding's "off" cannot apply where the hook cannot see the call land: name that target beside the hit.
+    return reasons + [f"the cd/-C target {d} " + ("is a shell variable or `cd -` the hook does not expand"
+                                                if how == "unexpanded" or "$" in d else "does not exist")
+                      + ", so the binding's forbidden_check cannot apply there; write the directory literally"
+                      for d, how in landed.items() if how == "unexpanded" or "$" in d or not os.path.isdir(d)]
 
 
 def cmd_hook():
@@ -1109,6 +1121,13 @@ def selftest():
         allowed("Remove-Item x -Force; git commit -m fine", tool="PowerShell")
         allowed("Remove-Item x -Force\ngit commit -m fine", tool="PowerShell")
         allowed("git commit -m fine\nRemove-Item x -Force", tool="PowerShell")
+        # ...and only in its own statement, outside quotes: a later command's or a title's `-File` is no body file
+        allowed("git commit -m fine && pwsh -NoProfile -File x.ps1")
+        allowed("git commit -m fine; Remove-Item x -Force", tool="PowerShell")
+        allowed('gh issue create --title "reads pwsh -File after" --body-file clean.md')
+        blocked("git commit -Fhit.md && echo", "the file -F names, line 2: entry 1")
+        blocked('git commit -m "a; b" -Fhit.md', "the file -F names, line 2: entry 1")
+        blocked('git commit -m "a -Fhit.md', "the file -F names, line 2: entry 1")  # unbalanced quotes: to the line's end
         gone = "comes from input the hook cannot see"
         lone = "<<'EOF'\nclean\nEOF"
         # a '-' body, or a /dev or /proc one, passes only when the whole command is one publishing
@@ -1455,6 +1474,13 @@ def selftest():
         assert code == 2 and "entry 1" in e, (code, o, e)
         bound = mkrepo("listed-off-file", {".claude/ouro.toml": toml.replace('review = "none"\n', 'review = "none"\nforbidden_check = "off"\n').encode(), "note.md": b"acme corp\n"})
         allowed("git commit -F note.md", env=vis("fail", hl), cwd=bound)
+        # a literal -C target into it passes too; one through a shell variable cannot be read, so the hit stands, and the
+        # refusal names that target and how to clear it
+        allowed(f'git -C "{bound}" commit -m secretword', env=vis("fail", hl), cwd=bound)
+        for command in (f'W="{bound}" && git -C $W commit -m secretword', f'W="{bound}" && cd $W && git commit -m secretword'):
+            blocked(command, "is a shell variable or `cd -` the hook does not expand, so the binding's forbidden_check cannot apply there; "
+                    "write the directory literally", env=vis("fail", hl), cwd=bound)
+            blocked(command, "entry 1", env=vis("fail", hl), cwd=bound)
         # "off" is the binding's repository's: a call naming another with -R or --repo keeps the hit,
         # the binding's own in any case or spelling passes it; with no list the other is read
         for command in ("gh -R other/repo pr merge 1 --body secretword", "gh pr merge 1 --repo=other/repo --body secretword",

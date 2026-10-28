@@ -146,7 +146,7 @@ def exercise(h):
         c.node("REVIEW", {"verdict": "FINDINGS", "findings": [h.finding("M")]}, 1)
         c.node("REVIEW", h.CLEAN, 2)
         added = "python3 gates/added.py"
-        augmented = binding.replace("[ship]", '[[gate]]\nareas = ["*"]\nrun = "' + added
+        augmented = binding.replace("[ship]", '[[gate]]\nrun = "' + added
                                     + '"\ncheap = true\nci = "echo another workflow runs this gate"\n[ship]')
         # The invoking owner also approves this exact caller command; the branch
         # change alone must never widen caller-context execution authority.
@@ -195,12 +195,12 @@ def exercise(h):
         h.git(wt, "push", "-q", "origin", "HEAD")
         # Prove the original commands genuinely at this new head. Otherwise the
         # run could stop on their missing proof and hide a dropped added gate.
-        validator = types.SimpleNamespace(worktree=wt,
+        validator = types.SimpleNamespace(path=wt,
             head=lambda: h.git(wt, "rev-parse", "HEAD"),
-            wt_git=lambda *args: types.SimpleNamespace(out=h.git(wt, *args)),
+            git=lambda *args, **kw: types.SimpleNamespace(out=h.git(wt, *args)),
             env=types.SimpleNamespace(default="master", runtime=developer.Settings()))
         known, failure = h.runmod.validation.validate(validator, [
-            {"cmd": cmd, "reason": "known-command regression control"} for cmd in (command, second)])
+            {"cmd": cmd, "reason": "known-command regression control"} for cmd in (command, second)], str)
         h.check(recovery + ": original commands have genuine current-head proof before added-gate regression",
                 failure is None and [row["cmd"] for row in known] == [command, second])
         ready_before = sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments())

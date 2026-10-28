@@ -31,7 +31,7 @@ def binding(*, direct=("docs/*",), gates=None, limits=""):
             '[ship]\npolicy = "stop-at-pr"\nreview = "none"\n'
             f'direct = {json.dumps(direct)}\n{limits}\n[owner]\nruling_approvers = ["owner"]\n')
     for gate in gates if gates is not None else [{"cheap": True}]:
-        values = {"areas": ["unrelated"], "run": RUN, **gate}
+        values = {"run": RUN, **gate}
         text += "\n[[gate]]\n" + "".join(key + " = " + json.dumps(value) + "\n" for key, value in values.items())
     return text
 

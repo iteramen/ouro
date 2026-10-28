@@ -38,12 +38,11 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `repo.setup` | a command line | none | run once in each worktree the driver works in, the full flow's review copy included, before any gate or node runs there, so a repository whose gates need installed dependencies (`npm ci`, `uv sync`) gets them in a tree that carries only tracked files; checked as a gate's `run` is; a marker in the worktree's git directory says it ran, and a resumed run skips it where the marker is; a setup that fails, or leaves entries the build would commit (it commits with `add -A`), stops the run with `**Stop:** gate uncovered` naming them; the direct lane builds in the main checkout and does not run it, and the gates Action in CI does not read it |
 | `repo.release_notes` | regexes | `["(^\|/)CHANGELOG\\.md$"]`, a `CHANGELOG.md` basename | the release-note paths, such as per-change fragment files or a localised twin: the driver leaves a changed path one matches out of the S shape's file count (contract §4), not its line count, and the REVIEW brief names those paths as the release-note entries to verify; each is searched in the repo-relative path with Python's `re`, case-sensitively, so `check` refuses exactly what the driver cannot compile; `[]` means none |
 | `labels.scope` | label names | `[]` | scope or effort labels that may ride on any state |
-| `labels.area` | label names | `[]` | the area labels a gate's `areas` selects on; the shape gate requires at least one on every agent-ready issue, an empty or undeclared set skipping that check, and an issue with several runs every gate any of them selects |
+| `labels.area` | label names | `[]` | the area labels triage, branch names and coordination read; they select no gate; the shape gate requires at least one on every agent-ready issue, an empty or undeclared set skipping that check |
 | `labels.type` | label names | `[]` | the type labels; the shape gate requires exactly one on every agent-ready issue, an empty or undeclared set skipping that check; disjoint from `area` |
-| `gate.areas` | area labels, or `"*"` | required per entry | the issues that select the gate; `"*"` is every issue |
 | `gate.run` | a command line | required per entry | the verify command, run from the repository root; `<ouro>` in it is the plugin root |
 | `gate.ci` | a pwsh command line | `run` | what CI runs in place of `run`; one that only prints a skip makes the driver run `run` locally in every class |
-| `gate.paths` | git pathspecs | none | the gate runs only when the diff changes one of them |
+| `gate.paths` | git pathspecs | none | the gate runs only when the diff changes one of them; without them it runs on every change |
 | `gate.cheap` | `true`, `false` | `false` | the gate needs no toolchain and runs in seconds: the BUILD node is granted it on every build, whatever the checks run, so an issue with no acceptance command still gets a command (contract §4) |
 | `gate.direct_code_check` | `true`, `false` | `false` | an explicit meaningful direct code check; requires nonempty `paths`, and need not be cheap |
 | `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the effective policy is the stricter of the repository's and the issue's |
@@ -182,9 +181,22 @@ the committed gate list: a branch cannot silently change its own declared valida
 Update the trusted invoking binding before resuming a gate-list change.
 
 What CI mode requires before review, Ready or merge is [contract §4](contract.md), "Execution
-evidence". It can support a Windows coordinator with admitted Claude workers, but cannot enable
-native Windows Codex command or edit workers. `validation_checks` has no effect in local mode.
-Update older Ouro pins before adding these keys, since older readers reject unknown keys.
+evidence". macOS coordinators with admitted workers use this route; Windows needs an admitted
+worker backend and does not gain native Windows Codex command/edit support. Local authority
+and explicit caller-validation handoffs still require native Linux lifecycle accounting.
+A Mac/Windows BUILD may prepare a commit for native-Linux validation. An unsupported
+validation host waits with its selected authority and unresolved commands; the prepared work is kept.
+
+To migrate an existing PR, the repository owner declares the check names above in the trusted
+invoking binding and the branch's binding. Verify that those checks execute every selected
+nonlocal `gate.run`. An additional acceptance command needs an exact `gate.run` declaration
+whose paths select it and whose CI job actually executes it; check names alone add no coverage.
+Local-only gates still run on the coordinator. Inherited caller handoffs without that CI
+coverage require native Linux and `--validate`. No binding or obligation is changed automatically.
+Resume `run N` with its original `--part` and `--pr` flags, where used. The prepared source is
+kept; successful exact-head checks precede independent review, Ready and merge. Missing, skipped,
+pending, failed or stale-head checks remain unproven. `validation_checks` has no effect in local
+mode. Update older Ouro pins before adding these keys, since older readers reject unknown keys.
 
 ### Model tiers
 
@@ -476,8 +488,8 @@ sees as a directory. The overlay entry is unchecked.
   absent. This path-only query is a prefilter: `Push-Direct.ps1` validates the whole linear
   commit range against the fetched base binding by the direct lane's rules (contract §4). Like
   every key but `repo.checkout`, the overlay may not set these keys.
-- Every `[[gate]]` needs a non-empty `areas` and `run`. An issue carrying an area label that matches
-  no gate, with no `"*"` gate, is not executable; the driver stops and says so. A `run` may contain
+- Every `[[gate]]` needs a non-empty `run`. `check` refuses `areas`: `paths` is the only gate
+  selector, and a gate without it runs on every change. A `run` may contain
   `<ouro>`, the plugin root, replaced before the command runs — that is how a gate the plugin ships
   is named, since its path differs per machine and per version. The root is inserted as it is, so
   where it may hold a space, quote the token in the `run` string. A copy of the binding tool that
@@ -485,6 +497,11 @@ sees as a directory. The overlay entry is unchecked.
   directory, or one under a consumer's own plugin, which carries another name — and there `check`
   fails such a `run`, naming the directory the copy sits in. A `run` is one command line: one
   holding a line break is refused, since `gates` prints one run per line.
+  `python3 bin/ouro-binding.py gates --changed <base> [--head <rev>]` prints the run of each gate
+  a diff selects, by the one rule the gates Action, the driver and the direct lane all read: the
+  diff from the merge base of `<base>` and `<rev>` (default `HEAD`), with no rename pairing and no
+  configured diff helper; it exits 1 on a diff it cannot read. Without `--changed` it prints every
+  gate's run, and `--json` prints the selected `[[gate]]` tables instead.
 - `repo.setup`, optional, is checked as a gate's `run` is: non-empty, one command line, and
   `<ouro>` refused where the copy has no plugin root.
 - A `[[gate]]` may also declare `ci`, optional: the command the CI gate loop runs, as a pwsh
@@ -506,13 +523,13 @@ sees as a directory. The overlay entry is unchecked.
   gate. Each entry is a git pathspec, matched against the repository-relative paths a pull request
   or a push changes, the way `git diff --name-only` matches its pathspec arguments when run from the
   repository root: git sees each entry as written, magic such as `:(glob)` included. Without magic,
-  a wildcard such as `*.md` matches at every level. A gate with no `paths` is selected whenever its
-  areas match: the checks run it, or the driver does where the `ci` bullet says so. A gate
+  a wildcard such as `*.md` matches at every level. A gate with no `paths` runs on every change:
+  the checks run it, or the driver does where the `ci` bullet says so. A gate
   with `paths` runs only when the pull request changes a path that one of its entries matches, and
   is skipped otherwise. A changed path that no gate's `paths` claims selects no path-scoped gate:
   with only such paths changed, only the gates without `paths` run. The gates Action reads
-  `paths` when its selection input is on, and the driver always reads them, to narrow its
-  area-selected set, a gate whose diff cannot be read running; `gates` never reads them.
+  `paths` when its selection input is on, and the driver and the direct lane always read them,
+  all by the `gates --changed` rule above; in the driver, a gate whose diff cannot be read runs.
   With selection on, a pull request's diff is read against its base and a push's against
   the tip the branch had before it, and every gate runs in these cases: an event that is neither;
   a push with no previous tip, such as a tag or a new branch; a diff that cannot be read; and a

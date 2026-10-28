@@ -120,41 +120,40 @@ class ExecutionTests(unittest.TestCase):
             source = root / "café.py"
             source.write_text("input")
             private = root / ".git"
-            run = types.SimpleNamespace(worktree=root, head=lambda: "a" * 40,
-                wt_git=lambda *args: types.SimpleNamespace(out=str(private)), execution_grants=[])
+            tree = types.SimpleNamespace(path=root, head=lambda: "a" * 40, admin=lambda: private)
             def retain(code=0):
-                execution.retain(run, [{"tool": "run", "command": "approved", "exit": code,
-                                        "inputs": execution.fingerprint(root)}])
+                execution.retain(tree, [{"tool": "run", "command": "approved", "exit": code,
+                                         "inputs": execution.fingerprint(root)}], [])
             retain()
-            self.assertEqual(execution.proven(run), {"approved"})
+            self.assertEqual(execution.proven(tree), {"approved"})
             (root / "output").mkdir()
             (root / "output" / "ignored").write_text("output")
-            self.assertEqual(execution.proven(run), {"approved"})
+            self.assertEqual(execution.proven(tree), {"approved"})
             source.write_text("changed")
-            self.assertEqual(execution.proven(run), set())
+            self.assertEqual(execution.proven(tree), set())
             retain()
             extra = root / "untracked"
             extra.write_text("new")
-            self.assertEqual(execution.proven(run), set())
+            self.assertEqual(execution.proven(tree), set())
             extra.unlink()
             retain(9)
-            self.assertEqual(execution.proven(run), set(), "a later failed attempt invalidates success")
+            self.assertEqual(execution.proven(tree), set(), "a later failed attempt invalidates success")
             retain()
-            execution.retain(run, [{"tool": "run", "command": "approved", "exit": 9, "inputs": None}])
-            self.assertEqual(execution.proven(run), set(), "a later attempt with changed inputs invalidates success")
+            execution.retain(tree, [{"tool": "run", "command": "approved", "exit": 9, "inputs": None}], [])
+            self.assertEqual(execution.proven(tree), set(), "a later attempt with changed inputs invalidates success")
             retain()
-            run.head = lambda: "b" * 40
-            self.assertEqual(execution.proven(run), set())
-            run.head = lambda: "a" * 40
-            proof = execution.directory(run) / (run.head() + ".json")
+            tree.head = lambda: "b" * 40
+            self.assertEqual(execution.proven(tree), set())
+            tree.head = lambda: "a" * 40
+            proof = execution.directory(tree) / (tree.head() + ".json")
             value = json.loads(proof.read_text())
             value["results"][0]["command"] = "forged"
             proof.write_text(json.dumps(value))
-            self.assertEqual(execution.proven(run), set(), "valid JSON edits also corrupt the receipt")
+            self.assertEqual(execution.proven(tree), set(), "valid JSON edits also corrupt the receipt")
             if os.name != "nt":
                 retain()
                 source.chmod(0o755)
-                self.assertEqual(execution.proven(run), set())
+                self.assertEqual(execution.proven(tree), set())
 
     @unittest.skipIf(os.name == "posix", "unsupported-platform negative control")
     def test_unsupported_fingerprint_never_reads_or_proves(self):

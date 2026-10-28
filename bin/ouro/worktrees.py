@@ -400,3 +400,31 @@ def sweep(env, only=None):
         finally:
             if lease:
                 lease.close()
+
+
+class Tree:
+    """One checkout the driver reads and gates: its Git, its head, and its diff against the default branch."""
+    def __init__(self, env, path, branch):
+        self.env, self.path, self.branch = env, path, branch
+
+    def git(self, *args, check=True):
+        return self.env.git(*args, cwd=self.path, check=check)
+
+    def head(self):
+        return self.git("rev-parse", "HEAD").out.strip()
+
+    def admin(self):
+        return Path(self.git("rev-parse", "--absolute-git-dir").out.strip())
+
+    def origin_tip(self):
+        out = self.env.git("ls-remote", "--heads", "origin", f"refs/heads/{self.branch}", check=False).out.split()
+        return out[0] if out else ""
+
+    def changed(self):
+        out = self.git("diff", "--name-only", "-z", f"origin/{self.env.default}...HEAD").out
+        return [p for p in out.split("\0") if p]
+
+    def touches(self, entries):
+        """Whether the branch's diff touches any of `entries`; a diff git cannot read counts as touched, so its gate runs."""
+        r = self.git(*self.env.ob.changed_diff(f"origin/{self.env.default}", "HEAD", entries), check=False)
+        return r.code != 0 or bool(r.out.strip("\0"))

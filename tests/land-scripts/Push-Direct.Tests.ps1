@@ -41,7 +41,7 @@ function New-DirectWorld([string]$Name, [string]$Direct = '"docs/*", "README.md"
     $text = [System.IO.File]::ReadAllText($file)
     if ($Direct) {
         $text = $text.Replace("[ship]`n", "[ship]`ndirect = [$Direct]`n")
-        $text += "`n[[gate]]`nareas = [`"*`"]`ncheap = true`nrun = `"python3 checks/direct-check.py`"`n"
+        $text += "`n[[gate]]`ncheap = true`nrun = `"python3 checks/direct-check.py`"`n"
         [System.IO.File]::WriteAllText($file, $text, $Utf8)
         New-Item -ItemType Directory -Path (Join-Path $w.Main 'checks') | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $w.Main 'checks/direct-check.py'), "print('cheap gate ran')`n", $Utf8)
@@ -446,7 +446,7 @@ function Invoke-RawDirect([string[]]$Arguments, [string]$From) {
     $parsed = $null
     $bin = Split-Path $Script -Parent
     if (Test-Path -LiteralPath (Join-Path $bin 'ouro/run.py')) {
-        $parsed = (& python3 -c 'import json,pathlib,sys; sys.path.insert(0,sys.argv[1]); from ouro.run import parse_direct; print(json.dumps(parse_direct(pathlib.Path(sys.argv[2]).read_bytes().decode("utf-8"))))' $bin $outputFile) | ConvertFrom-Json
+        $parsed = (& python3 -c 'import json,pathlib,sys; sys.path.insert(0,sys.argv[1]); from ouro.records import parse_direct; print(json.dumps(parse_direct(pathlib.Path(sys.argv[2]).read_bytes().decode("utf-8"))))' $bin $outputFile) | ConvertFrom-Json
         if ($LASTEXITCODE -ne 0) { throw 'actual driver protocol parser failed' }
     }
     else { Write-Host 'SKIP: the Python driver parser is plugin-only; flat provider checks the actual PowerShell consumer' }
@@ -628,7 +628,7 @@ foreach ($covered in @($false, $true)) {
     $w = New-DirectWorld "code-$covered" '"src/*"'; $m = $w.Main
     if ($covered) {
         $file = Join-Path $m '.claude/ouro.toml'
-        [IO.File]::AppendAllText($file, "`n[[gate]]`nareas = [`"*`"]`npaths = [`"src/`"]`ndirect_code_check = true`nrun = `"python3 checks/code-check.py`"`n", $Utf8)
+        [IO.File]::AppendAllText($file, "`n[[gate]]`npaths = [`"src/`"]`ndirect_code_check = true`nrun = `"python3 checks/code-check.py`"`n", $Utf8)
         [IO.File]::WriteAllText((Join-Path $m 'checks/code-check.py'), "from pathlib import Path`nassert Path('src/app.py').read_text().strip() == 'pass'`nprint('targeted code ran')`n", $Utf8)
         Save-DirectBase $w
     }

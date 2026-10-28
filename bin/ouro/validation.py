@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import sh, validation_lock
-from .coordination import worker_env
+from .runtime.process import worker_env
 from .runtime.process import check_platform, process_table, descendants, terminate_owned
 
 TIMEOUT = 3600
@@ -66,17 +66,17 @@ def key(head, commands):
     return hashlib.sha256(json.dumps([head, commands]).encode("utf-8")).hexdigest()[:16]
 
 
-def state(run, pending):
-    head = run.head()
+def state(tree, pending):
+    head = tree.head()
     commands = [p["cmd"] for p in pending]
-    root = Path(run.wt_git("rev-parse", "--absolute-git-dir").out.strip()) / "ouro-validation"
+    root = tree.admin() / "ouro-validation"
     return head, commands, root / key(head, commands)
 
 
-def receipt(run, pending, *, inputs=None):
+def receipt(tree, pending, *, inputs=None):
     try:
         check_platform()
-        head, commands, directory = inputs if inputs is not None else state(run, pending)
+        head, commands, directory = inputs if inputs is not None else state(tree, pending)
         if directory.parent.is_symlink() or directory.is_symlink() or (directory / "receipt.json").is_symlink():
             return None
         data = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
@@ -99,19 +99,19 @@ def receipt(run, pending, *, inputs=None):
         return None
 
 
-def inputs_match(run, head):
-    return run.head() == head and not run.wt_git("status", "--porcelain", "-z", "--untracked-files=all").out
+def inputs_match(tree, head):
+    return tree.head() == head and not tree.git("status", "--porcelain", "-z", "--untracked-files=all").out
 
 
-def clean(run, head):
-    if not inputs_match(run, head):
+def clean(tree, head):
+    if not inputs_match(tree, head):
         raise sh.DriverError("validation requires unchanged HEAD and clean tracked/untracked inputs")
 
 
-def attempts(run):
+def attempts(tree):
     """Historical execution evidence is labelled by its own head, never used as proof."""
-    root = Path(run.wt_git("rev-parse", "--absolute-git-dir").out.strip()) / "ouro-validation"
-    heads = set(run.wt_git("rev-list", f"origin/{run.env.default}..HEAD").out.split())
+    root = tree.admin() / "ouro-validation"
+    heads = set(tree.git("rev-list", f"origin/{tree.env.default}..HEAD").out.split())
     results = []
     if root.is_symlink():
         return results
@@ -231,56 +231,71 @@ def record_attempt(evidence, head, commands, results):
     temporary.replace(evidence / "attempt.json")
 
 
-def check_inputs(run, head):
+def check_inputs(tree, head, hint):
     """Check the proof boundary under its existing lease, without executing a command or writing a receipt."""
-    return validate(run, [], check_head=head)[1]
+    return validate(tree, [], hint, check_head=head)[1]
 
 
-def validate(run, pending, *, reuse=False, execute_missing=True, check_head=None):
-    """Return (results, failure): None means accepted; 75 means wait. Resume never executes missing proof."""
+def wait_hint(env, n, k, commands):
+    """Describe metadata-only obligations; never inspect or create execution proof here."""
+    part = f" --part {k}" if k else ""
+    authority = env.lookup("ship.validation") or "local"
+    obligations = ", ".join(f"`{cmd}`" for cmd in dict.fromkeys(commands)) or "committed-input verification"
+    return (f"authority={authority}; waiting for proof: {obligations}. "
+            'The owner can select ship.validation = "ci" in the trusted invoking and branch bindings, '
+            "with ship.validation_checks naming successful exact-head checks. Each command needs an exact gate.run "
+            "whose paths select it and whose CI job actually executes it; check names alone add no coverage. "
+            "Genuine local-only gates retain local proof. Otherwise resume the same branch/commit from a native Linux host: "
+            f"`ouro run {n}{part} --validate`")
+
+
+def validate(tree, pending, hint, *, reuse=False, execute_missing=True, check_head=None):
+    """Return (results, failure): None means accepted; 75 means wait. Resume never executes missing proof.
+
+    `hint(commands)` is the wait's text on a host that cannot validate; None stands for the run's required execution."""
     try:
         check_platform()
     except sh.DriverError as ex:
-        sh.say(str(ex))
+        sh.say(f"{ex}; {hint(None if check_head is not None else [p['cmd'] for p in pending])}")
         return [], 75
     commands = [p["cmd"] for p in pending]
     # Locate the standard worktree administrative directory without launching Git
     # before ownership exists. Refuse other layouts rather than run an unowned helper.
-    marker = run.worktree / ".git"
+    marker = tree.path / ".git"
     if marker.is_dir():
         gitdir = marker.resolve()
     else:
         text = marker.read_text(encoding="utf-8").strip()
         if not text.startswith("gitdir: "):
             raise sh.DriverError("validation requires a standard Git worktree directory")
-        gitdir = (run.worktree / text[8:]).resolve()
+        gitdir = (tree.path / text[8:]).resolve()
     root = gitdir / "ouro-validation"
     if root.is_symlink():
         raise sh.DriverError("validation state must be Git-private directories")
     root.mkdir(parents=True, exist_ok=True)
     lease = validation_lock.Lease(root / "lock", None, commands)
     try:
-        actual = lease.execute(lambda: run.wt_git("rev-parse", "--absolute-git-dir").out.strip())
+        actual = lease.execute(lambda: tree.git("rev-parse", "--absolute-git-dir").out.strip())
         if Path(actual).resolve() != gitdir:
             raise sh.DriverError("validation Git directory differs from owned directory")
-        head = lease.execute(run.head)
+        head = lease.execute(tree.head)
         if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
             raise sh.DriverError("validation HEAD identity unavailable")
         lease.data["sha"] = head
         validation_lock.write(lease.fd, lease.data)
         if check_head is not None:
-            return [], None if lease.execute(inputs_match, run, check_head) else 1
+            return [], None if lease.execute(inputs_match, tree, check_head) else 1
         directory = root / key(head, commands)
         if directory.is_symlink():
             raise sh.DriverError("validation state must be Git-private directories")
         directory.mkdir(parents=True, exist_ok=True)
-        lease.execute(clean, run, head)
+        lease.execute(clean, tree, head)
         if reuse:
             # These inputs were acquired under the lease. Reading their evidence
             # launches no helper and keeps full batch results out of the bounded lock.
-            results = receipt(run, pending, inputs=(head, commands, directory))
+            results = receipt(tree, pending, inputs=(head, commands, directory))
             if results is not None:
-                lease.execute(clean, run, head)
+                lease.execute(clean, tree, head)
                 return results, None
         if not execute_missing:
             return [], 75
@@ -290,17 +305,17 @@ def validate(run, pending, *, reuse=False, execute_missing=True, check_head=None
         record_attempt(evidence, head, commands, results)
         for i, cmd in enumerate(commands):
             log = evidence / f"{i}.log"
-            code = lease.execute(execute, cmd, run.worktree, log, run.env.runtime, command_log=log)
+            code = lease.execute(execute, cmd, tree.path, log, tree.env.runtime, command_log=log)
             r = {"cmd": cmd, "sha": head, "exit": code, "log": str(log),
                  "digest": hashlib.sha256(log.read_bytes()).hexdigest()}
             results.append(r)
             sh.say(f"validation @ {head}: `{cmd}` exit {code}; evidence {log}")
             # Every attempt is evidence, including failures and source mutation.
             record_attempt(evidence, head, commands, results)
-            lease.execute(clean, run, head)
+            lease.execute(clean, tree, head)
             if code != 0:
                 return results, code
-        lease.execute(clean, run, head)
+        lease.execute(clean, tree, head)
         temporary = directory / "receipt.tmp"
         temporary.write_text(json.dumps({"sha": head, "commands": commands, "results": results, "attempt": evidence.name}), encoding="utf-8")
         temporary.replace(directory / "receipt.json")

@@ -63,13 +63,13 @@ print('mutation counterfactual red; source restored')
     observed = []
     try:
         with patch.dict(os.environ, c.env()):
-            run = h.runmod.Run(env, 1, None)
+            run = h.runmod.Run(env, 1, None, h.runmod.RunOptions())
             run.read_issue(); run.plan_part()
-            build_source = (run.worktree / "src/app.py").read_bytes()
-            head = run.head()
+            build_source = (run.tree.path / "src/app.py").read_bytes()
+            head = run.tree.head()
             def worker(name, prompt, model, capabilities, cwd, timeout, denied=None, runtime=None):
                 assert name == "REVIEW" and "Mode: sized" in prompt and capabilities.probe
-                assert pathlib.Path(cwd).resolve() != run.worktree.resolve()
+                assert pathlib.Path(cwd).resolve() != run.tree.path.resolve()
                 policy = {"root": cwd, "edit": capabilities.edit, "commands": list(capabilities.commands), "probe": capabilities.probe}
                 with patch.object(bridge, "sandbox_argv", side_effect=lambda root, argv: argv):
                     result = bridge.Bridge(policy).call("run", {"command": "python3 probes/mutation.py"})
@@ -81,8 +81,8 @@ print('mutation counterfactual red; source restored')
             h.check("a sized review actually runs a green subset and a red mutation in its scratch copy",
                     answer["verdict"] == "CLEAN" and len(observed) == 1)
             h.check("temporary review mutations never change the original BUILD input or head",
-                    (run.worktree / "src/app.py").read_bytes() == build_source and run.head() == head
-                    and not run.wt_git("status", "--porcelain").out
+                    (run.tree.path / "src/app.py").read_bytes() == build_source and run.tree.head() == head
+                    and not run.tree.git("status", "--porcelain").out
                     and "review-1" not in env.git("worktree", "list", "--porcelain").out)
     finally:
         env.close()

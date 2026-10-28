@@ -81,9 +81,8 @@ original cached correlations and the GitHub checklist; it never adopts a claim b
 Pending default checks keep the part resumable even when board discovery is unavailable. Dry runs write neither board nor correlation cache.
 
 Before each direct push, including a fix or revert, open repository claims are checked against the
-actual Git diff, renames counted at both paths. Areas come from matching gate pathspecs in the
-published default-branch binding; a gate without paths contributes its declared areas, excluding
-`*`. Exact path or area intersection refuses with the holder/thread unless the invoking person
+actual Git diff, renames counted at both paths, and the issue's area labels. Exact path or area
+intersection refuses with the holder/thread unless the invoking person
 supplied `--override-claim`; same-issue convention claims always conflict.
 Missing/hidden/malformed scope on another issue is unavailable evidence, not proof of disjoint
 work. Green direct completion closes the owned claim, while running checks or a scope refusal
@@ -273,9 +272,9 @@ The **default working view** is
 
 Two **modifiers** ride on top of `agent-ready` and never stand alone: `trivial` (§5) and
 `checkpoint` (§3). Scope, area and type labels declared in `[labels]` may ride on any state. An
-issue carries one type label and one or more area labels: a change that spans areas carries each,
-and executing it runs every gate any of them selects, less a gate whose `paths` the branch's diff
-does not touch (`docs/binding.md`).
+issue carries one type label and one or more area labels: a change that spans areas carries each.
+Labels select no gate: executing it runs every gate whose `paths` the branch's diff touches, and
+every gate without `paths` (`docs/binding.md`).
 
 **Promotion to `agent-ready` leaves a provenance mark:** a comment on the issue whose first line
 is `**Triage**` — alone on the line, with no blank line above it; interactive triage writes its

@@ -113,14 +113,14 @@ def run(h):
             and '.ouro-build-recovery/source.json' in (c.nodes / 'BUILD.1.prompt.txt').read_text()
             and fresh_proof and receipt.read_bytes() == proof)
     from ouro import recovery
-    resumed = SimpleNamespace(env=SimpleNamespace(main=roots[0]), worktree=new, n=1, k=None,
+    resumed = SimpleNamespace(env=SimpleNamespace(main=roots[0]), path=new,
                               branch=h.git(new, 'branch', '--show-current'), head=lambda: new_head,
-                              wt_git=lambda *args, **kwargs: h.runmod.sh.run(['git', *args], cwd=new))
+                              git=lambda *args, **kwargs: h.runmod.sh.run(['git', *args], cwd=new))
     private = roots[0].parent / 'source.json'
     archived = private.with_name('source-archived.json')
     private.rename(archived)
     try:
-        h.check('old recovery inputs expire before consulting archived metadata', recovery.brief(resumed) == '')
+        h.check('old recovery inputs expire before consulting archived metadata', recovery.brief(resumed, 1, None) == '')
     finally:
         archived.rename(private)
     h.check('exact selected bytes survive outside worker-visible input and worktree cleanup',
@@ -194,8 +194,8 @@ def run(h):
     h.check('a selected symlink is never followed or committed by recovery',
             code == 2 and 'aliased' in err and link.is_symlink() and not checkouts(old))
     link.unlink()
-    reader = SimpleNamespace(worktree=old,
-                             wt_git=lambda *args, **kwargs: h.runmod.sh.run(['git', *args], cwd=old))
+    reader = SimpleNamespace(path=old,
+                             git=lambda *args, **kwargs: h.runmod.sh.run(['git', *args], cwd=old))
     for kind in ('file', 'directory'):
         outside = c.root / ('outside-' + kind)
         outside.mkdir()
@@ -271,13 +271,13 @@ def run(h):
     h.check('a failed recovery stays rejected with its private checkout and reference intact',
             code == 1 and 'no subject' in err and h.git(attempted, 'rev-parse', 'HEAD') == head
             and reference.read_text() == partial and receipt.read_bytes() == proof)
-    active = SimpleNamespace(env=SimpleNamespace(main=first), worktree=attempted, n=1, k=None,
+    active = SimpleNamespace(env=SimpleNamespace(main=first), path=attempted,
                              branch=h.git(attempted, 'branch', '--show-current'), head=lambda: head,
-                             wt_git=lambda *args, **kwargs: h.runmod.sh.run(['git', *args], cwd=attempted))
+                             git=lambda *args, **kwargs: h.runmod.sh.run(['git', *args], cwd=attempted))
     reference.write_bytes(before_reference + b'# changed after owner selection\n')
     refused = False
     try:
-        recovery.brief(active)
+        recovery.brief(active, 1, None)
     except h.runmod.DriverError:
         refused = True
     finally:
@@ -300,7 +300,7 @@ def run(h):
             and (attempted / 'src/app.py').read_text() == partial + '# retry partial\n')
 
     c, old, head, receipt, proof = setup('cap')
-    for index in range(h.runmod.FIX_CAP):
+    for index in range(h.recmod.FIX_CAP):
         h.git(old, 'commit', '--allow-empty', '-qm', 'spent manual fix ' + str(index))
     advanced = h.git(old, 'rev-parse', 'HEAD')
     branch = h.git(old, 'branch', '--show-current')

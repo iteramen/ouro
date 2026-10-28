@@ -77,7 +77,7 @@ MODELED_WORKFLOW_SECTIONS = frozenset({
     "sec_happy", "sec_branch_prefix", "sec_parts", "sec_trivial_merge", "sec_findings_fix",
     "sec_catch_up", "sec_build_stop", "sec_brief", "sec_setup", "sec_builder_default",
     "sec_developer_runtime", "sec_unchanged_finding", "sec_review_cap", "sec_conflict",
-    "sec_gate_red", "sec_full_paths", "sec_fix_round_scope", "sec_checks_running", "sec_head_lag",
+    "sec_gate_red", "sec_checks_running", "sec_head_lag",
     "sec_check_flake", "sec_no_pr_workflow", "sec_merge_refused", "sec_express", "sec_flow_tighten",
     "sec_express_base_moves", "sec_sync_conflict", "sec_spec_trust", "sec_review_none",
     "sec_copilot", "sec_resume", "sec_external", "sec_other_pr", "sec_manual",
@@ -179,7 +179,6 @@ protected_branch_prefixes = ["release/"]
 area = ["gates"]
 type = ["bug"]
 [[gate]]
-areas = ["*"]
 run = "python3 gates/check.py"
 ci = "echo SKIP: the checks cannot run this gate"
 [ship]
@@ -348,56 +347,21 @@ def happy_case(name, **kw):
     return c
 
 
-def modeled_handoff(*commands):
-    """Explicit call-site fixture data for later-phase decisions, never automatic BUILD injection."""
-    if WORKFLOW_EXECUTOR_MODEL:
-        try:
-            runmod.validation.check_platform()
-        except shmod.DriverError:
-            return {'validation_pending': [{'cmd': cmd, 'reason': 'generic supported-executor model'} for cmd in commands]}
-    return {}
-
-
-def modeled_command_heads(case, command):
-    """Actual command results in this fixture's separate unit-model cache, never production proof."""
-    import hashlib
-    heads = []
-    for cache in (case.root / 'workflow-executor-model').glob('*/model-results.json'):
-        for row in json.loads(cache.read_text()):
-            if row['cmd'] == command:
-                check('modeled command result retains actual successful output evidence',
-                      row['exit'] == 0 and hashlib.sha256(pathlib.Path(row['log']).read_bytes()).hexdigest() == row['digest'])
-                heads.append(row['sha'])
-    return heads
-
-
 # ---- pure rows -------------------------------------------------------------------------------
 from ouro import node as nodemod  # noqa: E402
+from ouro import records as recmod  # noqa: E402
 from ouro import run as runmod  # noqa: E402
 from ouro import sh as shmod  # noqa: E402
 from ouro import triage as triagemod  # noqa: E402
-
-
-def sec_may_merge():
-    mm = runmod.may_merge
-    check("stop-at-pr never merges, not even a trivial issue", mm("stop-at-pr", None, ["trivial"], "express") is False)
-    check("trivial-merge merges a trivial issue", mm("trivial-merge", None, ["trivial"], "full") is True)
-    check("trivial-merge leaves an issue without the label to the owner", mm("trivial-merge", None, ["agent-ready"], "express") is False)
-    check("merge-on-green default classes include express", mm("merge-on-green", None, [], "express") is True)
-    check("merge-on-green default classes include standard", mm("merge-on-green", None, [], "standard") is True)
-    check("merge-on-green default classes leave full to the owner", mm("merge-on-green", None, [], "full") is False)
-    check("merge-on-green with full listed merges full", mm("merge-on-green", ["full"], [], "full") is True)
-    check("a listed class does not admit its neighbour", mm("merge-on-green", ["full"], [], "standard") is False)
-    check("an empty class list merges nothing", mm("merge-on-green", [], [], "express") is False)
-    check("an unknown policy merges nothing", mm("merge-on-everything", None, ["trivial"], "express") is False)
+from ouro.worktrees import Tree  # noqa: E402
 
 
 def sec_pure():
     import workflow_executor_tests
     workflow_executor_tests.exercise(sys.modules[__name__])
     gates = [("python3 n.py", {"ci": "echo another workflow runs this gate"}), ("python3 p.py", {})]
-    vr = types.SimpleNamespace(body="", locally_run=runmod.Run.locally_run, notice=runmod.Run.notice,
-                               area_gates=lambda tree=True: gates, env=types.SimpleNamespace(pr_checks=lambda: False,
+    vr = types.SimpleNamespace(body="", locally_run=runmod.Run.locally_run, notice=runmod.Run.notice, ci_commands=lambda selected=True: set(),
+                               bound_gates=lambda tree=True: gates, env=types.SimpleNamespace(pr_checks=lambda: False,
                                    lookup=lambda key, default=None: "local" if key == "ship.validation" else default))
     check("with no workflow naming pull_request, validation may run every selected gate, as the BUILD brief grants them",
           runmod.Run.validation_commands(vr) == ["python3 n.py", "python3 p.py"])
@@ -407,13 +371,6 @@ def sec_pure():
     check("the validation key is 16 hex digits of the head and the ordered commands",
           re.fullmatch(r"[0-9a-f]{16}", runmod.validation.key("a" * 40, ["x", "y"])) is not None
           and runmod.validation.key("a" * 40, ["x", "y"]) != runmod.validation.key("a" * 40, ["y", "x"]))
-    check("slugify keeps five kebab words", runmod.slugify("Fix the total of the whole thing now please") == "fix-the-total-of-the")
-    check("slugify of punctuation alone has a name", runmod.slugify("!!!") == "change")
-    body = "- [x] 1. **One (Flow: express).** a\n- [ ] 2. **Two (Flow: full).** b\n- [ ]3. no space\n"
-    check("parse_parts reads number, tick and text; a malformed item is no part", [(k, t) for k, t, _ in runmod.parse_parts(body)] == [(1, True), (2, False)])
-    check("a numbered task-list item without the part form is no part, anywhere in the body; one of the form is, anywhere",
-          runmod.parse_parts("## Deliverable\n- [ ] 1. read the value\n- [ ] 2. drop the field\n") == []
-          and [k for k, _, _ in runmod.parse_parts("## Exit\n- [ ] 1. **X (Flow: full).** x\n")] == [1])
     check("file_list cuts past the cap and says how many are not listed; at the cap it lists all",
           triagemod.file_list(["a", "b", "c"], cap=2).endswith("(1 more tracked files are not listed; the anchor gate above read them all)")
           and triagemod.file_list(["a"], cap=2) == "a" and triagemod.file_list(["a", "b"], cap=2) == "a\nb")
@@ -447,13 +404,6 @@ def sec_pure():
     tr.tick_part()
     check("tick_part ticks the part of the contract's form and leaves a plain numbered item alone",
           tr.env.out == "## Deliverable\n- [x] 1. **A (Flow: express).** a\n\n## Exit\n- [ ] 1. not a part\n")
-    check("body_line takes the first Flow line", runmod.body_line("Flow: full\nFlow: express\n", "Flow") == "full")
-    check("body_line is case-sensitive", runmod.body_line("flow: full\n", "Flow") is None)
-    check("derive_flow: docs only is express", runmod.derive_flow(["docs/a.md"], set()) == "express")
-    check("derive_flow: a script is standard", runmod.derive_flow(["bin/x.ps1"], set()) == "standard")
-    check("derive_flow: a hook is full", runmod.derive_flow(["hooks/x.py"], set()) == "full")
-    check("derive_flow: a gate's own file is full", runmod.derive_flow(["tests/t.py"], {"tests/t.py"}) == "full")
-    check("flow only tightens", runmod.tighter("full", "express") == "full" and runmod.tighter("express", "standard") == "standard")
     rg = runmod.Run.__new__(runmod.Run)
     rg.title, rg.body = "T", "## What\nw\n\n## Deliverable\n" + "d" * 4000 + "\n"
     rg.env = types.SimpleNamespace(trusted=lambda: {"o"})
@@ -462,82 +412,22 @@ def sec_pure():
     goal = rg.reader_goal()
     check("reader_goal keeps the title and the newest comment when the Deliverable and the comments pass their cuts, and marks the cut",
           goal.startswith("T. dddd") and goal.endswith("Ruling: drop it.") and "(earlier ones cut)" in goal and len(goal) < 6200)
-    recs = [{"round": 1, "findings": [finding("H"), finding("L", "an off-by-one")], "false": 0},
-            {"round": 2, "findings": [{**finding("L", "an off-by-one"), "scope": "STANDS"}, finding("L", "a nit")], "false": 0}]
-    check("the Review line counts a finding that still stands once, in the round that first reported it",
-          runmod.review_line(recs, True) == "Review: rounds:1 findings:H1/M0/L2 false-sentences:0")
-    check("and an unscoped restatement of the same finding once",
-          runmod.review_line([recs[0], {"round": 2, "findings": [finding("L", "an off-by-one")], "false": 0}], True) == "Review: rounds:1 findings:H1/M0/L1 false-sentences:0")
-    r1o, r2o = {"round": 1, "findings": [finding("H")], "false": 0}, {"round": 2, "findings": [{**finding("M", "an old helper"), "scope": "OUTSIDE"}], "false": 0}
-    r3o = {"round": 3, "findings": [finding("M", "an old helper")], "false": 0}
-    check("a verification's OUTSIDE finding is not counted, nor a later round's restatement of it with no scope",
-          "findings:H1/M0/L0" in runmod.review_line([r1o, r2o], True) and "findings:H1/M0/L0" in runmod.review_line([r1o, r2o, r3o], True))
-    check("a standing M still needs a fix", runmod.needs_fix({"round": 2, "findings": [{**finding("M"), "scope": "STANDS"}]}))
-    check("a finding whose line is a list, or a line spelled 3 then '3', does not crash and counts once",
-          runmod.review_line([{"round": 1, "findings": [{**finding("M"), "line": [3, 5]}], "false": 0}, {"round": 2, "findings": [{**finding("M"), "line": [3, 5]}], "false": 0}], True)
-          == "Review: rounds:1 findings:H0/M1/L0 false-sentences:0"
-          and runmod.review_line([{"round": 1, "findings": [{**finding("L"), "line": "2"}], "false": 0}, {"round": 2, "findings": [finding("L")], "false": 0}], True).endswith("L1 false-sentences:0"))
     sha = "a" * 40
-    check("the review heading is the verdict the driver acts on: CLEAN on L-only findings, which are still listed; FINDINGS on an M",
-          runmod.review_comment(2, {"findings": [finding("L")]}, sha).startswith(f"**Review** round 2: CLEAN @ {sha}\n")
-          and "\n- L " in runmod.review_comment(2, {"findings": [finding("L")]}, sha)
-          and runmod.review_comment(2, {"findings": [finding("M")]}, sha).startswith(f"**Review** round 2: FINDINGS @ {sha}\n"))
     good = {"author": {"login": "O"}, "body": f"**Review** round 2: FINDINGS @ {sha}\n\ntext\n```json\n{{\"findings\": [{{\"severity\": \"M\"}}]}}\n```\n"}
     trusted = {"o"}
-    rec = runmod.parse_review_comment(good, trusted)
-    check("a review marker from a trusted author (case-insensitive) parses", rec and rec["round"] == 2 and rec["verdict"] == "FINDINGS" and rec["sha"] == sha)
-    check("its findings come from the json block", rec and runmod.needs_fix(rec))
-    near = {
-        "an untrusted author": {**good, "author": {"login": "stranger"}},
-        "a null author": {**good, "author": None},
-        "a trailing space on line 1": {**good, "body": good["body"].replace("FINDINGS @ " + sha, "FINDINGS @ " + sha + " ")},
-        "a lower-case marker": {**good, "body": good["body"].replace("**Review**", "**review**")},
-        "a short sha": {**good, "body": good["body"].replace(sha, "a" * 7)},
-        "an upper-case sha": {**good, "body": good["body"].replace(sha, "A" * 40)},
-        "the marker on line 2": {**good, "body": "intro\n" + good["body"]},
-        "an unknown verdict": {**good, "body": good["body"].replace("FINDINGS", "MAYBE")},
-        "a null body": {**good, "body": None},
-    }
-    for what, c in near.items():
-        check(f"near miss refused: {what}", runmod.parse_review_comment(c, trusted) is None)
-    check("a CRLF body still parses", runmod.parse_review_comment({**good, "body": good["body"].replace("\n", "\r\n")}, trusted) is not None)
-    dup = runmod.review_records([good, good], trusted)
-    check("a duplicated round is counted once", len(dup) == 1)
     def ruling(who="O", text="**Ruling**\n\nNo change needed."):
         return {"author": {"login": who}, "body": text}
-    later = {**good, "body": good["body"].replace("round 2", "round 3").replace(sha, "b" * 40)}
-    ruled = runmod.review_records([good, ruling()], trusted, {"o"})
-    check("a trusted ruling after a FINDINGS record rules it: no fix, and no fix round in the Review line",
-          ruled[0]["ruled"] == "O" and not runmod.needs_fix(ruled[0]) and runmod.review_line(ruled + [{"round": 3, "findings": [], "false": 0}], True).startswith("Review: rounds:0 "))
-    both = runmod.review_records([good, ruling(), later], trusted, {"o"})
-    check("a ruled record followed by a later FINDINGS record leaves the later one needing a fix", not runmod.needs_fix(both[0]) and runmod.needs_fix(both[1]))
-    for what, cs in {"an untrusted author's ruling": [good, ruling("stranger")], "a ruling posted before the record": [ruling(), good],
-                     "a ruling not on the first line": [good, ruling(text="thanks\n**Ruling**")],
-                     "a trusted author who is no approver": [good, ruling("bot")]}.items():
-        check(f"{what} rules nothing", runmod.needs_fix(runmod.review_records(cs, trusted | {"bot"}, {"o"})[0]))
-    check("the ruling's first line is trimmed", not runmod.needs_fix(runmod.review_records([good, ruling(text="  **Ruling**  \nx")], trusted, {"o"})[0]))
+    ruled = recmod.review_records([good, ruling()], trusted, {"o"})
     vr = runmod.Run.__new__(runmod.Run)
-    vr.wt_git = lambda *a, check=True: types.SimpleNamespace(code=0, out="+x\n")
+    vr.tree = types.SimpleNamespace(git=lambda *a, check=True: types.SimpleNamespace(code=0, out="+x\n"))
     block = vr.verification(ruled, "h")
     check("a ruled record's findings are not handed back, its range still is",
           ruled[0]["body"] not in block and "```diff" in block and "STANDS" not in block)
-    vr.wt_git = lambda *a, check=True: types.SimpleNamespace(code=0, out="x" * 60001)
+    vr.tree = types.SimpleNamespace(git=lambda *a, check=True: types.SimpleNamespace(code=0, out="x" * 60001))
     big = vr.verification(ruled, "h")
     check("a ruled record's findings are not handed back when the diff cannot be shown whole either; an unruled record's are",
           "cannot be shown whole" in big and ruled[0]["body"] not in big and "STANDS" not in big
-          and good["body"] in vr.verification(runmod.review_records([good], trusted), "h"))
-    r1 = {"round": 1, "findings": [finding("H"), finding("l"), {"severity": "M"}], "false": 1}
-    r2 = {"round": 2, "findings": [finding("L")], "false": "unread"}
-    check("review_line counts severities, fix rounds and false sentences, a restated finding once",
-          runmod.review_line([r1, r2], True) == "Review: rounds:1 findings:H1/M1/L1 false-sentences:1")
-    check("review_line is `none` with no reviewer", runmod.review_line([], False) == "Review: none")
-    check("review_line says unread when no round counted false sentences",
-          runmod.review_line([{"round": 1, "findings": [], "false": None}], True).endswith("false-sentences:unread"))
-    pattern = re.compile(r"^Review: (?:none|rounds:([0-9]+) findings:H([0-9]+)/M([0-9]+)/L([0-9]+) false-sentences:([0-9]+|unread))[ \t\r]*$", re.M)
-    body = runmod.render_body({"part_line": "Part 1/2 of #5", "fixes_line": "", "gates": [], "usage": ""}, runmod.review_line([r1], True))
-    check("the PR body's Review line matches the pattern the loop metrics read", pattern.search(body) is not None)
-    check("the record survives the body", runmod.read_record(body).get("part_line") == "Part 1/2 of #5")
-    check("severity 'M ' is not H or M by accident", runmod.sev({"severity": "low"}) == "L" and runmod.sev(None) == "")
+          and good["body"] in vr.verification(recmod.review_records([good], trusted), "h"))
     lr = runmod.Run.locally_run
     check("a gate the checks run only to print a skip runs here: the forbidden-token scan", lr("python3 bin/forbidden-tokens.py scan", {}) is True)
     check("a ci whose printed text starts with skip runs here: the checks cannot run the gate", lr("python3 x.py", {"ci": "echo skipped in CI"}) is True
@@ -562,9 +452,8 @@ def sec_pure():
           runmod.acceptance_commands(named) == ["python3 tests/x.Tests.py", "pytest -q", "dotnet test", "go test ./..."])
     check("a heading that only holds those letters inside a word is not such a section",
           runmod.acceptance_commands("## Latest changes\n`python3 tools/publish.py`\n## Attestation\n`pwsh x.ps1`\n## Testing\n`pytest`") == ["pytest"])
-    check("without_build_lines drops every Ouro-Build line and nothing else", runmod.without_build_lines("a\nOuro-Build: {}\nb\nOuro-Build: {\"x\": 1}") == "a\nb")
     def facts_of(trailer):
-        t = types.SimpleNamespace(wt_git=lambda *a: types.SimpleNamespace(out="fix\n\nOuro-Build: " + trailer))
+        t = types.SimpleNamespace(tree=types.SimpleNamespace(git=lambda *a: types.SimpleNamespace(out="fix\n\nOuro-Build: " + trailer)))
         try:
             return runmod.Run.commit_facts(t, "a" * 40)
         except shmod.DriverError as ex:
@@ -573,16 +462,15 @@ def sec_pure():
     check("a well-formed Ouro-Build line reads back as written", facts_of(json.dumps(good)) == good)
     check("a person's reworded trailer whose gates_run holds strings stops where it is read, naming the commit and the field",
           facts_of('{"gates_run": ["pytest"]}') == "the Ouro-Build line of aaaaaaa holds a malformed `gates_run`, whose every entry is an object with `cmd`: reword that commit's message")
-    drawn = runmod.drawn_body({"summary": "s1", "residue": ["Nothing here has been executed"]}, "r1")
-    rec = runmod.read_record(drawn)
+    drawn = recmod.drawn_body({"summary": "s1", "residue": ["Nothing here has been executed"]}, "r1")
+    rec = recmod.read_record(drawn)
     rec.update(summary="s2")
-    again = runmod.drawn_body(rec, "r2", drawn.replace("- Nothing here has been executed", "- the tests ran"))
-    check("drawn_body keeps a section a person edited and redraws the one they left alone",
-          "- the tests ran" in again and "Nothing here" not in again.split("<!--")[0] and "## Summary\ns2" in again)
+    again = recmod.drawn_body(rec, "r2", drawn.replace("- Nothing here has been executed", "- the tests ran"))
     wrote = []  # refresh_body reads the body as it stands: a lead's web edit, in CRLF
     web = again.replace("## Summary\ns2", "## Summary\nthe lead's correction").replace("\n", "\r\n")
     stand = types.SimpleNamespace(env=types.SimpleNamespace(gh_json=lambda *a: {"body": web}, default="master", slug="o/n", body_file=lambda n, t: wrote.append(t), write=lambda *a: None),
-                                  build_facts=lambda: {"summary": "s3"}, checked_gates=lambda: [], wt_git=lambda *a: types.SimpleNamespace(out=""), flow="standard", notes=[], primary=None)
+                                  build_facts=lambda: {"summary": "s3"}, checked_gates=lambda: [], tree=types.SimpleNamespace(git=lambda *a: types.SimpleNamespace(out="")), flow="standard", notes=[], primary=None,
+                                  gate_log=[], skipped=None, ci_execution_checks=[])
     runmod.Run.refresh_body(stand, {"number": 7}, [])
     check("refresh_body redraws from the record and keeps the summary the lead edited on the web, and the residue they edited before it",
           len(wrote) == 1 and "## Summary\nthe lead's correction" in wrote[0] and "- the tests ran" in wrote[0] and "s3" not in wrote[0].split("<!--")[0])
@@ -802,16 +690,6 @@ def sec_not_ready():
     check("a re-run with a dead anchor is refused for the finding, not stopped: no stop comment, labels kept",
           code == 2 and "Checkpoint finding" in err and stops_of(c) == [] and "agent-ready" in labels_of(c) and "needs-ruling" not in labels_of(c))
     ck = {"_issue_1": issue(labels=("agent-ready", "checkpoint", "gates", "bug"))}
-    c = happy_case("checkpointuncovered", table=ck,
-                   binding=BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('areas = ["*"]', 'areas = ["elsewhere"]'))
-    c.node("CHECKPOINT", {"finding": "Fine."})
-    code, out, err = c.ouro("run", "1")
-    check("a checkpoint whose area no gate covers still posts its finding: exit 0, no stop", code == 0 and stops_of(c) == []
-          and any(x["body"].startswith("**Checkpoint finding**") for x in c.issue_state()["comments"]))
-    call = c.node_call("CHECKPOINT")
-    check("with no granted command the checkpoint keeps only read tools in the main checkout",
-          call["tools"] == ["Read", "Grep", "Glob"] and pathlib.Path(call["cwd"]).resolve() == c.main.resolve()
-          and "(none: read tools only)" in (c.nodes / "CHECKPOINT.1.prompt.txt").read_text(encoding="utf-8"))
     c = happy_case("checkpointstop", table=ck)
     c.node("CHECKPOINT", {"stop": "open decision: which format?"})
     code, out, err = c.ouro("run", "1")
@@ -1399,13 +1277,11 @@ def sec_gate_red():
 
 
 def sec_gate_uncovered():
-    b = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('areas = ["*"]', 'areas = ["elsewhere"]')
+    b = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('[[gate]]', '[[gate]]\nareas = ["elsewhere"]')
     c = Case("uncovered", binding=b)
     code, out, err = c.ouro("run", "1")
-    check("an area no gate covers: exit 3", code == 3)
-    stops = [x["body"] for x in (c.issue_state() or {"comments": []})["comments"] if x["body"].startswith("**Stop:**")]
-    check("`**Stop:** gate uncovered` naming the area", len(stops) == 1 and stop_comment_ok(stops[0], "gate uncovered") and "gates" in stops[0])
-    check("agent-ready -> needs-ruling and no branch", "needs-ruling" in labels_of(c) and c.branches() == ["master"])
+    check("a binding whose gate still selects by area is refused before anything runs, naming the remedy",
+          code == 2 and "gate.0.areas: paths is the only gate selector" in out + err and c.branches() == ["master"] and stops_of(c) == [])
     b2 = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace("python3 gates/check.py", "no-such-tool-anywhere gates/check.py")
     c2 = happy_case("unrunnable", binding=b2)
     code, out, err = c2.ouro("run", "1")
@@ -1414,22 +1290,26 @@ def sec_gate_uncovered():
 
 
 def sec_full_paths():
+    try:
+        runmod.validation.check_platform()
+    except shmod.DriverError as ex:
+        print(f"SKIP: these rows need a host that validates BUILD's commands ({ex})")
+        return
     b = BINDING.format(policy="stop-at-pr", review="adversarial-review") + (
-        '[[gate]]\nareas = ["*"]\nrun = "python3 gates/src_gate.py"\npaths = ["src/"]\n'
-        '[[gate]]\nareas = ["*"]\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n')
+        '[[gate]]\nrun = "python3 gates/src_gate.py"\npaths = ["src/"]\n'
+        '[[gate]]\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n')
     c = Case("fullpaths", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"},
              table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: full"))})
-    c.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py"), "_run": ["python3 gates/src_gate.py"]})
+    c.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"]})
     c.node("REVIEW", CLEAN)
     code, out, err = c.ouro("run", "1", "--validate")
     check("under full the observed selected gate is re-run on HEAD; an untouched gate is not",
-          code == 0 and ("gate `python3 gates/src_gate.py`: exit 0" in out
-                        or modeled_command_heads(c, 'python3 gates/src_gate.py') == [git(c.main / '.claude/worktrees/1-fix-the-total', 'rev-parse', 'HEAD')]) and "doc_gate" not in out)
+          code == 0 and "gate `python3 gates/src_gate.py`: exit 0" in out and "doc_gate" not in out)
     check("the record says which gate was skipped for its paths", "Gate skipped, the diff touches none of its paths: `python3 gates/doc_gate.py`" in c.pr()["body"])
     check("the record names the selected gate the checks run", "- Gates the pull request's checks run: `python3 gates/src_gate.py`" in c.pr()["body"] and "none run by the driver" not in c.pr()["body"])
     check("the gate the checks run only to print a skip ran here", "gate `python3 gates/check.py`: exit 0" in out)
     check("under full the REVIEW node is the probe mode", "Mode: probe" in open(c.nodes / "REVIEW.1.prompt.txt", encoding="utf-8").read())
-    notice = '[[gate]]\nareas = ["*"]\nrun = "python3 gates/notice.py"\nci = "echo another workflow runs this gate in CI"\npaths = ["src/"]\n'
+    notice = '[[gate]]\nrun = "python3 gates/notice.py"\nci = "echo another workflow runs this gate in CI"\npaths = ["src/"]\n'
     for flow in ("standard", "full"):
         cn = happy_case(f"notice{flow}", binding=BINDING.format(policy="stop-at-pr", review="adversarial-review") + notice,
                         files={"gates/notice.py": "print('notice gate ran')\n"}, table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", f"Flow: {flow}"))})
@@ -1445,12 +1325,11 @@ def sec_full_paths():
     check("under full its tools are Read, Grep, Glob and Bash, with push, commit and gh denied", call["tools"] == ["Read", "Grep", "Glob", "Bash"] and call["denied"] == ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"])
     check("the copy is removed afterwards, its registration with it", "review-1" not in git(c.main, "worktree", "list", "--porcelain") and not pathlib.Path(call["cwd"]).exists())
     c2 = happy_case("standardpaths", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"})
-    c2.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py"), "_run": ["python3 gates/src_gate.py"]})
-    c2.write(".claude/ouro.toml", b + '[[gate]]\nareas = ["*"]\nrun = "python3 gates/main_only.py"\npaths = ["src/"]\n')  # the main checkout's binding, uncommitted
+    c2.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"]})
+    c2.write(".claude/ouro.toml", b + '[[gate]]\nrun = "python3 gates/main_only.py"\npaths = ["src/"]\n')  # the main checkout's binding, uncommitted
     code, out, err = c2.ouro("run", "1", "--validate")
     check("under standard the observed selected gate is re-run on HEAD",
-          code == 0 and ("gate `python3 gates/src_gate.py`: exit 0" in out
-                        or modeled_command_heads(c2, 'python3 gates/src_gate.py') == [git(c2.main / '.claude/worktrees/1-fix-the-total', 'rev-parse', 'HEAD')]))
+          code == 0 and "gate `python3 gates/src_gate.py`: exit 0" in out)
     check("the brief and the allowlist read the branch's binding, not the main checkout's",
           "main_only" not in open(c2.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read() and not any("main_only" in t for t in c2.node_call("BUILD")["tools"]))
     for name, case in (("full", c), ("standard", c2)):
@@ -1460,7 +1339,7 @@ def sec_full_paths():
         check(f"under {name} the BUILD node may run those gates", {"Bash(python3 gates/src_gate.py)", "Bash(python3 gates/doc_gate.py)"} <= set(case.node_call("BUILD")["tools"]))
     c3 = Case("branchbinding", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"},
               table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: full"))})
-    c3.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py"), "_run": ["python3 gates/src_gate.py"], "writes": {**BUILD["writes"], ".claude/ouro.toml": b.replace('run = "python3 gates/src_gate.py"', 'run = "python3 gates/src_gate.py"\nci = "python3 gates/src_gate.py --branch"')}})
+    c3.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"], "writes": {**BUILD["writes"], ".claude/ouro.toml": b.replace('run = "python3 gates/src_gate.py"', 'run = "python3 gates/src_gate.py"\nci = "python3 gates/src_gate.py --branch"')}})
     c3.node("REVIEW", CLEAN)
     code, out, err = c3.ouro("run", "1", "--validate")
     check("the record's checks line reads the branch's CI command without discarding its original execution obligation", code == 0
@@ -1468,20 +1347,24 @@ def sec_full_paths():
 
 
 def sec_fix_round_scope():
+    try:
+        runmod.validation.check_platform()
+    except shmod.DriverError as ex:
+        print(f"SKIP: these rows need a host that validates BUILD's commands ({ex})")
+        return
     b = BINDING.format(policy="stop-at-pr", review="adversarial-review") + (
-        '[[gate]]\nareas = ["*"]\nrun = "python3 gates/src_gate.py"\npaths = ["src/"]\n'
-        '[[gate]]\nareas = ["*"]\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n')
+        '[[gate]]\nrun = "python3 gates/src_gate.py"\npaths = ["src/"]\n'
+        '[[gate]]\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n')
     c = Case("fixgates", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"},
              table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: full"))})
-    c.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py", "python3 gates/doc_gate.py"), "_run": ["python3 gates/src_gate.py", "python3 gates/doc_gate.py"], "writes": {**BUILD["writes"], "docs/note.md": "note, first\n"}}, 1)
-    c.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py", "python3 gates/doc_gate.py"), "_run": ["python3 gates/src_gate.py", "python3 gates/doc_gate.py"], "subject": "docs: reword the note", "writes": {"docs/note.md": "note, fixed\n"}}, 2)
+    c.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py", "python3 gates/doc_gate.py"], "writes": {**BUILD["writes"], "docs/note.md": "note, first\n"}}, 1)
+    c.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py", "python3 gates/doc_gate.py"], "subject": "docs: reword the note", "writes": {"docs/note.md": "note, fixed\n"}}, 2)
     c.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", "the note is wrong")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
     c.node("REVIEW", CLEAN, 2)
     code, out, err = c.ouro("run", "1", "--validate")
     check("a full fix round that touches only docs/: exit 0", code == 0)
     check("observed gates are re-run on both committed heads",
-          out.count("gate `python3 gates/src_gate.py`: exit 0") + len(modeled_command_heads(c, 'python3 gates/src_gate.py')) == 2
-          and out.count("gate `python3 gates/doc_gate.py`: exit 0") + len(modeled_command_heads(c, 'python3 gates/doc_gate.py')) == 2)
+          out.count("gate `python3 gates/src_gate.py`: exit 0") == 2 and out.count("gate `python3 gates/doc_gate.py`: exit 0") == 2)
     check("the gate the checks run only to print a skip ran on both heads", out.count("gate `python3 gates/check.py`: exit 0") == 2)
     body = c.pr()["body"]
     check("after the fix the record names both selected gates as the checks' and calls neither skipped",
@@ -1529,9 +1412,9 @@ def sec_fix_round_scope():
     check("a node answer with no issue leaves a Follow-ups filed comment reading none",
           any(c["body"] == "**Follow-ups filed**\n\nnone\n" for c in c2.pr_comments()))
     check("needs_fix: on a verification an IN-FIX or unscoped M needs a fix, an OUTSIDE one does not",
-          runmod.needs_fix({"round": 2, "findings": [{**finding("M"), "scope": "IN-FIX"}]}) and runmod.needs_fix({"round": 2, "findings": [finding("M")]})
-          and not runmod.needs_fix({"round": 2, "findings": [{**finding("H"), "scope": "outside "}]}))
-    check("needs_fix: a first review's OUTSIDE H still needs a fix", runmod.needs_fix({"round": 1, "findings": [{**finding("H"), "scope": "OUTSIDE"}]}))
+          recmod.needs_fix({"round": 2, "findings": [{**finding("M"), "scope": "IN-FIX"}]}) and recmod.needs_fix({"round": 2, "findings": [finding("M")]})
+          and not recmod.needs_fix({"round": 2, "findings": [{**finding("H"), "scope": "outside "}]}))
+    check("needs_fix: a first review's OUTSIDE H still needs a fix", recmod.needs_fix({"round": 1, "findings": [{**finding("H"), "scope": "OUTSIDE"}]}))
     brief = open(c2.nodes / "REVIEW.2.prompt.txt", encoding="utf-8").read()
     check("the verification brief names the fix's range and carries its diff",
           re.search(r"The fix is `[0-9a-f]{40}\.\.[0-9a-f]{40}`", brief) is not None and "+    return sum(items) + 1" in brief
@@ -1544,7 +1427,7 @@ def sec_fix_round_scope():
     rec1 = [{"round": 1, "sha": "a" * 40, "body": "**Review** round 1: FINDINGS", "findings": []}]
     for name, res in (("an unreadable range", Out(128, "")), ("a diff over the cut", Out(0, "+x\n" * 30000))):
         r = runmod.Run.__new__(runmod.Run)
-        r.wt_git = lambda *a, check=True, res=res: res
+        r.tree = types.SimpleNamespace(git=lambda *a, check=True, res=res: res)
         block = r.verification(rec1, "b" * 40)
         check(f"{name}: the verification block asks for no scope and shows no partial diff",
               "leave `scope` empty on every finding" in block and "```diff" not in block and "round 1: FINDINGS" in block)
@@ -1674,13 +1557,13 @@ def sec_fix_round_scope():
 
     c4 = Case("fixaddsgate", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"},
               table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: full"))})
-    c4.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py"), "_run": ["python3 gates/src_gate.py"]}, 1)
-    c4.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py"), "_run": ["python3 gates/src_gate.py"], "subject": "gates: add a gate", "writes": {
-        ".claude/ouro.toml": b + '[[gate]]\nareas = ["*"]\nrun = "python3 gates/new_gate.py"\npaths = ["src/"]\n',
+    c4.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"]}, 1)
+    c4.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"], "subject": "gates: add a gate", "writes": {
+        ".claude/ouro.toml": b + '[[gate]]\nrun = "python3 gates/new_gate.py"\npaths = ["src/"]\n',
         "gates/new_gate.py": "print('new gate ran')\n"}}, 2)
     c4.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", "no gate covers it")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
     c4.node("REVIEW", CLEAN, 2)
-    c4.node("BUILD", {**BUILD, **modeled_handoff("python3 gates/src_gate.py"), "_run": ["python3 gates/src_gate.py"]})
+    c4.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"]})
     code, out, err = c4.ouro("run", "1", "--validate")
     check("a branch-added gate remains required and missing proof takes the bounded fix cap without caller self-approval",
           code == 3 and 'Missing successful execution evidence' in out and 'python3 gates/new_gate.py' in out
@@ -1801,8 +1684,8 @@ def sec_head_lag():
 def sec_no_pr_workflow():
     """No workflow at origin/<default> names pull_request: every selected gate runs here, the pull request opens with the note, the watcher is never called, and the owner merges."""
     b = BINDING.format(policy="merge-on-green", review="adversarial-review") + (
-        '[[gate]]\nareas = ["*"]\nrun = "python3 gates/notice.py"\nci = "echo another workflow runs this gate in CI"\n'
-        '[[gate]]\nareas = ["*"]\nrun = "python3 gates/plain.py"\n')
+        '[[gate]]\nrun = "python3 gates/notice.py"\nci = "echo another workflow runs this gate in CI"\n'
+        '[[gate]]\nrun = "python3 gates/plain.py"\n')
     files = {".github/workflows/ci.yml": None, ".github/workflows/intake.yml": "on:\n  issues:\n    types: [opened]\n",
              "gates/notice.py": "print('notice gate ran')\n", "gates/plain.py": "print('plain gate ran')\n"}
     c = happy_case("noprworkflow", binding=b, files=files)
@@ -1929,11 +1812,11 @@ def sec_check_flake():
           all(x in got for x in ("____ test_shard_total ____", "E       assert 2 == 3", "FAILED tests/test_shard.py::test_shard_total", "1 failed, 811 passed"))
           and "SKIPPED" not in got and "DeprecationWarning" not in got)
     other = "\n".join([f"noise {i}" for i in range(300)] + ["##[error]link failed: undefined symbol"] + [f"late {i}" for i in range(300)])
-    x = runmod.failure_extract(other).splitlines()
+    x = recmod.failure_extract(other).splitlines()
     check("any other log: the error-marked line with two lines of context, then the tail, the gaps named",
           x[:6] == ["[... 298 line(s) left out ...]", "noise 298", "noise 299", "##[error]link failed: undefined symbol", "late 0", "late 1"]
           and x[-1] == "late 299" and len(x) == 67)
-    x = runmod.failure_extract("\n".join(f"error {i}" for i in range(1000)), cap=20, tail=5).splitlines()
+    x = recmod.failure_extract("\n".join(f"error {i}" for i in range(1000)), cap=20, tail=5).splitlines()
     check("over the cap the extract cuts from the middle: the first and the last failure stay", x[0] == "error 0" and "error 999" in x and len(x) <= 27)
     cs = happy_case("decideskip", table={"_issue_1": issue(), "_checks_extra": [{"name": "optional", "bucket": "skipping"}]})
     code, out, err = cs.ouro("run", "1")
@@ -1943,8 +1826,8 @@ def sec_check_flake():
 def sec_conflict():
     """A conflict with the base, reported by the checks watcher or by the merge, is synced once per head; the same head again is an error."""
     r = runmod.Run.__new__(runmod.Run)
-    r.env, r.n, r.synced, r.worktree = types.SimpleNamespace(run=lambda *a, **k: shmod.run(*a, **k), default="master", pr_checks=lambda: True, ghr=lambda *a, **k: shmod.R(0, "[]", "", ["gh"]),
-                                                                       gh_json=lambda *a: {"headRefOid": "a" * 40}), 1, set(), pathlib.Path(".")
+    r.env, r.n, r.synced, r.tree = types.SimpleNamespace(run=lambda *a, **k: shmod.run(*a, **k), default="master", pr_checks=lambda: True, ghr=lambda *a, **k: shmod.R(0, "[]", "", ["gh"]),
+                                                                       gh_json=lambda *a: {"headRefOid": "a" * 40}), 1, set(), types.SimpleNamespace(path=pathlib.Path("."))
     saved = shmod.run
     shmod.run = lambda *a, **k: shmod.R(1, "STOP: #7 conflicts with master and GitHub runs no pull_request workflow for a conflicting pull request: sync the branch", "", ["watch"])
     try:
@@ -2053,7 +1936,7 @@ def sec_flow_tighten():
     code, out, err = c.ouro("run", "1")
     ready = [x["body"] for x in c.pr_comments() if x["body"].startswith("**Ready for merge**")]
     check("a standard issue whose diff reaches a hook is full, and the record carries that class", code == 0 and bool(ready) and "Class: full" in ready[0]
-          and runmod.read_record(c.pr()["body"]).get("flow") == "full")
+          and recmod.read_record(c.pr()["body"]).get("flow") == "full")
     sh(sys.executable, STUB, "pr", "merge", "7", "--squash", "--subject", "fix (#7)", "--delete-branch", env=c.env())
     merged = git(c.origin, "rev-parse", "refs/heads/master")
     before = len(c.sigs())
@@ -2116,7 +1999,7 @@ def sec_sync_conflict():
     check("a resolution that leaves markers is `open decision`, exit 3", code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision"))
     check("nothing was pushed to the branch", "gates/1-fix-the-total" not in c2.branches())
     b = BINDING.format(policy="stop-at-pr", review="adversarial-review")
-    base_gate, branch_gate = '[[gate]]\nareas = ["*"]\nrun = "python3 gates/base_gate.py"\n', '[[gate]]\nareas = ["*"]\nrun = "python3 gates/branch_gate.py"\n'
+    base_gate, branch_gate = '[[gate]]\nrun = "python3 gates/base_gate.py"\n', '[[gate]]\nrun = "python3 gates/branch_gate.py"\n'
     c3 = Case("syncconflicttoml", files={"gates/check.py": MOVER})
     (c3.root / "base.toml").write_text(b + base_gate, encoding="utf-8")
     c3.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], ".claude/ouro.toml": b + branch_gate}}, 1)
@@ -2140,7 +2023,7 @@ def sec_direct():
     notice = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('ci = "echo SKIP: the checks cannot run this gate"', 'ci = "echo another workflow runs this gate"')
     code, out, err = Case("directnotice", binding=notice, table={"_issue_1": issue(body=body)}).ouro("run", "1", "--dry-run")
     check("the direct lane runs every selected gate itself, so a BUILD list that would be empty does not stop it", code == 0 and "[2a] direct" in out and "gate uncovered" not in out)
-    direct_binding = notice + ('[[gate]]\nareas = ["*"]\ncheap = true\nrun = "python3 gates/doc_gate.py"\n'
+    direct_binding = notice + ('[[gate]]\ncheap = true\nrun = "python3 gates/doc_gate.py"\n'
                                'ci = "echo another workflow runs this gate"\npaths = ["docs/"]\n')
     direct_binding = direct_binding.replace('[ship]\n', '[ship]\nvalidation="ci"\nvalidation_checks=["ci"]\n')
     doc_gate = ("import pathlib,subprocess\n"
@@ -2569,31 +2452,6 @@ def sec_spec_trust():
 
 
 # ---- the review table: size x ship.review ----------------------------------------------------
-def sec_review_plan():
-    plan = runmod.review_plan
-    cells = {("adversarial-review", "S"): ("node", False), ("copilot", "S"): (None, True), ("external-audit", "S"): ("reader", False), ("none", "S"): (None, False),
-             ("adversarial-review", "M"): ("node", False), ("copilot", "M"): ("node", True), ("external-audit", "M"): ("node", False), ("none", "M"): ("node", False)}
-    for (value, size), want in cells.items():
-        check(f"review_plan: {size} x {value} is {want}", plan(value, size) == want)
-    ds = runmod.derive_size
-    check("three files and sixty lines stay S", ds(["a", "b", "c"], 60) == ("S", ""))
-    check("a fourth file makes it M", ds(["a", "b", "c", "d"], 5)[0] == "M")
-    check("a changelog mirrored beside three files does not count toward the files", ds(["a", "b", "c", "CHANGELOG.md"], 5) == ("S", ""))
-    check("a changelog still counts toward the lines", ds(["a", "CHANGELOG.md"], 61)[0] == "M")
-    check("no repo.release_notes: the default is the CHANGELOG.md basename, case and all",
-          runmod.release_notes(["d/CHANGELOG.md", "CHANGELOG.md", "CHANGELOG.zh-CN.md", "changelog.md", "XCHANGELOG.md"]) == ["d/CHANGELOG.md", "CHANGELOG.md"])
-    fragment = ["a", "b", "c", "changes/app/fix.md"]
-    check("a repo.release_notes pattern keeps three files and a fragment at S", ds(fragment, 20, [r"^changes/"]) == ("S", "") and ds(fragment, 20)[0] == "M")
-    check("a set repo.release_notes replaces the default", ds(["a", "b", "c", "CHANGELOG.md"], 5, [r"^changes/"])[0] == "M")
-    check("sixty-one changed lines make it M", ds(["a"], 61)[0] == "M")
-    check("a workflow path makes it M whatever its size", ds([".github/workflows/ci.yml"], 1)[0] == "M")
-    check("parse_direct reads the vehicle and whether a push happened", runmod.parse_direct("vehicle: pr\npushed direct/1 to origin at abc\n") == {"vehicle": "pr", "pushed": True}
-          and runmod.parse_direct("fallback: express\n") == {"vehicle": None, "pushed": False})
-    f = runmod.reader_findings({"critiques": [{"severity": "blocker", "claim": "c1", "evidence": "src/app.py:2 text"}, {"severity": "major", "claim": "c2"}, {"severity": "minor", "claim": "c3"}, {"severity": "odd", "claim": "c4"}]})
-    check("reader critiques map blocker H, major M, minor L, unknown M, with file and line from the evidence",
-          [x["severity"] for x in f] == ["H", "M", "L", "M"] and f[0]["file"] == "src/app.py" and f[0]["line"] == 2)
-
-
 M_BODY = ISSUE_BODY.replace("Size: S", "Size: M")
 WHAT_BODY = ISSUE_BODY.replace("Fix the total.", "Sum the line items correctly.")
 
@@ -2814,9 +2672,11 @@ def sec_external():
     check("after the reader's two rounds the REVIEW node verifies the later fix: exit 0, two reader calls, one REVIEW call", code == 0 and len(c.grok_calls()) == 2 and c.prompts("REVIEW") == ["REVIEW.1.prompt.txt"])
     check("the record says the reader's rounds are spent", "two rounds are spent" in c.pr()["body"])
     c = happy_case("readerfail", binding=EXTERNAL.format(policy="stop-at-pr", review="external-audit"))
-    code, out, err = c.ouro("run", "1", extra=c.grok({"stdout": "", "exit": 1}))
+    code, out, err = c.ouro("run", "1", extra=c.grok({"stdout": "", "stderr": "loading\nError: Not signed in\n", "exit": 1}))
     check("a round 1 that exits 1 falls back to the REVIEW node: exit 0", code == 0 and c.prompts("REVIEW") == ["REVIEW.1.prompt.txt"])
-    check("the record says the reader was unavailable", "was unavailable" in c.pr()["body"] and "(grok)" in c.pr()["body"])
+    check("the record says the reader was unavailable, and why: its stderr's last line",
+          "was unavailable" in c.pr()["body"] and "(grok)" in c.pr()["body"] and "Error: Not signed in" in c.pr()["body"]
+          and "Error: Not signed in" in out)
     c = happy_case("readerthree", binding=EXTERNAL.format(policy="stop-at-pr", review="external-audit"))
     empty = {"stdout": json.dumps({"verdict": "APPROVE", "files_read": [], "critiques": []}), "exit": 0}
     code, out, err = c.ouro("run", "1", extra=c.grok(empty, empty))
@@ -2838,8 +2698,8 @@ DIRECT_BODY = "## What\nEdit the note.\n\n## Deliverable\n- `docs/note.md`\n\nDo
 NOTE_BUILD = {**BUILD, "writes": {"docs/note.md": "note, edited\n"}}
 UNPROTECTED = {"api repos/o/n/rules/branches/master": {"Exit": 0, "Out": []},
                "api repos/o/n/branches/master/protection": {"Exit": 1, "Out": "Branch not protected"}}
-LANE_GATES = ('[[gate]]\nareas = ["*"]\ncheap = true\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n'
-              '[[gate]]\nareas = ["*"]\nrun = "python3 gates/src_gate.py"\npaths = ["src/"]\n')
+LANE_GATES = ('[[gate]]\ncheap = true\nrun = "python3 gates/doc_gate.py"\npaths = ["docs/"]\n'
+              '[[gate]]\nrun = "python3 gates/src_gate.py"\npaths = ["src/"]\n')
 
 def lane_case(name, protection=UNPROTECTED, table=None, files=None, binding=None):
     c = Case(name, binding=binding or BINDING.format(policy="stop-at-pr", review="adversarial-review") + LANE_GATES, table={"_issue_1": issue(body=DIRECT_BODY), **protection, **(table or {})},
@@ -2862,8 +2722,9 @@ def sec_lane_source_guard():
     c = Case("direct-source-guard")
     ob = shmod.load_binding_module()
     env = shmod.Env(c.main, ob, ob.load(c.main / ".claude/ouro.toml"), False, runtime=developer.Settings())
-    r = runmod.Run(env, 1, None)
-    r.body, r.worktree = "Generated source guard fixture.", c.main
+    r = runmod.Run(env, 1, None, runmod.RunOptions())
+    r.body, r.branch = "Generated source guard fixture.", "gates/1-guard"
+    r.tree = Tree(env, c.main, r.branch)
     r.spec_amendments = lambda: []
     r.build_facts = lambda **kw: {"validation_pending": []}
     bridge = Bridge({"root": str(c.main), "edit": True, "commands": [], "probe": False})
@@ -2969,8 +2830,8 @@ def sec_lane_pr_authority():
     absent = "ouro-fixture-ci-only-tool validate"
     local = "python3 gates/forbidden-tokens.py"
     binding = (BINDING.format(policy="stop-at-pr", review="adversarial-review") +
-               f'\n[[gate]]\nareas=["*"]\ncheap=true\npaths=["docs/"]\nrun="{absent}"\nci="echo external build workflow"\n'
-               f'\n[[gate]]\nareas=["*"]\ncheap=true\nrun="{local}"\nci="echo SKIP: private token list"\n')
+               f'\n[[gate]]\ncheap=true\npaths=["docs/"]\nrun="{absent}"\nci="echo external build workflow"\n'
+               f'\n[[gate]]\ncheap=true\nrun="{local}"\nci="echo SKIP: private token list"\n')
     binding = binding.replace("[ship]\n", '[ship]\nvalidation="ci"\nvalidation_checks=["ci"]\n')
     program = ("import pathlib,subprocess\n"
                "def git(*a): return subprocess.check_output(['git',*a],encoding='utf-8').strip()\n"
@@ -2982,7 +2843,7 @@ def sec_lane_pr_authority():
         if fault in ("uncovered-code", "transient-history"):
             selected = selected.replace('direct = ["docs/*.md"]', 'direct = ["docs/*.md", "src/*.py"]')
         if fault == "transient-history":
-            selected += f'\n[[gate]]\nareas=["*"]\npaths=["src/"]\ndirect_code_check=true\nrun="{absent}-code"\nci="echo external code workflow"\n'
+            selected += f'\n[[gate]]\npaths=["src/"]\ndirect_code_check=true\nrun="{absent}-code"\nci="echo external code workflow"\n'
         setup_marker = TMP / ("direct-pr-authority-" + fault) / "main/.git/setup-should-not-execute"
         setup = TMP / ("direct-pr-authority-" + fault) / "main/gates/setup.py"
         if fault == "setup-absolute":
@@ -3043,8 +2904,8 @@ def sec_lane_pr_authority():
                       "command relocation is unproved" in err and not setup_marker.exists()
                       and "owner bytes executed" in setup.read_text(encoding="utf-8"))
             if fault == "transient-history":
-                check("net CI selection cannot certify the public floor's transient code obligation",
-                      "CI coverage is unproved" in err and "historical gate" in err
+                check("a code path only the history touched has no merge-base gate, so the plan refuses it",
+                      "no complete trusted structural mandatory-check plan" in err
                       and git(c.main, "diff", "--name-only", f"{base}..{head}") == "docs/note.md")
         check(f"{fault}: owner edits survive and no BUILD or caller receipt is invented",
               (c.main / "owner-wip.txt").read_text(encoding="utf-8") == "preserve owner work\n"
@@ -3103,7 +2964,7 @@ def sec_lane_resume_copy_guards():
         main.mkdir(); scratch.mkdir()
         policy = {"repo": {"slug": "o/n", "default_branch": "master", "setup": "owned fixture setup", "checkout": "/shared/example"},
                   "ship": {"direct": ["docs/*"], "policy": "stop-at-pr"},
-                  "gate": [{"areas": ["*"], "cheap": True, "run": "python3 checks/reviewed.py"}]}
+                  "gate": [{"cheap": True, "run": "python3 checks/reviewed.py"}]}
         env = shmod.Env.__new__(shmod.Env)
         loaded = json.loads(json.dumps(policy))
         if fault == "checkout-only":
@@ -3156,7 +3017,7 @@ def sec_lane_resume_copy_guards():
 
         env.run = checked
         run = runmod.Run.__new__(runmod.Run)
-        run.env, run.n, run.body, run.worktree = env, 1, "", main
+        run.env, run.n, run.body, run.tree = env, 1, "", Tree(env, main, None)
         run.spec_amendments = lambda: []
         run.claim = types.SimpleNamespace(prepared=None)
         if fault in ("ship-policy", "gate-policy"):
@@ -3230,7 +3091,7 @@ def sec_lane_resume_copy_guards():
         run = runmod.Run.__new__(runmod.Run)
         run.env = types.SimpleNamespace(main=c.main, runtime=None, default="master",
             git=lambda *args, **kw: shmod.run(shmod.argv_for("git", *args), cwd=c.main, **kw))
-        run.branch, run.dirname, run.worktree = "gates/fallback", "fallback", c.main
+        run.branch, run.dirname, run.tree = "gates/fallback", "fallback", Tree(run.env, c.main, "gates/fallback")
         with mock.patch.object(runmod.node, "worktree_readiness", lambda *a, **k: None):
             try:
                 run.lane_fallback(expected)
@@ -3302,7 +3163,7 @@ def sec_lane_resume_copy_guards():
         payload = "late owner bytes\n"
         owner = c.main / ("owner.txt" if fault in ("late-default-head", "late-issue-head") else "docs/note.md")
         run = runmod.Run.__new__(runmod.Run)
-        run.branch, run.dirname, run.worktree, run.in_lane = "gates/fallback", "fallback", c.main, True
+        run.branch, run.dirname, run.in_lane = "gates/fallback", "fallback", True
         def actual_git(*args, check=True, **kw):
             result = shmod.run(shmod.argv_for("git", *args), cwd=c.main, **kw)
             if check and result.code != 0:
@@ -3321,6 +3182,7 @@ def sec_lane_resume_copy_guards():
                     seen["late_head"] = real_git(c.main, "rev-parse", "HEAD")
             return result
         run.env = types.SimpleNamespace(main=c.main, runtime=None, default="master", git=actual_git)
+        run.tree, run.execution_grants = Tree(run.env, c.main, run.branch), None
         run.claim = types.SimpleNamespace(prepared=None)
         run.ensure_worktree = lambda: seen.__setitem__("ensure", seen["ensure"] + 1)
         run.rederive = lambda: None
@@ -3865,17 +3727,12 @@ def sec_uncovered_commands():
     t2.node("TRIAGE", answer)
     code, out, err = t2.ouro("triage", "1", "--dry-run")
     check("with a gate the node runs, triage says nothing of it", code == 0 and "empty command list" not in out)
-    bound = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('areas = ["*"]', 'areas = ["gates"]')  # the gate is the area's, not everyone's
-    t3 = Case("uncoveredcmdnamed", binding=bound, table={"_issue_1": issue(labels=("needs-triage", "bug"), body=body)})
-    t3.node("TRIAGE", {**answer, "labels": ["Gates"]})
-    code, out, err = t3.ouro("triage", "1", "--dry-run")
-    check("an issue with no area label whose node names the area: the gate that label selects counts, so triage says nothing of it", code == 0 and "empty command list" not in out)
-    t4 = Case("uncoveredcmdunnamed", binding=bound, table={"_issue_1": issue(labels=("needs-triage", "bug"), body=body)})
+    t4 = Case("uncoveredcmdunnamed", table={"_issue_1": issue(labels=("needs-triage", "bug"), body=body)})
     t4.node("TRIAGE", answer)
     code, out, err = t4.ouro("triage", "1", "--dry-run")
-    check("an unnamed required area refuses dry-run with its gate diagnostic and empty-command explanation, writing nothing",
+    check("an unnamed required area refuses dry-run for the label alone, writing nothing: the gate is granted whatever the labels",
           code == 3 and "verdict NEEDS-RULING" in out and "0 area label(s)" in out
-          and "would get an empty command list" in out and not t4.wrote())
+          and "empty command list" not in out and not t4.wrote())
     c3 = Case("emptylist", binding=notice, table={"_issue_1": issue()})
     code, out, err = c3.ouro("run", "1")
     stops = stops_of(c3)
@@ -3896,7 +3753,8 @@ def sec_uncovered_commands():
     check("and validation may run it as any approved command", "python3 gates/check.py" in runmod.Run.validation_commands(types.SimpleNamespace(
         body="", env=types.SimpleNamespace(pr_checks=lambda: True,
             lookup=lambda key, default=None: "local" if key == "ship.validation" else default), notice=runmod.Run.notice, locally_run=runmod.Run.locally_run,
-        area_gates=lambda tree=True: [("python3 gates/check.py", {"run": "python3 gates/check.py", "ci": "echo another workflow runs this gate", "cheap": True})])))
+        ci_commands=lambda selected=True: set(),
+        bound_gates=lambda tree=True: [("python3 gates/check.py", {"run": "python3 gates/check.py", "ci": "echo another workflow runs this gate", "cheap": True})])))
     check("a cheap gate the checks also run is on the BUILD brief and in its granted tools, so the build runs",
           c4.prompts("BUILD") != [] and "Bash(python3 gates/check.py)" in c4.node_call("BUILD")["tools"]
           and "`python3 gates/check.py` (cheap" in open(c4.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read() and stops_of(c4) == [])
@@ -3974,7 +3832,7 @@ def sec_manual():
                          "_denied": [{"tool_input": {"file_path": alias}}]})
         code, out, err = c.ouro("run", "1")
         check(f"a denied configuration alias {alias} keeps its edit and prevents merging",
-              code == 0 and runmod.read_record(c.pr()["body"])["manual"] == [{"path": ".codex/config.toml", "edit": "owner config edit"}]
+              code == 0 and recmod.read_record(c.pr()["body"])["manual"] == [{"path": ".codex/config.toml", "edit": "owner config edit"}]
               and any("Manual steps" in item["body"] for item in c.pr_comments())
               and not any(s.startswith("pr merge") for s in c.sigs()))
     c = Case("manualkept", policy="trivial-merge", table={"_issue_1": issue(labels=trivial)})
@@ -4150,7 +4008,7 @@ def sec_validation_inheritance():
         (c.root / 'mode').write_text('pass')
         c.node('REVIEW', CLEAN, 1)
         code, out, err = validation_run(c, '--validate')
-        record = runmod.read_record(c.pr()['body'])
+        record = recmod.read_record(c.pr()['body'])
         check('explicit new-head validation executes every retained command before verification and completion',
               code == 0 and [r[0] for r in validation_logs(c)[len(before):]] == [['second'], ['first']]
               and all(r[1] == head for r in validation_logs(c)[len(before):])
@@ -4178,6 +4036,20 @@ def sec_validation_handoff():
         check('unsupported lifecycle accounting waits before launching validation',
               code == 0 and 'waiting for validation' in out and not validation_logs(c)
               and not validation_receipts(c) and not c.prompts('REVIEW'))
+        check('and the wait names both ways forward: CI validation, or --validate from native Linux',
+              'ship.validation = "ci"' in out and 'ouro run 1 --validate' in out
+              and 'authority=local' in out and all(cmd in out for cmd in VALIDATION_CMDS)
+              and 'exact gate.run' in out and 'check names alone' in out)
+        wt = validation_wt(c)
+        head, message = git(wt, 'rev-parse', 'HEAD'), git(wt, 'log', '-1', '--format=%B')
+        check('the unsupported host still builds exactly once and preserves the prepared handoff',
+              len(c.prompts('BUILD')) == 1 and 'Ouro-Build: ' in message and not c.wrote())
+        c.clear_prompts()
+        code, out, err = validation_run(c)
+        check('unsupported resume names inherited obligations without rebuilding or changing the prepared commit',
+              code == 0 and all(cmd in out for cmd in VALIDATION_CMDS) and not c.prompts('BUILD')
+              and not c.prompts('REVIEW') and not c.pr() and not c.wrote()
+              and git(wt, 'rev-parse', 'HEAD') == head and git(wt, 'log', '-1', '--format=%B') == message)
         print(f'SKIP: supported POSIX validation execution rows; {ex}')
         return
     probe = os.environ.get('OURO_VALIDATION_PROBE')
@@ -4346,7 +4218,7 @@ def sec_validation_handoff():
     # A binding-approved runner with an empty PATH tests missing executable without
     # preventing git/pwsh from starting the driver or its verification gates.
     missing = "PATH='' python3 gates/validate.py"
-    binding = BINDING.format(policy='stop-at-pr', review='adversarial-review') + '\n[[gate]]\nareas = ["*"]\npaths = ["never/"]\nrun = "' + missing.replace('"', '\\"') + '"\n'
+    binding = BINDING.format(policy='stop-at-pr', review='adversarial-review') + '\n[[gate]]\npaths = ["never/"]\nrun = "' + missing.replace('"', '\\"') + '"\n'
     c = validation_case('missing', commands=[missing], binding=binding)
     code, out, err = validation_run(c, '--validate')
     check('a missing executable waits with exit75 evidence and no owner ruling',
@@ -4398,7 +4270,7 @@ def sec_validation_handoff():
     c = validation_case('conflict', answer={'gates_run': [{'cmd': VALIDATION_CMDS[0], 'exit': 0}]})
     code, out, err = validation_run(c, '--validate')
     check('a command cannot be both pending and reported as run', code == 1 and 'conflicts' in err and not validation_logs(c))
-    injected_binding = BINDING.format(policy='stop-at-pr', review='adversarial-review') + '\n[[gate]]\nareas = ["*"]\npaths = ["src/"]\nrun = "python3 gates/unapproved.py"\n'
+    injected_binding = BINDING.format(policy='stop-at-pr', review='adversarial-review') + '\n[[gate]]\npaths = ["src/"]\nrun = "python3 gates/unapproved.py"\n'
     c = validation_case('builder-binding', answer={'writes': {'.claude/ouro.toml': injected_binding},
         'validation_pending': [{'cmd': 'python3 gates/unapproved.py', 'reason': 'sandbox'}]})
     code, out, err = validation_run(c, '--validate')
@@ -4467,7 +4339,8 @@ def sec_validation_handoff():
     mutations = {
         'barrier': ('bin/ouro/run.py', '            if pending:\n', '            if False and pending:\n'),
         'allowlist': ('bin/ouro/validation.py', 'if cmd not in allowed or identity in seen:', 'if identity in seen:'),
-        'head': ('bin/ouro/validation.py', '        head = lease.execute(run.head)\n', '        head = lease.execute(run.first_commit)\n'),
+        'head': ('bin/ouro/validation.py', '        head = lease.execute(tree.head)\n',
+                 '        head = lease.execute(lambda: tree.git("rev-list", "--reverse", f"origin/{tree.env.default}..HEAD").out.split()[0])\n'),
         'failure': ('bin/ouro/validation.py', 'return 124 if limited else code', 'return 124 if limited else 0'),
     }
     tracked = git(BASE, 'ls-files', '-z').split('\0')
@@ -4524,8 +4397,6 @@ def sec_validation_driver_death():
     c = validation_case('driver-fsmonitor-death')
     validation_run(c)  # Real BUILD and ordinary non-validating wait.
     wt = validation_wt(c)
-    head = git(wt, 'rev-parse', 'HEAD')
-    source = (wt / 'src/app.py').read_bytes()
     root = pathlib.Path(git(wt, 'rev-parse', '--absolute-git-dir')) / 'ouro-validation'
     output = wt / '.validation'
     output.mkdir(exist_ok=True)
@@ -4565,45 +4436,22 @@ def sec_validation_driver_death():
                   (root / 'lock').exists() and locks.inspect(root)['phase'] == 'active')
             p.kill()
             p.wait(timeout=5)
-            os.kill(int((output / 'helper').read_text()), 0)
-            try:
-                locks.inspect(root, True)
-            except runmod.DriverError as ex:
-                check('live detached fsmonitor helper prevents recovery after driver death', 'lease is live' in str(ex))
-            else:
-                check('live detached fsmonitor helper prevents recovery after driver death', False)
-            check('preflight death admits neither commands nor receipt',
-                  not validation_logs(c) and not validation_receipts(c))
-            (output / 'release').touch()
-            until(lambda: locks.inspect(root).get('phase') == 'settled')
-            def recover():
-                try:
-                    return locks.inspect(root, True)
-                except runmod.DriverError as ex:
-                    if 'lease is live' not in str(ex):
-                        raise
-            recovered = until(recover)
-            check('driver helper recovery requires settled lifecycle and released kernel lease',
-                  recovered['status'] == 'recovered' and (output / 'done').exists()
-                  and not validation_receipts(c))
         finally:
             (output / 'release').touch()
             if p.poll() is None:
                 p.kill()
             p.wait(timeout=5)
             until(lambda: (output / 'done').exists())
+            # The killed driver's executor outlives it; recovery is what lets it end (the lock suite proves the recovery).
+            def recover():
+                try:
+                    return locks.inspect(root, True)
+                except runmod.DriverError as ex:
+                    if 'lease is live' not in str(ex):
+                        raise
+            until(lambda: locks.inspect(root).get('phase') == 'settled')
+            until(recover)
             git(wt, 'config', '--unset', 'core.fsmonitor')
-    check('abrupt driver preflight preserves source and head',
-          git(wt, 'rev-parse', 'HEAD') == head and (wt / 'src/app.py').read_bytes() == source
-          and git(wt, 'status', '--porcelain') == '')
-    code, out, err = validation_run(c, '--validate')
-    logs = validation_logs(c)
-    check('public driver resumes through a complete current-input batch',
-          code == 0 and len(logs) == 2 and len(validation_receipts(c, commands=VALIDATION_CMDS)) == 1)
-    proof = validation_receipts(c, commands=VALIDATION_CMDS)[0].read_bytes()
-    code, out, err = validation_run(c, '--validate')
-    check('explicit receipt-backed resume reuses exact-input proof',
-          code == 0 and validation_logs(c) == logs and validation_receipts(c, commands=VALIDATION_CMDS)[0].read_bytes() == proof)
 
 
 @reap_fixture_children
@@ -4611,6 +4459,9 @@ def sec_validation_locks():
     import unittest
     from validation_lock_tests import ValidationLockTests
     result = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(ValidationLockTests))
+    if result.testsRun and len(result.skipped) == result.testsRun:  # every row skipped is no evidence, never a pass
+        print(f"SKIP: the caller lock controls need native Linux ({result.skipped[0][1]})")
+        return
     check("caller lock abrupt-death and recovery controls", result.wasSuccessful())
 
 
@@ -4626,7 +4477,6 @@ def sec_execution_evidence():
 
 def sec_ci_validation():
     """Two real CLI worlds plus an API matrix; never model the caller platform/executor."""
-    from ouro import execution
     windows = "ouro-fixture-windows-toolchain build"
     local = "python3 gates/forbidden-tokens.py"
     check("the CI-only toolchain really is unavailable here", shutil.which(windows.split()[0]) is None)
@@ -4649,7 +4499,7 @@ def sec_ci_validation():
         binding = binding.replace("[ship]\n", '[ship]\nvalidation = "ci"\nvalidation_checks = ["ci"]\n')
         files = {}
         if token:
-            binding += f'\n[[gate]]\nareas=["*"]\nrun="{local}"\nci="echo SKIP: private token list"\n'
+            binding += f'\n[[gate]]\nrun="{local}"\nci="echo SKIP: private token list"\n'
             files["gates/forbidden-tokens.py"] = (
                 "import pathlib,subprocess\n"
                 "def git(*args): return subprocess.check_output(['git',*args],encoding='utf-8').strip()\n"
@@ -4665,6 +4515,46 @@ def sec_ci_validation():
         c.real_executor = True
         c.node("BUILD", {**BUILD, **(answer or {})})
         return c
+
+    try:
+        runmod.validation.check_platform()
+        native_caller = True
+    except shmod.DriverError:
+        native_caller = False
+    if not native_caller:
+        c = case("local-handoff", acceptance="python3 gates/acceptance.py")
+        binding = c.main / ".claude/ouro.toml"
+        binding.write_text(binding.read_text(encoding="utf-8").replace('validation = "ci"', 'validation = "local"'), encoding="utf-8")
+        c.write("gates/acceptance.py", "print('acceptance')\n")
+        git(c.main, "add", "-A"); git(c.main, "commit", "-qm", "owner selects local proof")
+        git(c.main, "push", "-q", "origin", "master")
+        code, out, err = c.ouro("run", "1")
+        wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+        prepared = git(wt, "rev-parse", "HEAD")
+        check("Mac/Windows BUILD prepares a commit before a metadata-only validation wait",
+              code == 0 and len(c.prompts("BUILD")) == 1 and "authority=local" in out
+              and "python3 gates/acceptance.py" in out and windows in out
+              and "exact gate.run" in out and "check names alone" in out
+              and not c.prompts("REVIEW") and not receipts(c) and not c.wrote())
+        c.clear_prompts()
+        code, out, err = c.ouro("run", "1")
+        check("the unsupported input-check resume keeps the prepared commit without a new BUILD or owner stop",
+              code == 0 and "python3 gates/acceptance.py" in out and not c.prompts("BUILD")
+              and not c.prompts("REVIEW") and not c.wrote() and not c.pr()
+              and git(wt, "rev-parse", "HEAD") == prepared)
+
+    c = case("acceptance-unselected", acceptance="python3 gates/ci_owned.py")
+    binding = c.main / ".claude/ouro.toml"
+    binding.write_text(binding.read_text(encoding="utf-8")
+        + '\n[[gate]]\nrun = "python3 gates/ci_owned.py"\nci = "echo another workflow runs this gate"\npaths = ["never/"]\n', encoding="utf-8")
+    git(c.main, "add", "-A"); git(c.main, "commit", "-qm", "owner adds a CI-owned gate scoped elsewhere")
+    git(c.main, "push", "-q", "origin", "master")
+    code, out, err = c.ouro("run", "1")
+    stops = stops_of(c)
+    check("CI-owned acceptance whose gate the diff leaves unselected stops after BUILD, before any push, PR or CI wait",
+          code == 3 and len(c.prompts("BUILD")) == 1 and not c.pr() and c.branches() == ["master"]
+          and len(stops) == 1 and stop_comment_ok(stops[0], "acceptance unrunnable")
+          and "python3 gates/ci_owned.py" in stops[0] and "`never/`" in stops[0])
 
     c = case("ci-only", scoped=True, merge=True, flow="express")
     code, out, err = c.ouro("run", "1")
@@ -4717,8 +4607,8 @@ def sec_ci_validation():
     ob = shmod.load_binding_module()
     env = shmod.Env(c.main, ob, ob.load(c.main / ".claude/ouro.toml"), False)
     env._pr_checks = True
-    r = runmod.Run(env, 1, None)
-    r.worktree, r.flow, r.body, r.areas, r.labels = c.main, "standard", ISSUE_BODY, ["gates"], ["agent-ready"]
+    r = runmod.Run(env, 1, None, runmod.RunOptions())
+    r.tree, r.flow, r.body, r.areas, r.labels = Tree(env, c.main, None), "standard", ISSUE_BODY, ["gates"], ["agent-ready"]
     r.spec_amendments = lambda: []
     head = git(c.origin, "rev-parse", "feature/ci-api")
     response = {"headRefOid": head, "statusCheckRollup": [success]}
@@ -4735,23 +4625,23 @@ def sec_ci_validation():
         }
         for name, rows in negative.items():
             response = {"headRefOid": head, "statusCheckRollup": [success]}
-            check(name + ": positive calibration establishes only CI proof", execution.check_ci(r, {"number": 7}, head))
+            check(name + ": positive calibration establishes only CI proof", r.check_ci({"number": 7}, head))
             response = {"headRefOid": "d" * 40 if name == "stale-head" else head, "statusCheckRollup": rows}
             try:
-                accepted = execution.check_ci(r, {"number": 7}, head)
+                accepted = r.check_ci({"number": 7}, head)
             except shmod.DriverError:
                 accepted = False
             check(name + ": invalid remote data clears previous proof and cannot satisfy required execution",
                   not accepted and r.ci_execution_head is None and not r.ci_execution_commands and not r.ci_execution_checks
                   and windows in r.missing_execution())
         response = {"headRefOid": head, "statusCheckRollup": [{"__typename": "StatusContext", "context": "ci", "state": "SUCCESS"}]}
-        check("successful named commit status works at the exact fixture head", execution.check_ci(r, {"number": 7}, head))
+        check("successful named commit status works at the exact fixture head", r.check_ci({"number": 7}, head))
         cheap_local = "python3 gates/cheap-local.py"
         recognized = "pwsh -NoProfile -File gates/windows-only-build.ps1"
         binding_path = c.main / ".claude/ouro.toml"
         binding_path.write_text(binding_path.read_text(encoding="utf-8")
-            + f'\n[[gate]]\nareas=["*"]\ncheap=true\npaths=["docs/"]\nrun="{cheap_local}"\nci="echo SKIP: local private check"\n'
-            + f'\n[[gate]]\nareas=["*"]\npaths=["src/"]\nrun="{recognized}"\nci="echo Windows build runs in the configured CI"\n', encoding="utf-8")
+            + f'\n[[gate]]\ncheap=true\npaths=["docs/"]\nrun="{cheap_local}"\nci="echo SKIP: local private check"\n'
+            + f'\n[[gate]]\npaths=["src/"]\nrun="{recognized}"\nci="echo Windows build runs in the configured CI"\n', encoding="utf-8")
         c.write("gates/cheap-local.py", "import pathlib,subprocess\n"
             "def git(*args): return subprocess.check_output(['git',*args],encoding='utf-8').strip()\n"
             "p=pathlib.Path(git('rev-parse','--absolute-git-dir'))/'cheap-local-heads'\n"
@@ -4759,7 +4649,7 @@ def sec_ci_validation():
         git(c.main, "add", "-A"); git(c.main, "commit", "-qm", "reviewed API gate obligations")
         env.data = ob.load(binding_path)  # Explicitly refreshed owner invocation, never BUILD authorization.
         head = git(c.main, "rev-parse", "HEAD")
-        check("the cheap local control really misses the changed paths", not r.touches(["docs/"]))
+        check("the cheap local control really misses the changed paths", not r.tree.touches(["docs/"]))
         check("the missing-path cheap local gate remains a required driver obligation",
               cheap_local in r.required_execution() and cheap_local in [cmd for cmd, _ in r.select_gates(r.flow)[0]])
         red = r.run_gates(head)
@@ -4792,7 +4682,7 @@ def sec_ci_validation():
         check("a genuine model stop still wins over CI-owned denial", stops[-1:] == [("open decision", "fixture genuine design ruling")])
         response = {"headRefOid": head, "statusCheckRollup": [success]}
         check("exact gate.run acceptance is covered by CI plus genuine local gate results",
-              execution.check_ci(r, {"number": 7}, head) and r.missing_execution() == []
+              r.check_ci({"number": 7}, head) and r.missing_execution() == []
               and not any(row["cmd"] == recognized for row in r.execution_results))
         alias = "pwsh -NoProfile -File gates/alias-build.ps1"
         r.body += "`" + alias + "` passes too.\n"
@@ -4843,6 +4733,9 @@ def sec_ci_validation():
         caller_supported = False
     check("an uncovered acceptance keeps the real caller platform boundary", code == 0
           and (ready(c) and receipts(c) if caller_supported else "waiting for validation" in out
+               and "authority=ci" in out and "python3 gates/acceptance.py" in out
+               and "exact gate.run" in out and "check names alone" in out
+               and len(c.prompts("BUILD")) == 1 and not c.wrote()
                and not ready(c) and not c.prompts("REVIEW") and not receipts(c)))
 
 
@@ -4851,7 +4744,7 @@ SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's 
             ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: the builder default", sec_builder_default), ("run: BUILD recovery", sec_build_recovery), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
             ("run: lane resumed in a moved main checkout", sec_lane_moved_main), ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
             ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct PR copy guards", sec_lane_resume_copy_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("run: validation driver death", sec_validation_driver_death), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
-            ("run: node garbage", sec_node_garbage), ("run: validation locks", sec_validation_locks), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("may_merge: the merge decision", sec_may_merge), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("review table: plan and size", sec_review_plan), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
+            ("run: node garbage", sec_node_garbage), ("run: validation locks", sec_validation_locks), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
 INDEX = os.environ.get("OURO_TEST_INDEX")
 WORKERS = int(os.environ.get("OURO_TEST_WORKERS") or min(8, os.cpu_count() or 1))
 

@@ -54,7 +54,7 @@ class WorktreeCleanupTests(unittest.TestCase):
 
     def create(self, settled=True):
         r = object.__new__(Run)
-        r.env, r.worktree, r.branch, r.n, r.k = self.env, self.path, self.branch, 1, None
+        r.env, r.tree, r.branch, r.n, r.k = self.env, worktrees.Tree(self.env, self.path, self.branch), self.branch, 1, None
         r.catch_up = lambda *a, **kw: False
         r.fetch_branch = lambda: False
         r.setup_tree = lambda *a, **kw: None
@@ -135,7 +135,7 @@ class WorktreeCleanupTests(unittest.TestCase):
     def test_creation_and_legacy_resume_never_retroactively_stamp(self):
         self.git("worktree", "add", "-q", "-b", self.branch, str(self.path), "master")
         r = object.__new__(Run)
-        r.env, r.worktree, r.branch = self.env, self.path, self.branch
+        r.env, r.tree, r.branch = self.env, worktrees.Tree(self.env, self.path, self.branch), self.branch
         r.catch_up = lambda *a, **kw: False
         r.setup_tree = lambda *a, **kw: None
         with patch("ouro.run.node.worktree_readiness"):
@@ -147,7 +147,7 @@ class WorktreeCleanupTests(unittest.TestCase):
     def test_failed_add_has_no_creation_marker(self):
         with patch.object(self.env, "git", side_effect=sh.DriverError("add failed")):
             r = object.__new__(Run)
-            r.env, r.worktree, r.branch = self.env, self.path, self.branch
+            r.env, r.tree, r.branch = self.env, worktrees.Tree(self.env, self.path, self.branch), self.branch
             with self.assertRaises(sh.DriverError), patch("ouro.run.node.worktree_readiness"):
                 r.ensure_worktree()
         self.assertFalse(list((self.main / ".git" / "ouro-worktrees").glob("*.json")))
@@ -160,7 +160,7 @@ class WorktreeCleanupTests(unittest.TestCase):
             return original(path, data)
         with patch.object(worktrees, "write_record", side_effect=refuse_create):
             r = object.__new__(Run)
-            r.env, r.worktree, r.branch, r.n, r.k = self.env, self.path, self.branch, 1, None
+            r.env, r.tree, r.branch, r.n, r.k = self.env, worktrees.Tree(self.env, self.path, self.branch), self.branch, 1, None
             r.catch_up = lambda *a, **kw: False
             r.fetch_branch = lambda: False
             r.setup_tree = lambda *a, **kw: None
@@ -273,7 +273,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.git("branch", "-f", self.branch, "master")
         self.prs[0]["headRefOid"] = tip
         run = object.__new__(Run)
-        run.env, run.worktree, run.branch, run.n, run.k = self.env, self.path, self.branch, 1, None
+        run.env, run.tree, run.branch, run.n, run.k = self.env, worktrees.Tree(self.env, self.path, self.branch), self.branch, 1, None
         run.setup_tree = lambda *a, **kw: None
         for resumed in (False, True):
             output = io.StringIO()

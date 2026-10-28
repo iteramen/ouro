@@ -262,7 +262,6 @@ default_branch = "master"
 [labels]
 area = ["app"]
 [[gate]]
-areas = ["*"]
 run = "x"
 [ship]
 policy = "stop-at-pr"

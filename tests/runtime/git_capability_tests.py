@@ -10,12 +10,26 @@ from unittest.mock import patch
 
 BASE = pathlib.Path(__file__).resolve().parents[2]
 
-from ouro import developer, node, sh
+from ouro import developer, node, sh, worktrees
 from ouro.runtime import READ, builder, codex, diagnostics, git_capabilities, process, schema
 from ouro.runtime.tools import Bridge, sandbox_argv
 
 
 class GitCapabilityTests(unittest.TestCase):
+    def git_at(self, repo):
+        """`git` run in `repo` (or `cwd`), answering the result; with `check`, a nonzero exit fails the test."""
+        def git(*args, cwd=None, check=True):
+            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=cwd or repo)
+            if check:
+                self.assertEqual(result.code, 0, result.text)
+            return result
+        return git
+
+    def git_text(self, repo):
+        """git_at, answering the output stripped."""
+        git = self.git_at(repo)
+        return lambda *args, cwd=None: git(*args, cwd=cwd).out.strip()
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="ouro-git-capability-")
         self.addCleanup(tmp.cleanup)
@@ -113,11 +127,7 @@ class GitCapabilityTests(unittest.TestCase):
         from unittest.mock import Mock
         repo = self.root / "repo"
         repo.mkdir()
-        def git(*args, cwd=repo, check=True):
-            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=cwd or repo)
-            if check:
-                self.assertEqual(result.code, 0, result.text)
-            return result
+        git = self.git_at(repo)
         git("init", "-q", "--template=")
         git("config", "user.name", "Fixture")
         git("config", "user.email", "fixture@example.invalid")
@@ -178,10 +188,7 @@ class GitCapabilityTests(unittest.TestCase):
     def test_owned_probe_accepts_git_generated_worktree_configuration(self):
         repo = self.root / "worktree-config-repo"
         repo.mkdir()
-        def git(*args):
-            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=repo)
-            self.assertEqual(result.code, 0, result.text)
-            return result.out.strip()
+        git = self.git_text(repo)
         git("init", "-q", "--template=")
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
             "commit", "--allow-empty", "-qm", "base")
@@ -208,10 +215,7 @@ class GitCapabilityTests(unittest.TestCase):
     def parent_alias_fixture(self, name="alias-repo"):
         repo = self.root / name
         repo.mkdir()
-        def git(*args, cwd=repo):
-            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=cwd)
-            self.assertEqual(result.code, 0, result.text)
-            return result.out.strip()
+        git = self.git_text(repo)
         git("init", "-q", "--template=")
         (repo / "tracked-config").write_text("[ouro]\n parentAlias = active\n", encoding="utf-8")
         (repo / ".gitignore").write_text(".worktrees.noindex/\n.claude/\n", encoding="utf-8")
@@ -330,10 +334,7 @@ class GitCapabilityTests(unittest.TestCase):
             if os.name == "nt" and ex.winerror == 1314:
                 self.skipTest("Windows symlink privilege unavailable")
             raise
-        def git(*args):
-            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=repo)
-            self.assertEqual(result.code, 0, result.text)
-            return result.out.strip()
+        git = self.git_text(repo)
         git("init", "-q", "--template=")
         git("config", "core.symlinks", "true")
         git("config", "user.name", "Fixture")
@@ -354,10 +355,7 @@ class GitCapabilityTests(unittest.TestCase):
     def test_git_probe_teardown_preserves_unknown_state_and_primary_failure(self):
         repo = self.root / "repo"
         repo.mkdir()
-        def git(*args):
-            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=repo)
-            self.assertEqual(result.code, 0, result.text)
-            return result.out
+        git = self.git_text(repo)
         git("init", "-q", "--template=")
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
             "commit", "--allow-empty", "-qm", "base")
@@ -426,10 +424,7 @@ class GitCapabilityTests(unittest.TestCase):
         from ouro.runtime import tools
         repo = self.root / "repo"
         repo.mkdir()
-        def git(*args, cwd=repo):
-            result = sh.run(sh.argv_for("git", *map(str, args)), cwd=cwd)
-            self.assertEqual(result.code, 0, result.text)
-            return result.out.strip()
+        git = self.git_text(repo)
         git("init", "-q")
         git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
             "commit", "--allow-empty", "-qm", "base")
@@ -512,11 +507,7 @@ class GitCapabilityTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 repo = self.root / mode
                 repo.mkdir()
-                def git(*args, cwd=repo, check=True):
-                    result = sh.run(sh.argv_for("git", *map(str, args)), cwd=cwd or repo)
-                    if check:
-                        self.assertEqual(result.code, 0, result.text)
-                    return result
+                git = self.git_at(repo)
                 git("init", "-q")
                 git("config", "user.name", "Fixture")
                 git("config", "user.email", "fixture@example.invalid")
@@ -545,7 +536,7 @@ class GitCapabilityTests(unittest.TestCase):
                 env = SimpleNamespace(runtime=developer.Settings("codex"), main=repo,
                                       default="default", git=git, dry=False)
                 run = object.__new__(driver.Run)
-                run.env, run.worktree, run.branch = env, target, branch
+                run.env, run.tree, run.branch = env, worktrees.Tree(env, target, branch), branch
                 run.n, run.k = 1, None
                 run.setup_tree = Mock()
                 observed = []
@@ -638,11 +629,7 @@ class GitCapabilityTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 repo = self.root / mode
                 repo.mkdir()
-                def git(*args, cwd=repo, check=True):
-                    result = sh.run(sh.argv_for("git", *map(str, args)), cwd=cwd or repo)
-                    if check:
-                        self.assertEqual(result.code, 0, result.text)
-                    return result
+                git = self.git_at(repo)
                 git("init", "-q")
                 git("config", "user.name", "Fixture")
                 git("config", "user.email", "fixture@example.invalid")
@@ -784,7 +771,7 @@ class GitCapabilityTests(unittest.TestCase):
                 env = SimpleNamespace(runtime=developer.Settings("codex"), main=repo,
                                       default="default", git=git, dry=False)
                 run = object.__new__(driver.Run)
-                run.env, run.worktree, run.branch = env, target, branch
+                run.env, run.tree, run.branch = env, worktrees.Tree(env, target, branch), branch
                 run.n, run.k = 1, None
                 run.setup_tree = Mock()
                 run.fetch_branch = lambda: True
@@ -853,9 +840,9 @@ class GitCapabilityTests(unittest.TestCase):
                               default="fixture", dry=False, trusted=lambda: [], lookup=lambda key, default=None: default)
         fake = SimpleNamespace(
             env=env, n=1, title="fixture", body="", issue={}, flow="full",
-            worktree=self.root, verify=lambda **kw: None, changed_paths=lambda: [],
+            tree=SimpleNamespace(path=self.root, changed=lambda: [], git=lambda *a, **kw: sh.R(0, "", "", [])), verify=lambda **kw: None,
             build_commands=lambda: ("python3 check.py", ["python3 check.py"]),
-            wt_git=lambda *a: sh.R(0, "", "", []), build_facts=lambda: {
+            build_facts=lambda: {
                 "validation_results": [], "validation_attempts": []}, evidence_lines=lambda: "",
             verification=lambda *a: "", part_scope=lambda *a: "", spec_comments=lambda: "",
             setup_tree=Mock(side_effect=AssertionError("setup before readiness")))
@@ -900,7 +887,7 @@ class GitCapabilityTests(unittest.TestCase):
         failure = sh.DriverError("Git capability readiness: control")
         # Exercise the real shared-driver seam: refusal must precede catch-up and setup.
         fake = SimpleNamespace(env=SimpleNamespace(runtime=cfg, main=self.root, default="main", dry=False),
-                               worktree=target, branch="ouro/test")
+                               tree=SimpleNamespace(path=target), branch="ouro/test")
         with patch.object(git_capabilities, "git_readiness", side_effect=failure) as readiness:
             with self.assertRaisesRegex(sh.DriverError, "configuration independent"):
                 driver.Run.ensure_worktree(fake)

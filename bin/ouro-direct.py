@@ -343,14 +343,11 @@ def _changes(read, pairs):
     return sorted(paths), total
 
 
-def _matched(read, pairs, specs, paths):
+def _matched(read, ob, base, head, specs, paths):
     if not specs:
         return set(paths)
-    found = set()
-    for parent, commit in pairs:
-        _, raw = read("diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
-                     "--ignore-submodules=none", parent, commit, "--", *specs)
-        found.update(_path(p) for p in raw.split(b"\0") if p)
+    _, raw = read(*ob.changed_diff(base, head, specs))
+    found = {_path(p) for p in raw.split(b"\0") if p}
     if not found <= set(paths):
         raise Unproved("gate selector disagrees with change inventory")
     return found
@@ -427,7 +424,7 @@ def plan(repo, base, head):
         for ordinal, gate in enumerate(data.get("gate", []), 1):
             if not gate.get("cheap") and not gate.get("direct_code_check"):
                 continue
-            matched = _matched(read, pairs, gate.get("paths"), paths)
+            matched = _matched(read, ob, base, head, gate.get("paths"), paths)
             covered = sorted(code & matched) if gate.get("direct_code_check") else []
             if not matched or not gate.get("cheap") and not covered:
                 continue

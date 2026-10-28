@@ -15,8 +15,8 @@ area = []
 type = []
 
 [[gate]]
-areas = ["*"]
 run = "uv run pytest -q"
+# paths = ["src/", "tests/"]               # optional -- run only when the diff touches one; none: every change
 # ci = "uv run pytest -q"                # optional -- what CI runs in place of `run`, when a gate's
                                           # `run` is a dev-box wrapper CI cannot run as written
 

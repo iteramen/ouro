@@ -23,11 +23,11 @@ class WorkflowExecutor:
     def check_platform(self):
         """Availability is the modeled dependency; the real platform check is unchanged."""
 
-    def check_inputs(self, current, head):
+    def check_inputs(self, current, head, hint):
         return None if validation.inputs_match(current, head) else 1
 
-    def validate(self, current, pending, *, reuse=False, execute_missing=True):
-        assert current.worktree.resolve().is_relative_to(self.fixture)
+    def validate(self, current, pending, hint, *, reuse=False, execute_missing=True):
+        assert current.path.resolve().is_relative_to(self.fixture)
         head = current.head()
         validation.clean(current, head)
         commands = [row["cmd"] for row in pending]
@@ -44,7 +44,7 @@ class WorkflowExecutor:
         results = []
         for i, command in enumerate(commands):
             argv, environment = validation.command(command)
-            result = sh.run(sh.argv_for(*argv), cwd=current.worktree, env=environment, timeout=30)
+            result = sh.run(sh.argv_for(*argv), cwd=current.path, env=environment, timeout=30)
             log = directory / f"{i}.log"
             log.write_text(result.out + result.err, encoding="utf-8")
             results.append({"cmd": command, "sha": head, "exit": result.code,

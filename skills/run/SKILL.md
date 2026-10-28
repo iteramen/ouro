@@ -13,7 +13,9 @@ description: >
 `<ouro>` is the plugin root: `${CLAUDE_PLUGIN_ROOT}` in Claude, or the root named by the installed Codex wrapper.
 
 1. **Bind.** Read `.claude/ouro.toml` at the repo root. None, or one that fails
-   `python3 <ouro>/bin/ouro-binding.py check`: refuse and say so.
+   `python3 <ouro>/bin/ouro-binding.py check`: refuse and say so. macOS normal PRs use
+   owner-declared CI validation; the binding's Validation authority section gives the
+   migration/resume recipe. Uncovered caller obligations retain native-Linux validation.
 2. **Run** from the repo's main checkout:
 
    ```bash

@@ -14,7 +14,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from .sh import DriverError
+from .records import parse_parts
+from .sh import DriverError, Refused, say
 
 BUDGET = 3.0
 LIMIT = 256 * 1024
@@ -56,12 +57,6 @@ class Coordination:
         except (ValueError, TypeError):
             raise ValueError("coordination.endpoint requires HTTPS (HTTP only on loopback), without URL credentials, query or fragment") from None
         return cls(data["endpoint"], data["person"], data["forum"], name)
-
-
-def worker_env(settings):
-    """None removes the inherited credential at the subprocess boundary."""
-    config = settings.coordination
-    return {config.credential_env: None} if config else {}
 
 
 @dataclass(frozen=True)
@@ -337,7 +332,6 @@ class Claim:
 
     def notice(self):
         if not self.noticed:
-            from .sh import say
             say("Coordination unavailable; continuing without complete board evidence.")
             self.noticed = True
 
@@ -416,7 +410,6 @@ class Claim:
 
     def retire_completed(self, detail, ident, deadline):
         """Recognize a completed part only through its original local correlation and GitHub checklist."""
-        from .run import parse_parts
         data = self.metadata(detail)
         if not data or not isinstance(data.get("identity"), dict):
             return False
@@ -529,7 +522,7 @@ class Claim:
 
     def body(self, outcome, conflicts=()):
         r, e = self.run, self.env
-        cwd = r.worktree if (r.worktree / ".git").exists() else e.main
+        cwd = r.tree.path if (r.tree.path / ".git").exists() else e.main
         head = e.git("rev-parse", "HEAD", cwd=cwd).out.strip()
         record = dict(self.data, kind="issue-claim", branch=r.branch, head=head, outcome=outcome,
                       scope=dict(paths=[], areas=list(getattr(r, "areas", []))))
@@ -555,8 +548,7 @@ class Claim:
 
     def survey(self, kind, deadline, scope=None):
         owned, conflicts, incomplete = self.discover(deadline, scope)
-        if conflicts and not getattr(self.env, "override_claim", False):
-            from .sh import Refused
+        if conflicts and not self.run.options.override_claim:
             holders = ", ".join(f"{c['holder']} (thread {self.safe(c['thread'])})" for c in conflicts)
             raise Refused(f"known {kind} claim held by {holders}; the invoking person may use --override-claim")
         if incomplete:

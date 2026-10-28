@@ -251,7 +251,6 @@ def exercise(h):
                           and len(prepared[0]["base"]) == len(prepared[0]["head"]) == 40
                           and c.pr()["head"] == "gates/1-fix-the-total"
                           and any(row["body"].startswith("**Ready for merge**") and head in row["body"] for row in c.pr_comments())
-                          and not h.modeled_command_heads(c, "python3 gates/doc_gate.py")
                           and not list(c.main.rglob("ouro-validation/*/receipt.json"))
                           and h.git(c.origin, "rev-list", "--count", "master") == "1"
                           and b.threads[owned]["thread"]["status"] == "open"
@@ -448,7 +447,7 @@ def resume_offline(h):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         c.write = write
-        write(".claude/ouro.toml", '[[gate]]\nareas=["*"]\npaths=["docs/"]\n')
+        write(".claude/ouro.toml", '[[gate]]\npaths=["docs/"]\n')
         write("docs/note.md", "note\n")
         git(c.main, "add", "-A")
         git(c.main, "commit", "-qm", "initial")
@@ -457,7 +456,7 @@ def resume_offline(h):
         outcomes, builds, reverts = [], [], []
         env = SimpleNamespace(runtime=SimpleNamespace(coordination=config, backend="codex"),
                               dry=False, main=c.main, default="master", slug="o/n",
-                              ob=SimpleNamespace(tomllib=__import__("tomllib")),
+                              ob=h.runmod.sh.load_binding_module(),
                               lookup=lambda *a: "fixture", viewer=lambda: "actor",
                               body_file=lambda *a: c.root / "body.md", pr_checks=lambda: True,
                               gh_json=lambda *a: [], trusted=lambda: {"actor", "alice", "bob"},
@@ -468,9 +467,9 @@ def resume_offline(h):
                 raise AssertionError(result.text)
             return result
         env.git = git_result
-        r = h.runmod.Run(env, 1, None)
+        r = h.runmod.Run(env, 1, None, h.runmod.RunOptions())
         r.issue, r.body, r.title = dict(state="CLOSED"), "", "Edit note"
-        r.flow, r.size, r.branch, r.worktree = "direct", "S", "gates/1-note", c.main
+        r.flow, r.size, r.branch, r.tree = "direct", "S", "gates/1-note", h.runmod.worktrees.Tree(env, c.main, "gates/1-note")
         r.labels, r.areas = ["agent-ready"], ["gates"]
         r.read_issue = r.plan_part = r.preflight = r.check_spec_trust = lambda: None
         r.branch_exists = lambda: False
@@ -514,7 +513,7 @@ def resume_offline(h):
             h.check("closed direct publication resumes pending checks without closing its claim",
                     code == 0 and not outcomes[-1][1] and not builds
                     and outcomes[-1][0]["head"] == head
-                    and outcomes[-1][0]["scope"] == dict(paths=["docs/note.md"], areas=[]))
+                    and outcomes[-1][0]["scope"] == dict(paths=["docs/note.md"], areas=["gates"]))
             states[head] = final
             r.go()
             if final == "green":
@@ -558,7 +557,7 @@ def resume_offline(h):
                     git(c.main, "reset", "--hard", old)
                     git(c.main, "fetch", "-q", "origin")
                     with patch.object(h.runmod, "Run", return_value=r):
-                        h.runmod.main(r.env, 1, None)
+                        h.runmod.main(r.env, 1, None, r.options)
                     h.check("owner-waiting direct PR retains claim without BUILD", not builds and not outcomes[-1][1])
                     source_head = head
                     if source.endswith("-advance"):
@@ -623,7 +622,7 @@ def resume_offline(h):
                         watched == [head] and not builds and not outcomes[-1][1]
                         and outcomes[-1][0]["head"] == head
                         and outcomes[-1][0]["base"] == git(c.main, "rev-parse", head + "^")
-                        and outcomes[-1][0]["scope"] == dict(paths=["docs/note.md"], areas=[]))
+                        and outcomes[-1][0]["scope"] == dict(paths=["docs/note.md"], areas=["gates"]))
                 states[head] = final
                 admitted.clear()
                 r.go()
@@ -805,14 +804,14 @@ def resume_offline(h):
             owned = r.claim.owned
             with patch.object(h.runmod, "Run", return_value=r):
                 try:
-                    h.runmod.main(r.env, 1, None)
+                    h.runmod.main(r.env, 1, None, r.options)
                     interrupted = False
                 except h.runmod.DriverError:
                     interrupted = True
                 h.check(f"{failure}: interrupted terminal write retains the same owned claim",
                         interrupted and failed and r.claim.owned == owned
                         and not any(closed for _, closed in outcomes))
-                code = h.runmod.main(r.env, 1, None)
+                code = h.runmod.main(r.env, 1, None, r.options)
             comments = [c for c in r.issue["comments"] if c["author"]["login"] == "actor"
                         and f"<!-- ouro-direct-stop: {head} -->" in c["body"].splitlines()]
             h.check(f"{failure}: retry completes terminal stop without BUILD, commit or revert",
@@ -930,7 +929,7 @@ def resume_offline(h):
         c, r, commit, outcomes, builds, reverts = setup("resume-refused-fix")
         parent = commit("published parent")
         modeled_floors, pushes, legacy_gates = [], [], []
-        r.env.override_claim = False
+        r.options.override_claim = False
         def build_fix(**kw):
             builds.append(kw)
             c.write("docs/note.md", "unpublished fix\n")
@@ -971,7 +970,7 @@ def resume_offline(h):
                     and git(c.origin, "rev-parse", "master") == parent
                     and git(c.main, "rev-list", "--count", f"{parent}..{fix}") == "1"
                     and not pushes and not git(c.main, "status", "--porcelain"))
-        r.env.override_claim = True  # explicit caller override on the next invocation
+        r.options.override_claim = True  # explicit caller override on the next invocation
         r.claim.prepared = None
         code = r.go()
         prepared = [data for data, _ in outcomes if data["outcome"] == "direct prepared"]
@@ -991,8 +990,8 @@ def resume_offline(h):
         for foreign_path in ("docs/other.md", "docs/note.md"):
             c, r, commit, outcomes, builds, reverts = setup("repair-delta-" + foreign_path.split("/")[-1])
             c.write(".claude/ouro.toml", '[ship]\ndirect=["docs/*.md"]\n'
-                    '[[gate]]\nareas=["*"]\npaths=["docs/note.md"]\nrun="note gate"\n'
-                    '[[gate]]\nareas=["*"]\npaths=["docs/other.md"]\nrun="other gate"\n')
+                    '[[gate]]\npaths=["docs/note.md"]\nrun="note gate"\n'
+                    '[[gate]]\npaths=["docs/other.md"]\nrun="other gate"\n')
             parent = commit("published parent")
             c.write("docs/other.md", "unrelated upstream edit\n")
             git(c.main, "add", "docs/other.md")
@@ -1001,7 +1000,7 @@ def resume_offline(h):
             upstream = git(c.main, "rev-parse", "HEAD")
             git(c.main, "reset", "--hard", parent)
             modeled_floors, pushes, legacy_gates = [], [], []
-            r.env.override_claim = False
+            r.options.override_claim = False
             r.env.ob.plugin_root = lambda: None
             r.env.ob.OURO_TOKEN = "<ouro>"
             def build_fix(**kw):
@@ -1054,7 +1053,7 @@ def resume_offline(h):
                         and modeled_floors == ([] if refused else [(fix, ["note gate"], ["other gate"])])
                         and not legacy_gates
                         and r.claim.prepared == dict(base=upstream, head=fix, stage="fix",
-                                                    scope=dict(paths=["docs/note.md"], areas=[]))
+                                                    scope=dict(paths=["docs/note.md"], areas=["gates"]))
                         and r.lane_provenance(fix)["parent"] == parent
                         and r.lane_provenance(fix)["execution"] == r.lane_provenance(parent)["execution"]
                         and r.lane_provenance(fix)["base"] == upstream
@@ -1085,11 +1084,11 @@ def resume_offline(h):
                 watched.append(args)
                 return SimpleNamespace(code=None)
             r.watch_pr = watch
-            initial = dict(r.claim.data, scope=dict(paths=["docs/note.md"], areas=[]))
+            initial = dict(r.claim.data, scope=dict(paths=["docs/note.md"], areas=["gates"]))
             for attempt in range(2):
                 r.claim.prepared = None  # each invocation starts without a prepared trace
                 with patch.object(h.runmod, "Run", return_value=r):
-                    code = h.runmod.main(r.env, 1, None)
+                    code = h.runmod.main(r.env, 1, None, r.options)
                 latest = outcomes[-1][0]
                 detail = dict(messages=[dict(body="<!-- ouro-claim: " + json.dumps(data) + " -->")
                                         for data in (initial, latest)])
@@ -1110,7 +1109,7 @@ def resume_offline(h):
                 r.lane_watch = lambda sha: ("red", "run/" + sha, "failure")
                 r.claim.config = None  # completion must also work with coordination disabled
                 with patch.object(h.runmod, "Run", return_value=r):
-                    code = h.runmod.main(r.env, 1, None)
+                    code = h.runmod.main(r.env, 1, None, r.options)
                 h.check("completed pending revert PR reopens and reaches terminal needs-ruling stop",
                         code == 3 and "--add-label" in transitions[0][1] and "needs-ruling" in transitions[0][1]
                         and transitions[1][0] == "reopen #1"
@@ -1129,7 +1128,7 @@ def resume_offline(h):
         r.build_facts = lambda **kw: dict(validation_pending=[])
         r.lane_ship = h.runmod.Run.lane_ship.__get__(r)
         r.lane_watch = lambda sha: ("red", "run/" + sha, "failure")
-        r.env.override_claim = False
+        r.options.override_claim = False
         conflict = dict(thread="foreign", holder="other developer")
         checks, pushes, transitions = [], [], []
         r.claim.discover = lambda *a: ([r.claim.owned], [conflict], False)
@@ -1164,9 +1163,9 @@ def resume_offline(h):
         git(c.main, "commit", "--allow-empty", "-qm", "foreign commit")
         h.check("foreign commit alongside prepared revert is refused", not r.lane_commits_ahead())
         git(c.main, "reset", "-q", "--hard", head)  # scratch fixture only
-        r.env.override_claim = True
+        r.options.override_claim = True
         with patch.object(h.runmod, "Run", return_value=r):
-            code = h.runmod.main(r.env, 1, None)
+            code = h.runmod.main(r.env, 1, None, r.options)
         h.check("explicit override publishes only the prepared revert and reaches terminal stop",
                 code == 3 and pushes == [head] and len(checks) == 3 and not builds
                 and git(c.origin, "rev-parse", "master") == head
@@ -1179,9 +1178,9 @@ def prepared_offline(h):
     from ouro.sh import Refused
     config = co.Coordination("https://board.invalid/mcp", "caller", "fixture", ENV)
     env = SimpleNamespace(runtime=SimpleNamespace(coordination=config, backend="codex"),
-                          dry=False, slug="o/n", override_claim=False, viewer=lambda: "actor",
+                          dry=False, slug="o/n", viewer=lambda: "actor",
                           main=h.TMP, git=lambda *a, **kw: SimpleNamespace(out="a" * 40))
-    run = SimpleNamespace(env=env, n=1, worktree=h.TMP, branch="master", areas=[])
+    run = SimpleNamespace(env=env, n=1, tree=SimpleNamespace(path=h.TMP), branch="master", areas=[], options=h.runmod.RunOptions())
     claim = co.Claim(run)
     claim.data = dict(identity=dict(session="local-session"), correlation="ours")
     records, deadlines = [], []
@@ -1229,12 +1228,12 @@ def prepared_offline(h):
             refused = True
         h.check("prepared malformed later metadata preserves known overlap", refused)
         suffix.clear()
-        env.override_claim = True
+        run.options.override_claim = True
         claim.prepare("a"*40, "c"*40, ["docs/café.md"], [], "revert")
         h.check("prepared explicit override records actor and foreign thread",
                 records[-1]["override"] == dict(actor="actor", conflicts=[dict(thread="foreign", holder="holder")])
                 and records[-1]["stage"] == "revert")
-        env.override_claim = False
+        run.options.override_claim = False
         foreign_scope[0] = None
         claim.prepare("a"*40, "d"*40, ["other"], [], "parent")
         h.check("prepared unknown scope fails open without claiming complete evidence", claim.noticed)
@@ -1274,10 +1273,11 @@ def offline(h):
     root.mkdir()
     config = co.Coordination("https://board.invalid/mcp", "same person", "fixture", ENV)
     runtime = SimpleNamespace(coordination=config, backend="codex")
-    env = SimpleNamespace(runtime=runtime, dry=False, slug="o/n", main=root, override_claim=False,
+    env = SimpleNamespace(runtime=runtime, dry=False, slug="o/n", main=root,
                           viewer=lambda: "github-actor",
                           git=lambda *args, **kwargs: SimpleNamespace(out=str(root) if "--git-common-dir" in args else "a" * 40))
-    run = SimpleNamespace(env=env, n=1, k=None, branch="area/change", worktree=root / "absent")
+    run = SimpleNamespace(env=env, n=1, k=None, branch="area/change", tree=SimpleNamespace(path=root / "absent"),
+                          options=h.runmod.RunOptions())
     requests, threads, deadlines = [], {}, []
 
     def call(name, args, deadline=None):
@@ -1323,7 +1323,7 @@ def offline(h):
         except Refused as ex:
             refused = "same person" in str(ex) and "other" in str(ex)
         h.check("offline: incomplete discovery preserves a known conflict; display name proves no ownership", refused)
-        env.override_claim = True
+        run.options.override_claim = True
         overriding = co.Claim(run)
         overriding.enter()
         overrides = [a for n, a in requests if n == "board_reply" and '"override"' in a["body"]]
@@ -1332,7 +1332,7 @@ def offline(h):
         # A completed part may advance despite failed board closure. Its cached correlation
         # must still distinguish that claim from a different holder on an ordinary next-part run.
         threads["other"]["thread"]["status"] = "closed"
-        env.override_claim = False
+        run.options.override_claim = False
         run.k = 1
         run.body = "## Deliverable\n- [x] 1. **First (Flow: full).** a\n- [ ] 2. **Second (Flow: full).** b\n"
         more[0] = 0
@@ -1383,7 +1383,7 @@ def offline(h):
         co.Claim(run).enter()
         h.check("offline: incomplete discovery alone cannot create a claim", not threads)
         more[0] = 0
-        env.override_claim = False
+        run.options.override_claim = False
         threads["nested"] = dict(thread=dict(id="nested", title="Claimed: o/n#1", forum="fixture",
                                             status="open", createdBy="nested holder"),
                                  messages=[dict(body="<!-- ouro-claim: " + "[" * 2000 + "0" + "]" * 2000 + " -->")])

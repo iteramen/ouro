@@ -10,10 +10,13 @@ Usage:
         Print one value: strings raw, everything else as JSON. List entries by index
         (gate.0.run). Exit 1 if the key is absent, except that an absent ship.sync or
         ship.merge is answered from the [ship].landing preset, when one is declared.
-    python3 ouro-binding.py gates <area-label> [path]
-        Print the `run` command of every [[gate]] whose areas contain the label or "*",
-        one per line, in binding order, each with every <ouro> replaced by this script's
-        own plugin root.
+    python3 ouro-binding.py gates [--changed <base> [--head <rev>]] [--json] [path]
+        Print the `run` command of every [[gate]], one per line, in binding order, each with
+        every <ouro> replaced by this script's own plugin root. With --changed, only the gates
+        that run for the diff from the merge base of <base> and <rev> (default HEAD): one with
+        no paths always runs, one with paths when the diff touches one of them. Exit 1 with an
+        error when that diff cannot be read. --json prints the selected [[gate]] tables as
+        `get gate` does instead of their runs.
     python3 ouro-binding.py direct <path>... [--binding <path>]
         Read ship.direct and print, one per line, each given path that matches no glob
         (fnmatch.fnmatchcase on the path as given). Exit 1 when any is printed, 0 when all
@@ -125,7 +128,7 @@ OURO_TOKEN = "<ouro>"
 SCHEMA = {
     "repo": {"slug": str, "default_branch": str, "protected_branch_prefixes": list, "branch_prefix": str, "checkout": str, "setup": str, "release_notes": list},
     "labels": {"scope": list, "area": list, "type": list},
-    "gate": {"areas": list, "run": str, "ci": str, "paths": list, "cheap": bool, "direct_code_check": bool},
+    "gate": {"run": str, "ci": str, "paths": list, "cheap": bool, "direct_code_check": bool},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
              "external_effort": str, "test_first_for_bugs": bool, "forbidden_check": str, "direct": list,
@@ -221,9 +224,9 @@ def validate(data):
                 errors.append("gate: must be an array of tables ([[gate]])")
                 continue
             for i, g in enumerate(gates):
-                _check_table(f"gate.{i}", g, spec, errors)
-                if not g.get("areas"):
-                    errors.append(f"gate.{i}.areas: required and non-empty")
+                _check_table(f"gate.{i}", {k: v for k, v in g.items() if k != "areas"}, spec, errors)
+                if "areas" in g:
+                    errors.append(f"gate.{i}.areas: paths is the only gate selector; delete areas, and give the gate paths to scope it (one without paths runs on every change)")
                 if not g.get("run"):
                     errors.append(f"gate.{i}.run: required and non-empty")
                 elif isinstance(g["run"], str) and OURO_TOKEN in g["run"] and plugin_root() is None:
@@ -414,9 +417,34 @@ def _no_plugin_root():
     return f"{OURO_TOKEN} is the plugin root, and this copy sits in {Path(__file__).resolve().parent}, outside any ouro plugin, where the token names nothing"
 
 
-def gate_runs(data, area):
-    """Every matching [[gate]]'s run, in binding order, with <ouro> replaced by the plugin root."""
-    runs = [g["run"] for g in data.get("gate", []) if area in g.get("areas", []) or "*" in g.get("areas", [])]
+# The one diff every gate selector reads: from the merge base of base and head to head, with no
+# rename pairing and no configured diff helper or text conversion, which the repository's own
+# configuration could point at a command. --name-only lists the touched paths; git exits nonzero
+# only when it cannot read the diff.
+def changed_diff(base, head, paths):
+    return ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
+            "--ignore-submodules=none", f"{base}...{head}", "--", *paths]
+
+
+def selected(data, touches=None):
+    """The [[gate]] entries that run, in binding order: one with no paths always, one with paths when
+    `touches(paths)` says the diff touches one of them. No `touches` selects every gate."""
+    return [g for g in data.get("gate", []) if touches is None or not g.get("paths") or touches(g["paths"])]
+
+
+def git_touches(base, head):
+    """`touches` for `selected`, reading changed_diff in the working directory's repository."""
+    def touches(paths):
+        r = subprocess.run(["git", *changed_diff(base, head, paths)], capture_output=True)
+        if r.returncode:
+            sys.exit(f"error: the diff {base}...{head} cannot be read: {r.stderr.decode('utf-8', 'replace').strip()}")
+        return bool(r.stdout.strip(b"\0"))
+    return touches
+
+
+def gate_runs(gates):
+    """Each gate's run, in order, with <ouro> replaced by the plugin root."""
+    runs = [g["run"] for g in gates]
     if not any(isinstance(run, str) and OURO_TOKEN in run for run in runs):
         return runs
     root = plugin_root()
@@ -554,10 +582,10 @@ def main(argv):
             return 1
         print("ok")
         return 0
-    if len(rest) < 1:
-        sys.exit(f"usage: ouro-binding.py {cmd} <{'dotted.key' if cmd == 'get' else 'area-label'}> [path]")
-    data = load(rest[1] if len(rest) > 1 else None)
     if cmd == "get":
+        if len(rest) < 1:
+            sys.exit("usage: ouro-binding.py get <dotted.key> [path]")
+        data = load(rest[1] if len(rest) > 1 else None)
         try:
             value = lookup(data, rest[0])
         except (KeyError, IndexError, ValueError):
@@ -566,8 +594,19 @@ def main(argv):
                 sys.exit(f"error: no such key: {rest[0]}")
         print(value if isinstance(value, str) else json.dumps(value))
         return 0
-    for run in gate_runs(data, rest[0]):
-        print(run)
+    base, head, as_json, where = None, "HEAD", False, None
+    while rest:
+        arg, rest = rest[0], rest[1:]
+        if arg in ("--changed", "--head") and rest:
+            base, head = (rest[0], head) if arg == "--changed" else (base, rest[0])
+            rest = rest[1:]
+        elif arg == "--json" or (where is None and not arg.startswith("-")):
+            as_json, where = (True, where) if arg == "--json" else (as_json, arg)
+        else:
+            sys.exit("usage: ouro-binding.py gates [--changed <base> [--head <rev>]] [--json] [path]")
+    gates = selected(load(where), None if base is None else git_touches(base, head))
+    for line in [json.dumps(gates)] if as_json else gate_runs(gates):
+        print(line)
     return 0
 
 
@@ -578,11 +617,10 @@ schema = 1
 slug = "owner/name"
 default_branch = "main"
 [[gate]]
-areas = ["*"]
 run = "make test"
 [[gate]]
-areas = ["core"]
 run = "make core-test"
+paths = ["core/"]
 [ship]
 policy = "stop-at-pr"
 review = "adversarial-review"
@@ -630,11 +668,37 @@ ruling_approvers = ["someone"]
     ch = chr(0x6587)
     with tempfile.TemporaryDirectory() as tmp:
         binding = Path(tmp) / "ouro.toml"
-        binding.write_text(base + f'[[gate]]\nareas = ["*"]\nrun = "echo {ch}"\n[labels]\narea = ["{ch}"]\ntype = ["{ch}"]\n', encoding="utf-8")
-        for args, code, want in ((["check"], 1, f"both contain: {ch}"), (["get", "labels.area.0"], 0, ch), (["gates", "core"], 0, f"echo {ch}")):
+        binding.write_text(base + f'[[gate]]\nrun = "echo {ch}"\n[labels]\narea = ["{ch}"]\ntype = ["{ch}"]\n', encoding="utf-8")
+        for args, code, want in ((["check"], 1, f"both contain: {ch}"), (["get", "labels.area.0"], 0, ch), (["gates"], 0, f"echo {ch}")):
             got = subprocess.run([sys.executable, this, *args, str(binding)], capture_output=True, env={**os.environ, "PYTHONIOENCODING": "cp1252"})
             out, err = got.stdout.decode("utf-8", errors="replace"), got.stderr.decode("utf-8", errors="replace")
             assert got.returncode == code and want in out and "Traceback" not in err, (args, got.returncode, out, err)
+
+    # paths is the only selector: areas is refused with its remedy, and --changed selects by the
+    # diff from the merge base, a gate with no paths on every change; an unreadable diff is an error.
+    refused = validate(tomllib.loads(base.replace('run = "make test"', 'areas = ["*"]\nrun = "make test"')))
+    assert [e for e in refused if e.startswith("gate.0.areas: paths is the only gate selector")], refused
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        def commit(name):
+            (Path(tmp) / name).parent.mkdir(exist_ok=True)
+            (Path(tmp) / name).write_text(name, encoding="utf-8")
+            for args in (["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t.invalid", "commit", "-qm", name]):
+                subprocess.run(["git", *args], cwd=tmp, capture_output=True, check=True)
+        subprocess.run(["git", "init", "-q"], cwd=tmp, capture_output=True, check=True)
+        commit("a.txt")
+        subprocess.run(["git", "branch", "start"], cwd=tmp, capture_output=True, check=True)
+        commit("core/x.txt")
+        binding = Path(tmp).parent / (Path(tmp).name + "-ouro.toml")
+        binding.write_text(base, encoding="utf-8")
+        try:
+            for args, code, want in ((["--changed", "start"], 0, "make test\nmake core-test\n"), (["--changed", "HEAD"], 0, "make test\n"),
+                                     (["--changed", "start", "--head", "start"], 0, "make test\n"), (["--changed", "no-such-rev"], 1, "")):
+                got = subprocess.run([sys.executable, this, "gates", *args, str(binding)], cwd=tmp, capture_output=True, encoding="utf-8")
+                assert (got.returncode, got.stdout) == (code, want) and (code == 0 or "cannot be read" in got.stderr), (args, got)
+            got = subprocess.run([sys.executable, this, "gates", "--changed", "HEAD", "--json", str(binding)], cwd=tmp, capture_output=True, encoding="utf-8")
+            assert json.loads(got.stdout) == [{"run": "make test"}], got
+        finally:
+            binding.unlink()
 
     valid = tomllib.loads(base + "\n[overlays]\nimplement = []\nland = []\n")
     assert validate(valid) == [], validate(valid)
@@ -651,8 +715,8 @@ ruling_approvers = ["someone"]
     for table, key in (("models", "verifier"), ("rolling_issues", "drift_audit"), ("overlays", "drift")):
         errs = validate(tomllib.loads(base + f'\n[{table}]\n{key} = "x"\n'))
         assert any(f"unknown key: {table}.{key}" in e for e in errs), (table, key, errs)
-    assert gate_runs(valid, "core") == ["make test", "make core-test"]
-    assert gate_runs(valid, "ui") == ["make test"]
+    assert gate_runs(selected(valid)) == ["make test", "make core-test"]
+    assert gate_runs(selected(valid, lambda paths: False)) == ["make test"]
     assert lookup(valid, "gate.1.run") == "make core-test"
 
     # Validation authority belongs to the repository, not the developer backend.
@@ -691,30 +755,30 @@ ruling_approvers = ["someone"]
     # caller splits on, a trailing one included; a run without one is still accepted.
     for brk in ("\n", "\r", "\u2028"):
         for run in (f"make a{brk}make b", f"make a{brk}"):
-            broken = tomllib.loads(base + f'[[gate]]\nareas = ["*"]\nrun = {json.dumps(run)}\n')
+            broken = tomllib.loads(base + f'[[gate]]\nrun = {json.dumps(run)}\n')
             assert any(e.startswith("gate.2.run: ") and "line break" in e for e in validate(broken)), (run, validate(broken))
-    one_line = tomllib.loads(base + '[[gate]]\nareas = ["*"]\nrun = "make a && make b"\n')
+    one_line = tomllib.loads(base + '[[gate]]\nrun = "make a && make b"\n')
     assert validate(one_line) == [], validate(one_line)
 
     # ci is optional and checked the same way as run: a gate without it is unchanged, one with a
     # non-empty single-line ci is accepted and readable through get, an empty ci is refused, and a
     # ci holding a line break is refused the same way a run's would be.
-    without_ci = tomllib.loads(base + '\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\n')
+    without_ci = tomllib.loads(base + '\n[[gate]]\nrun = "make syntax"\n')
     assert validate(without_ci) == [], validate(without_ci)
-    with_ci = tomllib.loads(base + '\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\nci = "make syntax-ci"\n')
+    with_ci = tomllib.loads(base + '\n[[gate]]\nrun = "make syntax"\nci = "make syntax-ci"\n')
     assert validate(with_ci) == [], validate(with_ci)
     assert lookup(with_ci, "gate.2.ci") == "make syntax-ci"
-    empty_ci = tomllib.loads(base + '\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\nci = ""\n')
+    empty_ci = tomllib.loads(base + '\n[[gate]]\nrun = "make syntax"\nci = ""\n')
     errs = validate(empty_ci)
     assert errs == ["gate.2.ci: must be non-empty"], errs
     for brk in ("\n", "\r", "\u2028"):
-        broken_ci = tomllib.loads(base + f'[[gate]]\nareas = ["*"]\nrun = "make syntax"\nci = {json.dumps(f"make a{brk}make b")}\n')
+        broken_ci = tomllib.loads(base + f'[[gate]]\nrun = "make syntax"\nci = {json.dumps(f"make a{brk}make b")}\n')
         assert any(e.startswith("gate.2.ci: ") and "line break" in e for e in validate(broken_ci)), (brk, validate(broken_ci))
 
     # paths is optional: a gate without it is the without_ci row above, one with a non-empty list
     # of non-empty pathspecs is accepted and readable through get. An empty list is refused rather
     # than read as no paths, so it cannot mean both "always runs" and "never selected".
-    with_paths = tomllib.loads(base + '\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\npaths = ["bin/", "*.toml"]\n')
+    with_paths = tomllib.loads(base + '\n[[gate]]\nrun = "make syntax"\npaths = ["bin/", "*.toml"]\n')
     assert validate(with_paths) == [], validate(with_paths)
     assert lookup(with_paths, "gate.2.paths.0") == "bin/"
     for paths, want in (('"bin/"', "gate.2.paths: expected list"),
@@ -722,22 +786,22 @@ ruling_approvers = ["someone"]
                         ('[""]', "gate.2.paths: every entry must be a non-empty pathspec"),
                         ('["bin/", ""]', "gate.2.paths: every entry must be a non-empty pathspec"),
                         ("[1]", "gate.2.paths: every entry must be a string")):
-        errs = validate(tomllib.loads(base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\npaths = {paths}\n'))
+        errs = validate(tomllib.loads(base + f'\n[[gate]]\nrun = "make syntax"\npaths = {paths}\n'))
         assert errs == [want], (paths, errs)
 
     # cheap is optional and a boolean: true and false pass, a string or a number is refused, naming the gate.
     for value, want in (("true", []), ("false", []), ('"yes"', ["gate.2.cheap: expected bool"]), ("1", ["gate.2.cheap: expected bool"])):
-        errs = validate(tomllib.loads(base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\ncheap = {value}\n'))
+        errs = validate(tomllib.loads(base + f'\n[[gate]]\nrun = "make syntax"\ncheap = {value}\n'))
         assert errs == want, (value, errs)
 
     for value in ("true", "false"):
-        scoped = base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\npaths = ["src/"]\ndirect_code_check = {value}\n'
+        scoped = base + f'\n[[gate]]\nrun = "make syntax"\npaths = ["src/"]\ndirect_code_check = {value}\n'
         assert validate(tomllib.loads(scoped)) == []
     assert any("direct_code_check: requires" in e for e in validate(tomllib.loads(
-        base + '\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\ndirect_code_check = true\n')))
+        base + '\n[[gate]]\nrun = "make syntax"\ndirect_code_check = true\n')))
     for value in ('"true"', "1"):
         assert any("direct_code_check: expected bool" in e for e in validate(tomllib.loads(
-            base + f'\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\npaths = ["src/"]\ndirect_code_check = {value}\n')))
+            base + f'\n[[gate]]\nrun = "make syntax"\npaths = ["src/"]\ndirect_code_check = {value}\n')))
     for key in ("direct_max_lines", "direct_max_files"):
         for value in ("1", "20"):
             assert validate(tomllib.loads(base.replace("[ship]\n", f"[ship]\n{key} = {value}\n"))) == []
@@ -747,21 +811,21 @@ ruling_approvers = ["someone"]
 
     # A run may name the plugin root with <ouro>: check accepts it, gates hands out the expansion,
     # and a run without the token is untouched.
-    token = tomllib.loads(base + '\n[[gate]]\nareas = ["*"]\nrun = "pwsh -File <ouro>/bin/x.ps1"\n')
+    token = tomllib.loads(base + '\n[[gate]]\nrun = "pwsh -File <ouro>/bin/x.ps1"\n')
     # Vendor-Ouro.ps1 copies the suites into a consumer tree, where this file has no plugin root
     # and these two rows do not apply; the rows below them hold everywhere.
     root = plugin_root()
     if root is not None:
         assert validate(token) == [], validate(token)
-        assert gate_runs(token, "ui") == ["make test", f"pwsh -File {root}/bin/x.ps1"], gate_runs(token, "ui")
+        assert gate_runs(selected(token)) == ["make test", "make core-test", f"pwsh -File {root}/bin/x.ps1"], gate_runs(selected(token))
         # A non-string run is check's finding to name; gates hands it on untouched rather than
         # raise on its way past the token-bearing one beside it.
-        mixed = tomllib.loads(base + '\n[[gate]]\nareas = ["*"]\nrun = "pwsh -File <ouro>/bin/x.ps1"\n\n[[gate]]\nareas = ["*"]\nrun = 7\n')
-        assert gate_runs(mixed, "ui") == ["make test", f"pwsh -File {root}/bin/x.ps1", 7], gate_runs(mixed, "ui")
+        mixed = tomllib.loads(base + '\n[[gate]]\nrun = "pwsh -File <ouro>/bin/x.ps1"\n\n[[gate]]\nrun = 7\n')
+        assert gate_runs(selected(mixed)) == ["make test", "make core-test", f"pwsh -File {root}/bin/x.ps1", 7], gate_runs(selected(mixed))
 
         # ci is refused the same way run is when it names <ouro> and the copy has no plugin root;
         # this copy has one, so a ci naming the token is accepted here.
-        ci_token = tomllib.loads(base + '\n[[gate]]\nareas = ["*"]\nrun = "make syntax"\nci = "pwsh -File <ouro>/bin/y.ps1"\n')
+        ci_token = tomllib.loads(base + '\n[[gate]]\nrun = "make syntax"\nci = "pwsh -File <ouro>/bin/y.ps1"\n')
         assert validate(ci_token) == [], validate(ci_token)
 
     # What decides a plugin root is the manifest two levels up, so the copy is put there and the
@@ -794,7 +858,7 @@ ruling_approvers = ["someone"]
         vendored.parent.mkdir()
         vendored.write_bytes(Path(this).read_bytes())
         binding = home / "ouro.toml"
-        binding.write_text(base + '\n[[gate]]\nareas = ["*"]\nrun = "pwsh -File <ouro>/bin/x.ps1"\n', encoding="utf-8")
+        binding.write_text(base + '\n[[gate]]\nrun = "pwsh -File <ouro>/bin/x.ps1"\n', encoding="utf-8")
         where = str(vendored.parent.resolve())
         manifest = home / ".claude-plugin" / "plugin.json"
         manifest.parent.mkdir()
@@ -814,10 +878,10 @@ ruling_approvers = ["someone"]
             else:
                 assert len(lines) == 1, (why, lines)
                 assert lines[0].startswith("gate.2.run: ") and where in lines[0] and "names nothing" in lines[0], (why, lines)
-            got = subprocess.run([sys.executable, str(vendored), "gates", "*", str(binding)], capture_output=True, encoding="utf-8", errors="replace")
+            got = subprocess.run([sys.executable, str(vendored), "gates", str(binding)], capture_output=True, encoding="utf-8", errors="replace")
             assert got.returncode == (0 if rooted else 1), (why, got.returncode, got.stdout, got.stderr)
             if rooted:
-                assert got.stdout.strip().splitlines() == ["make test", f"pwsh -File {Path(where).parent}/bin/x.ps1"], (why, got.stdout)
+                assert got.stdout.strip().splitlines() == ["make test", "make core-test", f"pwsh -File {Path(where).parent}/bin/x.ps1"], (why, got.stdout)
             else:
                 assert got.stdout == "", (why, got.stdout)
                 assert where in got.stderr and "names nothing" in got.stderr, (why, got.stderr)

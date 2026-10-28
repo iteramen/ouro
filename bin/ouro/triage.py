@@ -4,7 +4,8 @@ import re
 
 from . import briefs, node, sh
 from .acceptance import acceptance_commands, empty_list
-from .run import Run, body_line, parse_parts, restamped
+from .records import body_line, parse_parts, restamped
+from .run import Run
 from .sh import DriverError, argv_for, say
 
 STATE_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage", "idea")  # umbrella is cleared by its children closing, never by a re-triage
@@ -138,12 +139,10 @@ def behind_note(env):
     return note
 
 
-def granted_gates(env, labels, sets):
-    """The gate runs the BUILD node may run for the issue's area labels, in the binding's spelling: what the run's build_commands grants."""
-    declared = {str(x).lower(): str(x) for x in sets.get("area") or []}
-    areas = {declared[str(l).lower()] for l in labels if str(l).lower() in declared}
-    return [str(g.get("run") or "") for g in env.data.get("gate", []) if ("*" in g.get("areas", []) or areas & set(g.get("areas", [])))
-            and (g.get("cheap") is True or not env.pr_checks() or not Run.notice(g) and (Run.locally_run(str(g.get("run") or ""), g) or g.get("paths")))]
+def granted_gates(env):
+    """The gate runs the BUILD node may run: what the run's build_commands grants, before any diff selects among them."""
+    return [str(g.get("run") or "") for g in env.data.get("gate", [])
+            if (g.get("cheap") is True or not env.pr_checks() or not Run.notice(g) and (Run.locally_run(str(g.get("run") or ""), g) or g.get("paths")))]
 
 
 def binding_notes(env, body, labels):
@@ -241,7 +240,7 @@ def triage(env, n, dry):
     comment = f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n"
     if verdict != "STALE" and (notes := binding_notes(env, body, labels)):  # a stale issue runs nowhere
         comment += "\n" + "\n".join(f"- {x}" for x in notes) + "\n"
-    if verdict not in ("STALE", "CHECKPOINT") and not (acceptance_commands(body) + granted_gates(env, labels + named, sets)):  # the labels the verdict adds count
+    if verdict not in ("STALE", "CHECKPOINT") and not (acceptance_commands(body) + granted_gates(env)):
         comment += "\n- " + empty_list(body) + " A worktree BUILD dispatch stops with `gate uncovered`; the direct lane runs every selected gate in the driver.\n"
     if ans.get("question"):
         comment += f"\nQuestion for the owner:\n\n{ans['question']}\n"
