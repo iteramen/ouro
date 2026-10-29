@@ -9,7 +9,7 @@ from .run import Run
 from .sh import DriverError, argv_for, say
 
 STATE_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage", "idea")  # umbrella is cleared by its children closing, never by a re-triage
-VERDICTS = ("PROMOTE", "NEEDS-RULING", "CHECKPOINT", "SPLIT", "STALE")
+VERDICTS = ("PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE")
 
 
 def label_moves(verdict, size, labels, named=()):
@@ -23,6 +23,8 @@ def label_moves(verdict, size, labels, named=()):
         add = ["agent-ready", "checkpoint"]
     elif verdict == "NEEDS-RULING":
         add = ["needs-ruling"]
+    elif verdict == "BLOCKED":
+        add = ["blocked"]
     elif verdict == "SPLIT":
         add = ["umbrella"]
     else:
@@ -210,6 +212,15 @@ def triage(env, n, dry):
                            "are done, or remove the label and run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
     elif verdict == "SPLIT" and ans.get("question"):  # a split that still asks is a ruling to take, where the owner sees it
         verdict = "NEEDS-RULING"
+    unblocks = body.lstrip().startswith("**Unblocks when:**")  # contract section 4: a blocked body's first line names its trigger
+    if verdict in ("PROMOTE", "CHECKPOINT") and unblocks:  # the trigger is still named: never agent-ready before it fires
+        verdict = "BLOCKED"
+        ans["comment"] = (str(ans.get("comment") or "") + "\n\nThe body's first line still names an unblock trigger, so the issue stays "
+                          "`blocked`. Once the trigger fires, remove that line and run triage again.")
+    elif verdict == "BLOCKED" and not unblocks:
+        verdict = "NEEDS-RULING"
+        ans["question"] = ("The issue waits on an event, but its body's first line names none: write `**Unblocks when:** <the trigger>` "
+                           "as the first line, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
     new_body = with_lines(body, size, flow, str(ans.get("doc_impact") or "").strip()) if verdict in ("PROMOTE", "CHECKPOINT") else body
     declared = {str(x).lower(): str(x) for k in ("area", "type") for x in sets.get(k) or []}
     types, have = {str(x).lower() for x in sets.get("type") or []}, {str(l).lower() for l in labels}
@@ -240,7 +251,7 @@ def triage(env, n, dry):
     comment = f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n"
     if verdict != "STALE" and (notes := binding_notes(env, body, labels)):  # a stale issue runs nowhere
         comment += "\n" + "\n".join(f"- {x}" for x in notes) + "\n"
-    if verdict not in ("STALE", "CHECKPOINT") and not (acceptance_commands(body) + granted_gates(env)):
+    if verdict not in ("STALE", "CHECKPOINT", "BLOCKED") and not (acceptance_commands(body) + granted_gates(env)):
         comment += "\n- " + empty_list(body) + " A worktree BUILD dispatch stops with `gate uncovered`; the direct lane runs every selected gate in the driver.\n"
     if ans.get("question"):
         comment += f"\nQuestion for the owner:\n\n{ans['question']}\n"

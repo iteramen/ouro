@@ -64,7 +64,7 @@ flowchart TD
 Yellow is a person. Blue is the driver, fixed code that runs the same way every time. Green is a
 model node, a fresh harness call with a structured answer, declared capabilities and a timeout.
 The developer binding selects Claude Code or Codex; the driver owns the transitions in either case. Red is a stop: the driver posts what it needs and hands the issue
-back as `needs-ruling`. Three fix rounds at most; a fourth failure is the `review cap` stop,
+back as `needs-ruling`. Five fix rounds at most; a sixth failure is the `review cap` stop,
 which names the branch and the pull request for a person's round.
 
 ## Install

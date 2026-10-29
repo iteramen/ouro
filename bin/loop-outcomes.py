@@ -414,7 +414,8 @@ class Blamer:
             git("cat-file", "-e", f"{stamp}^{{commit}}")
             git("cat-file", "-e", f"{stamp}:{path}")
         except ReadError as e:
-            if e.code == 1 or "Not a valid object name" in str(e) or "does not exist in" in str(e):
+            # git words an absent path two ways: "does not exist in", or "exists on disk, but not in" when the working tree has it
+            if e.code == 1 or "Not a valid object name" in str(e) or "does not exist in" in str(e) or "but not in" in str(e):
                 return False
             raise
         return True

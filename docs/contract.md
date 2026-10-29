@@ -265,7 +265,8 @@ an issue is executable, or it is waiting on exactly one identifiable thing.
 
 **`needs-ruling` vs `blocked`** is the pair most often confused: a ruling is unblocked by an
 **answer**, a block by an **event**. If no answer the owner could give would start the work, it
-is `blocked`.
+is `blocked`: triage's BLOCKED verdict sets it, and triage promotes no issue whose body's first
+line still names an `**Unblocks when:**` trigger.
 
 The **default working view** is
 `is:open -label:blocked -label:idea -label:umbrella -label:architecture`.
@@ -629,22 +630,21 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
   decision`, naming the finding and the two rounds, since the fix moved nothing of it and a
   third round would re-raise it again. The first review is no verification: its finding counts
   once a verification re-raises it, so one fix round is always spent on it.
-- **Bounded iterations.** Fix rounds per change: **three**. A fourth failure is a STOP, not
+- **Bounded iterations.** Fix rounds per change: **five**. A sixth failure is a STOP, not
   another attempt: it posts a `**Stop:** review cap` comment on the issue (§4) and swaps it to
   `needs-ruling`. That stop is a hand-off: it names the branch and the pull request, which stay
   with their review record (the branch alone, in its worktree, when the cap comes before the
   draft opens); a fix commit pushed to the branch, `agent-ready` back in place of
   `needs-ruling`, and a new run verify that commit as any fix round, a finding at it being the
-  cap again. Three because a round-one fix introduces a defect of its own often enough that
-  the round which finds nothing is the only evidence a change is done; measured across a batch
-  where three of four issues had round two find a defect round one had introduced. A round is
+  cap again. Iterations are bounded because fixes can introduce further defects; only a
+  verification that finds nothing establishes completion. A round is
   one fix and the verification of that fix's commit, and the count is of what a fix introduced:
   a change takes one full review, and what a later pass finds in lines no fix touched is filed
   as a follow-up, except a finding that the change does not deliver the issue's Deliverable as
   the trusted comments amend it, which opens a fix round at any pass; one raised again after an
   approver's ruling needs a new ruling, as any finding at a later head does.
   A finding from a reviewer on the pull request that arrives after the REVIEW node has verified
-  the change gets **one fix round of its own**, outside the three, its fix commit verified as
+  the change gets **one fix round of its own**, outside the five, its fix commit verified as
   the REVIEW node verifies any. A further valid finding from such a reviewer after that
   round is not fixed in this change: it is answered on its thread and goes where the severity
   floor (§3) sends it.
@@ -655,7 +655,7 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
   assisted (§10).
   A **prose round** — one whose every remaining finding is about comments, docstrings,
   documentation wording or skill text, so that nothing executed changes — does not count toward
-  the three. Its fix commit is shown comment-only: by the token comparison, the executable tokens
+  the five. Its fix commit is shown comment-only: by the token comparison, the executable tokens
   of every source and test file identical to the commit the standing verdict read, where the file
   tokenizes, and by reading every changed line of a script, a workflow, a gate file or a command
   block (§4) where it does not; its verification is a reading one.

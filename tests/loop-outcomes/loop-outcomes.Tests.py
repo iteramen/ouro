@@ -460,6 +460,8 @@ def anchor_rows():
     check("an unstamped anchor does not reverse and raises the skipped count", verdict(bug(94, d(15), item)) == (False, 1))
     check("a stamp git cannot read does not reverse and raises the skipped count",
           verdict(bug(95, d(15), f"- `src/app.py` - {frag} @ deadbee\n")) == (False, 1))
+    check("a path the working tree holds but the stamp does not is skipped, not a crash",
+          verdict(bug(115, d(15), f'- `src/other.py` - "o" @ {s0}\n')) == (False, 1))
     check("an anchor whose line blames to an earlier commit does not",
           verdict(bug(96, d(15), f'{head}- `src/app.py` - "second line is here" :2\n')) == (False, 0))
     check("a stamp on the line wins over the heading's (the older stamp holds no such line)",

@@ -300,7 +300,7 @@ def run(h):
             and (attempted / 'src/app.py').read_text() == partial + '# retry partial\n')
 
     c, old, head, receipt, proof = setup('cap')
-    for index in range(h.recmod.FIX_CAP):
+    for index in range(5):
         h.git(old, 'commit', '--allow-empty', '-qm', 'spent manual fix ' + str(index))
     advanced = h.git(old, 'rev-parse', 'HEAD')
     branch = h.git(old, 'branch', '--show-current')

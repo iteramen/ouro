@@ -1034,7 +1034,7 @@ class Run:
             pr = self.find_pr()
             where = (f"the branch `{self.branch}` and pull request #{pr['number']} stay as they are, with the review record. A fix commit pushed to the branch"
                      if pr else f"the branch `{self.branch}` stays in its worktree. A fix commit on the branch")
-            self.stop_issue("review cap", "Three fix rounds are spent and the change is not clean.\n\n" + findings +
+            self.stop_issue("review cap", f"{FIX_CAP} fix rounds are spent and the change is not clean.\n\n" + findings +
                             f"\n\nThe hand-off: {where}, `agent-ready` back in place of `needs-ruling`, and `ouro run {self.n}` verify it as any fix round.", 3)
         self.build(findings=findings, record_ok=record_ok)
         if self.reader_skipped:  # a fix with no reviewer (a red gate or check) may add what a reader probes
@@ -1132,6 +1132,9 @@ class Run:
         ci = self.ci_mode()
         if not self.in_lane and not ci:
             return self.settled_gates(head, chosen, skipped)
+        if ci:  # an acceptance command no CI-owned gate runs is required, so the driver proves it here like its own gates
+            owned = self.ci_commands(selected=False) | {run for run, _ in chosen}
+            chosen += [(cmd, {}) for cmd in acceptance_commands(acceptance_source(self)) if cmd not in owned]
         return self.portable_gates(head, chosen, skipped, ci=ci, tree=self.tree)
 
     def portable_gates(self, head, chosen, skipped, *, ci, tree):

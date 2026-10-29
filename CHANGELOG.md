@@ -20,6 +20,25 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.8.1] - 2026-10-29
+
+**Net lines:** +69 across bin and tests, because three bug fixes and the BLOCKED verdict each carry
+the driver or suite rows that fail without them.
+
+- Triage has a BLOCKED verdict, which sets `blocked`. It promotes no issue whose body's first line
+  still names an `**Unblocks when:**` trigger, so a queue run no longer picks up a waiting issue.
+  A BLOCKED answer without that line is a question for the owner.
+
+- `loop-outcomes.py` skips an anchor whose path the working tree holds but its stamp does not,
+  instead of stopping on git's "exists on disk, but not in" error.
+
+- Under `ship.validation = "ci"`, the driver runs and proves an acceptance command that no CI-owned
+  gate runs, as it runs its own gates, so such a change lands. It no longer repeats
+  `Missing successful execution evidence` on empty fix rounds until `review cap`.
+
+- Allow five ordinary corrective rounds before the review-cap handoff, including BUILD recovery;
+  retain validation, review and early-stop requirements.
+
 ## [v1.8.0] - 2026-10-28
 
 - Under `ship.validation = "ci"`, an acceptance command only the pull request's checks run, through

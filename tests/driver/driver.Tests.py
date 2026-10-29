@@ -489,6 +489,7 @@ def sec_labels():
     check("an L never reaches agent-ready: it is the umbrella", t.label_moves("PROMOTE", "L", ["needs-triage"]) == (["umbrella"], ["needs-triage"]))
     check("NEEDS-RULING moves to needs-ruling", t.label_moves("NEEDS-RULING", "M", ["needs-triage"]) == (["needs-ruling"], ["needs-triage"]))
     check("SPLIT labels the umbrella and clears the state it held", t.label_moves("SPLIT", "L", ["needs-ruling", "gates"]) == (["umbrella"], ["needs-ruling"]))
+    check("BLOCKED moves to blocked and clears the state it replaces", t.label_moves("BLOCKED", "M", ["agent-ready", "gates"]) == (["blocked"], ["agent-ready"]))
     check("a re-triage never clears umbrella: its children closing do", t.label_moves("PROMOTE", "S", ["umbrella", "needs-triage"]) == (["agent-ready"], ["needs-triage"]))
     check("STALE still moves nothing", t.label_moves("STALE", "S", ["needs-triage"]) == ([], []))
     check("PROMOTE exits checkpoint routing", t.label_moves("PROMOTE", "S", ["agent-ready", "checkpoint", "gates"]) == ([], ["checkpoint"]))
@@ -1070,22 +1071,37 @@ def sec_unchanged_finding():
 
 
 def sec_review_cap():
+    check("the owner-selected ordinary fix policy is five", recmod.FIX_CAP == 5)
+    for fixes in (4, 5):
+        success = Case(f"reviewcap-success-{fixes}")
+        for k in range(1, fixes + 2):
+            success.node("BUILD", {**BUILD, "subject": f"fix(app): round {k}",
+                                  "writes": {"src/app.py": f"def compute_total(items):\n    return {k}\n"}}, k)
+            success.node("REVIEW", CLEAN if k == fixes + 1 else {
+                "verdict": "FINDINGS", "findings": [finding("M", f"defect {k}")],
+                "false_record_sentences": 0, "files_read": []}, k)
+        code, out, err = success.ouro("run", "1")
+        check(f"corrective round {fixes} can finish successfully",
+              code == 0 and not stops_of(success)
+              and len(success.prompts("BUILD")) == fixes + 1
+              and any(sig.startswith("pr ready") for sig in success.sigs()))
     c = Case("reviewcap", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
-    for k in range(1, 5):
+    for k in range(1, 7):
         c.node("BUILD", {**BUILD, "subject": f"fix(app): round {k}", "writes": {"src/app.py": f"def compute_total(items):\n    return {k}\n"}}, k)
         c.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", f"defect {k}")], "false_record_sentences": 0, "files_read": []}, k)
     code, out, err = c.ouro("run", "1")
-    check("a fourth fix round is a stop: exit 3", code == 3)
-    check("three fix rounds were built, a fourth was not", len(c.prompts("BUILD")) == 4 and "BUILD.5.prompt.txt" not in c.prompts("BUILD"))
+    check("a sixth fix round is a stop: exit 3", code == 3)
+    check("five fix rounds were built, a sixth was not", len(c.prompts("BUILD")) == 6 and "BUILD.7.prompt.txt" not in c.prompts("BUILD"))
     stops = [x["body"] for x in (c.issue_state() or {"comments": []})["comments"] if x["body"].startswith("**Stop:**")]
     check("the stop is `**Stop:** review cap`, line 1 alone, a blank line 2, content from line 3", len(stops) == 1 and stop_comment_ok(stops[0], "review cap"))
     check("the stop is a hand-off: it names the branch, the pull request and the way back",
           stops and "`gates/1-fix-the-total` and pull request #7" in stops[0] and "`ouro run 1` verify it as any fix round" in stops[0])
+    check("the diagnostic names the five spent rounds", stops and "5 fix rounds are spent" in stops[0])
     labs = labels_of(c)
     check("agent-ready -> needs-ruling, trivial removed", "needs-ruling" in labs and "agent-ready" not in labs and "trivial" not in labs)
     check("nothing was merged or marked ready", not any(s.startswith(("pr merge", "pr ready")) for s in c.sigs()))
     x = Case("reviewcapexpress", table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: express"), labels=("agent-ready", "trivial", "gates", "bug"))})
-    for k in range(1, 5):
+    for k in range(1, 7):
         x.node("BUILD", {**BUILD, "subject": f"docs(note): round {k}", "writes": {"docs/note.md": f"note, round {k}\n"}}, k)  # a docs diff keeps express
         x.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", f"defect {k}")], "false_record_sentences": 0, "files_read": []}, k)
     code, out, err = x.ouro("run", "1")
@@ -1567,7 +1583,9 @@ def sec_fix_round_scope():
     code, out, err = c4.ouro("run", "1", "--validate")
     check("a branch-added gate remains required and missing proof takes the bounded fix cap without caller self-approval",
           code == 3 and 'Missing successful execution evidence' in out and 'python3 gates/new_gate.py' in out
-          and c4.prompts('BUILD') == ['BUILD.1.prompt.txt', 'BUILD.2.prompt.txt', 'BUILD.3.prompt.txt', 'BUILD.4.prompt.txt']
+          and c4.prompts('BUILD') == [f'BUILD.{k}.prompt.txt' for k in range(1, 7)]
+          and any(stop_comment_ok(stop, 'review cap') and '5 fix rounds are spent' in stop
+                  for stop in stops_of(c4))
           and 'Missing successful execution evidence' in (c4.nodes / 'BUILD.3.prompt.txt').read_text()
           and c4.prompts('REVIEW') == ['REVIEW.1.prompt.txt']
           and not any(row['body'].startswith('**Ready for merge**') for row in c4.pr_comments())
@@ -1758,10 +1776,13 @@ def sec_check_flake():
     c2.node("BUILD", {**BUILD, "subject": "fix(app): the check", "writes": {"src/app.py": "def compute_total(items):\n    return 3\n"}}, 2)
     c2.node("BUILD", {**BUILD, "subject": "fix(app): the check again", "writes": {"src/app.py": "def compute_total(items):\n    return 4\n"}}, 3)
     c2.node("BUILD", {**BUILD, "subject": "fix(app): the check once more", "writes": {"src/app.py": "def compute_total(items):\n    return 5\n"}}, 4)
+    for k in (5, 6):
+        c2.node("BUILD", {**BUILD, "subject": f"fix(app): check {k}",
+                          "writes": {"src/app.py": f"def compute_total(items):\n    return {k + 1}\n"}}, k)
     code, out, err = c2.ouro("run", "1")
     check("a failure that is not a flake is a fix round with the log as the finding: one re-run, of the first run, no other",
           "the real failure line" in open(c2.nodes / "BUILD.2.prompt.txt", encoding="utf-8").read() and [s[:12] for s in c2.sigs() if s.startswith("run rerun")] == ["run rerun 11"])
-    check("it counts toward the cap: three rounds then review cap, exit 3", code == 3 and any(x["body"].startswith("**Stop:** review cap") for x in c2.issue_state()["comments"]))
+    check("it counts toward the cap: five rounds then review cap, exit 3", code == 3 and any(x["body"].startswith("**Stop:** review cap") for x in c2.issue_state()["comments"]))
     # the re-run attempt failed while the run list's record read it green: the attempt decides, so no flake
     c3 = happy_case("staleflake", table={"_issue_1": issue(), "_runs": [["cancelled", "failure"]], "_stale_list": True,
                                          "run view * --log-failed": {"Exit": 0, "Out": "the attempt 2 failure"}})
@@ -2158,6 +2179,16 @@ def sec_triage():
     check("triage posts a comment whose first line is exactly **Triage**", code == 0 and s["comments"][-1]["body"].split("\n")[0] == "**Triage**" and "Anchors resolve" in s["comments"][-1]["body"])
     check("triage writes Size, Flow and Doc impact lines where missing", all(x in s["body"] for x in ("Size: S", "Flow: express", "Doc impact on close: none")))
     check("triage sets the labels", "agent-ready" in labels_of(c) and "needs-triage" not in labels_of(c))
+    waits = "**Unblocks when:** #62 lands\n\n" + body
+    for name, verdict, text, want in (("triagewaits", "PROMOTE", waits, "labels +['blocked'] -['needs-triage']"),
+                                      ("triageblocked", "BLOCKED", waits, "labels +['blocked'] -['needs-triage']"),
+                                      ("triagenotrigger", "BLOCKED", body, "labels +['needs-ruling'] -['needs-triage']")):
+        cb = Case(name, table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=text)})
+        cb.node("TRIAGE", {**answer, "verdict": verdict})
+        code, out, err = cb.ouro("triage", "1", "--dry-run")
+        check(f"{name}: {verdict} on a body {'whose first line names' if text is waits else 'with no'} unblock trigger moves {want}",
+              code == 0 and want in out and (text is not waits or "remove that line" in out or verdict == "BLOCKED")
+              and (text is waits or "**Unblocks when:**" in out))
     cs = Case("triagesizeline", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body + "\nSize: S. Flow: express. Doc impact on close: none.\n")})
     cs.node("TRIAGE", {**answer, "size": "S."})
     code, out, err = cs.ouro("triage", "1")
@@ -4555,6 +4586,15 @@ def sec_ci_validation():
           code == 3 and len(c.prompts("BUILD")) == 1 and not c.pr() and c.branches() == ["master"]
           and len(stops) == 1 and stop_comment_ok(stops[0], "acceptance unrunnable")
           and "python3 gates/ci_owned.py" in stops[0] and "`never/`" in stops[0])
+
+    c = case("acceptance-driver", merge=True, flow="express", acceptance="python3 gates/acceptance.py")
+    c.write("gates/acceptance.py", "print('acceptance ran')\n")
+    git(c.main, "add", "-A"); git(c.main, "commit", "-qm", "owner adds the acceptance script")
+    git(c.main, "push", "-q", "origin", "master")
+    code, out, err = c.ouro("run", "1")
+    check("CI mode: an acceptance command no CI-owned gate runs is run and proven by the driver, so the change lands",
+          code == 0 and "done: #1 landed" in out and "gate `python3 gates/acceptance.py`: exit 0" in out
+          and len(c.prompts("BUILD")) == 1 and stops_of(c) == [])
 
     c = case("ci-only", scoped=True, merge=True, flow="express")
     code, out, err = c.ouro("run", "1")

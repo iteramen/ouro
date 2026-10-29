@@ -133,13 +133,16 @@ def exercise(h):
     h.git(c.main, "add", "gates/check.py")
     h.git(c.main, "commit", "-q", "-m", "head-sensitive gate")
     h.git(c.main, "push", "-q", "origin", "master")
-    for k in (2, 3, 4):
+    for k in range(2, 7):
         c.node("BUILD", {**h.BUILD, "_run": [command, second], "writes": {
             "src/app.py": h.BUILD["writes"]["src/app.py"] + f"# fix {k}\n"}}, k)
     code, out, err = c.ouro("run", "1", "--validate")
     h.check("a gate passing on the parent HEAD must pass again on the changed HEAD",
             code == 3 and not ready(c) and not c.prompts("REVIEW")
-            and "exit 9" in out and not any(s.startswith("pr merge") for s in c.sigs()))
+            and "exit 9" in out and len(c.prompts("BUILD")) == 6
+            and any(h.stop_comment_ok(stop, "review cap") and "5 fix rounds are spent" in stop
+                    for stop in h.stops_of(c))
+            and not any(s.startswith("pr merge") for s in c.sigs()))
 
     for recovery in ("intact", "corrupt", "missing"):
         c = case("branch-grants-" + recovery, successes)
@@ -189,6 +192,10 @@ def exercise(h):
                     retained += 1
             h.check(recovery + " recovery leaves older grants but removes the added gate's receipts",
                     retained > 0 and removed > 0)
+        # BUILD2 and BUILD3 spent two fixes; two manual commits plus the
+        # changed-gate commit below exhaust the independently pinned five-fix budget.
+        for index in range(2):
+            h.git(wt, "commit", "--allow-empty", "-qm", f"spent manual fix {index}")
         (wt / "gates/added.py").write_text("raise SystemExit(9)\n", encoding="utf-8")
         h.git(wt, "add", "gates/added.py")
         h.git(wt, "commit", "-q", "-m", "new head invalidates added gate proof")
@@ -208,6 +215,9 @@ def exercise(h):
         code, out, err = c.ouro("run", "1", "--validate")
         h.check(recovery + " receipts: a newer resumed head retains a branch-added command obligation",
                 code == 3 and added in out and "Missing successful execution evidence" in out
+                and int(h.git(wt, "rev-list", "--count", "--no-merges", "origin/master..HEAD")) == 6
+                and any(h.stop_comment_ok(stop, "review cap") and "5 fix rounds are spent" in stop
+                        for stop in h.stops_of(c))
                 and not c.prompts("REVIEW") and not c.prompts("BUILD")
                 and not any(s.startswith("pr merge") for s in c.sigs())
                 and sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments()) == ready_before)
