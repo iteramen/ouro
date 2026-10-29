@@ -1065,57 +1065,6 @@ def resume_offline(h):
             h.check("refused repair retries spend neither another BUILD nor modeled publisher floor",
                     len(modeled_floors) == (0 if refused else 1) and builds == [upstream])
 
-        for stage in ("parent", "fix", "revert"):
-            c, r, commit, outcomes, builds, reverts = setup("resume-pr-scope-" + stage)
-            parent = commit("published parent") if stage != "parent" else None
-            if stage == "revert":
-                parent = commit("published fix", "fix", parent)
-            base = git(c.main, "rev-parse", "HEAD")
-            head = commit("Revert the direct commits for #1" if stage == "revert" else "pending PR note", stage, parent)
-            # Fetched locally, but not yet on default. The parent closed the issue.
-            git(c.origin, "update-ref", "refs/heads/master", base)
-            git(c.main, "fetch", "-q", "origin")
-            r.issue["state"] = "OPEN" if stage == "parent" else "CLOSED"
-            r.env.gh_json = lambda *a: dict(headRefOid=head)
-            pr = dict(number=7, title="Edit note", body="", headRefOid=head)
-            r.find_pr = lambda branch=None, **kw: pr if branch == "direct/1" else None
-            watched = []
-            def watch(*args):
-                watched.append(args)
-                return SimpleNamespace(code=None)
-            r.watch_pr = watch
-            initial = dict(r.claim.data, scope=dict(paths=["docs/note.md"], areas=["gates"]))
-            for attempt in range(2):
-                r.claim.prepared = None  # each invocation starts without a prepared trace
-                with patch.object(h.runmod, "Run", return_value=r):
-                    code = h.runmod.main(r.env, 1, None, r.options)
-                latest = outcomes[-1][0]
-                detail = dict(messages=[dict(body="<!-- ouro-claim: " + json.dumps(data) + " -->")
-                                        for data in (initial, latest)])
-                h.check("pending direct " + stage + " PR resumes checks and retains scope/claim",
-                        code == 0 and latest["scope"] == initial["scope"]
-                        and latest["base"] == base and latest["head"] == head and latest["stage"] == stage
-                        and len(watched) == attempt + 1
-                        and r.claim.overlaps(detail, dict(paths=["docs/note.md"], areas=[]))
-                        and not builds and not any(closed for _, closed in outcomes))
-
-
-            if stage == "revert":
-                transitions = []
-                r.lane_finish = lambda *a: head
-                r.env.gh_json = lambda *a: dict(headRefOid=head, state="CLOSED")
-                r.env.write = lambda label, argv: transitions.append((label, argv))
-                r.env.comment_issue = lambda n, body: transitions.append(body)
-                r.lane_watch = lambda sha: ("red", "run/" + sha, "failure")
-                r.claim.config = None  # completion must also work with coordination disabled
-                with patch.object(h.runmod, "Run", return_value=r):
-                    code = h.runmod.main(r.env, 1, None, r.options)
-                h.check("completed pending revert PR reopens and reaches terminal needs-ruling stop",
-                        code == 3 and "--add-label" in transitions[0][1] and "needs-ruling" in transitions[0][1]
-                        and transitions[1][0] == "reopen #1"
-                        and "**Stop:** open decision" in transitions[2] and head[:7] in transitions[2]
-                        and outcomes[-1][1] and not builds)
-
         c, r, commit, outcomes, builds, reverts = setup("resume-refused-revert")
         parent = commit("published parent")
         fix = commit("published fix", "fix", parent)

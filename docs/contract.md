@@ -338,11 +338,9 @@ reads.
   the ordinary worktree PR flow. A main BUILD scope that could edit installed runtime or instruction
   sources also takes the ordinary PR path before BUILD. Direct publication and repair refuse source
   overlap before launching helpers or spending the fix/revert allowance.
-  Branch protection can instead require a direct PR vehicle; its fresh or resumed head must
-  satisfy the same structural obligations before merge. Under
-  `ship.validation = "ci"`, exact successful configured checks cover the trusted nonlocal commands,
-  and private local gates execute at that head in an isolated copy; local authority requires
-  genuine local check execution. Planning packets and CI results are never caller receipts.
+  Branch protection can instead require a direct PR vehicle, which merges once its checks are
+  green; a run that finds one already open waits for the person to merge or close it.
+  Planning packets and CI results are never caller receipts.
   Explicit issue acceptance outside the mandatory floor uses the ordinary PR flow; matching
   acceptance pins both the planned head and origin base through publication. A CI-owned
   historical obligation skipped by the final diff's path selector is unproved.
@@ -380,13 +378,12 @@ when their paths select the change. Grants, BUILD's `gates_run` self-report and 
 are not proof. Private worker observations identify candidates; they never certify final
 completion.
 
-In local mode, final proof comes from the bounded validator under its lifecycle lease, with clean
+In local mode, final proof comes from the bounded validator under its lock, with clean
 committed inputs, exact-head ordered-command receipts and intact logs. Binding-selected driver
 gates keep their execution authority. Additional successful worker candidates require explicit
 `ouro run N --validate` and the invoking command allowlist before caller execution; an intact
-current-input validator receipt may be reused without executing again. A zero parent with
-unfinished descendants, timeout, overflow, interruption or unavailable settlement never proves
-success. Native Linux provides this boundary; on other platforms a required local or caller proof
+current-input validator receipt may be reused without executing again. A timeout, overflow or
+interruption never proves success. Native Linux provides the caller boundary; on other platforms a required local or caller proof
 waits before review, Ready or merge without spending fixes. That platform guard does not apply to
 CI-owned checks or portable local-only driver gates.
 
@@ -430,58 +427,19 @@ Direct-lane handoffs are unsupported and fail before commit or push. Exit 75 or 
 executable waits; real failures use the bounded fix path. Execution is bounded to 3600 seconds
 and 1 MiB of retained output per command.
 
-Caller validation runs only on native Linux with process visibility; an unavailable probe waits
-before launch. Other platforms, including Windows and WSL, refuse before launch with exit 75 and
-no successful receipt: retry on a native Linux host. Kernel/proc facts determine WSL admission,
-independently of command environment settings, because WSL's Windows broker can escape the Linux
-process table even through a native launcher. Each validation command holds its lease through
-coordinator death until every owned descendant, orphaned helpers included, has been reaped. A
-parent exiting with live owned descendants is incomplete execution: cleanup runs and the command
-fails with its logs and attempt rows kept, even on exit 0. Descendants unsettled 30 seconds after
-an operation returns keep the lock active and refuse recovery. Successful receipts live in worktree Git-private state and require exact HEAD, ordered
+Caller validation runs only on native Linux. Other platforms, including Windows and WSL, refuse
+before launch with exit 75 and no successful receipt: retry on a native Linux host. Kernel/proc
+facts determine WSL admission, independently of command environment settings. One validation runs
+per worktree at a time, under a lock file in its Git-private state; a lock left by a killed driver
+is deleted by hand, as the refusal says. Each command runs in its own process group, which is
+killed when the command returns or passes its bound. Successful receipts live in worktree Git-private state and require exact HEAD, ordered
 commands, intact evidence and clean tracked/untracked inputs before and after execution (ignored
 outputs are allowed). Source or HEAD mutation refuses a receipt. Review/PR records name actual
 results, exact heads and evidence paths; independent review and CI are still required. Owner stops
 never resume automatically.
 
-`ouro validation-lock` inspects the current worktree's caller lock without tracker access.
-`ouro validation-lock --recover` quarantines only an unheld lease on native Linux with matching
-boot/namespaces, working process visibility, no visible owner PID (reuse also refuses), and
-durable version-2 idle/settled evidence. An active phase, interrupted executor, empty legacy lock,
-missing evidence or context mismatch refuses, even after an elapsed timeout or an empty process
-observation: keep the lock and attempts until inspecting the prior execution and its descendants
-establishes safety. Recovery signals nothing, keeps all attempts, creates no receipt and does not
-validate the current head. Repeating recovery without a lock is a no-op; resume through the
-normal explicit validation batch.
-
-#### Interrupted BUILD recovery
-
-From the main checkout, the invoking person may use
-`ouro run N --recover-build path/to/file --validate`, repeating `--recover-build` for each
-explicitly approved partial file. This requires an open normal-path issue PR, current-head
-review findings and an unchanged local/PR/remote head; it cannot bypass a spent fix cap.
-It creates a printed private clean checkout and offers only the selected changed UTF-8 files
-as ignored BUILD references. The dirty original, unselected user edits, source branch, running
-processes and old validation evidence are never reset, moved, signalled or copied as proof.
-Native Linux observation refuses an observable live process rooted in the original worktree;
-an existing or uncertain caller-validation lease also refuses. Windows, WSL and an unavailable
-process observer require manual inspection instead. Unreadable unrelated process cwd values
-are unknown and produce a notice, never a declaration of inactivity. The observer does not
-certify that every historical unowned descendant ended, and no original execution is treated as
-evidence in the new checkout.
-Selections reject aliases, protected/harness paths, instructions, escapes, duplicates and binary
-files, with at most 32 files, 1 MiB each and 4 MiB total.
-The normal driver first validates the unchanged committed head, then runs its usual fix BUILD
-and requires fresh validation of the resulting commit before review or shipping. A failed turn
-is never accepted. Repeated explicit recovery keeps earlier private checkouts and references;
-ordinary resume runs from the printed checkout and follows the same Git/GitHub branch.
-Repository Git directory/file overrides or a redirected clone root refuse. An ignored reference
-assists BUILD only at its original head; it is not a workflow stage or receipt.
-The clone has a distinct coordination session, so known original claims require the person's
-explicit `--override-claim`; recovery never copies/adopts claim correlation or infers an override.
-
 - **Gates.** In every class with a pull request, CI supplies the merge checks and the record
-  names the selected commands it runs. Local validation also requires the leased final BUILD
+  names the selected commands it runs. Local validation also requires the final BUILD
   proof above; CI validation accepts its declared successful checks for covered commands. A gate
   the pull request's checks do not run at all, or run only to print a skip, runs locally,
   selected by its paths: a `ci` whose printed text starts with `skip` prints a skip; a `ci`

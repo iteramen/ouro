@@ -6,11 +6,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/forbidden-tokens.py\" hook",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/guard-delete.py\"",
             "timeout": 10
           },

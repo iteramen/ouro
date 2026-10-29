@@ -48,7 +48,7 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the effective policy is the stricter of the repository's and the issue's |
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
 | `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe: Choosing `ship.review` below |
-| `ship.validation` | `local`, `ci` | `local` | final-input validation authority for PR flows, including resumed direct PR vehicles; inline direct checks remain local |
+| `ship.validation` | `local`, `ci` | `local` | final-input validation authority for PR flows; inline direct checks remain local |
 | `ship.validation_checks` | exact GitHub check names | none; required under `ci` | nonempty unique names declaring aggregate CI coverage of selected nonlocal gates |
 | `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's |
 | `ship.external_cli` | `grok`, `claude`, `codex`, `copilot` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
@@ -58,7 +58,6 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `ship.sync` | `merge`, `rebase` | `merge` | how a branch is brought up to date before its pull request |
 | `ship.merge` | `squash`, `merge` | `squash` | how a pull request lands |
 | `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing: Rules the skills apply below |
-| `ship.forbidden_check` | `required`, `off` | follows the list's `# protects:` line, or with no list the target repository's visibility | whether the hook checks what a session posts against the private token list: The forbidden-token check below |
 | `ship.direct` | globs | none, the lane off | the files the direct lane may push |
 | `ship.direct_max_lines` | positive integer | `20` | direct policy's added-plus-deleted line limit over the whole linear commit range |
 | `ship.direct_max_files` | positive integer | `3` | direct policy's changed-file union limit over that range |
@@ -208,39 +207,6 @@ optional; absent means the reading skill's own default, named in the schema abov
 `builder_trivial` is the BUILD node when the issue carries `trivial`. `reviewer` is the REVIEW
 node, the adversarial pass an M always takes whatever `ship.review` names.
 
-### The forbidden-token check
-
-`bin/forbidden-tokens.py hook` matches the text of each publishing `gh` or `git` call a session
-makes against the private token list (README, "The private token list") and blocks on a hit and on
-a missing list, except where the key, the list or the repository's visibility say below that it
-does not.
-`ship.forbidden_check = "off"` turns that check off for this repository: the hook passes the call,
-a hit on the list included. It is for a private repository whose own issues legitimately carry the
-values a list would hold, where the check blocks every call on a host with no list and nothing
-useful can go on one. `"required"` runs the check whatever the list protects and the repository's
-visibility, and a missing list blocks.
-
-Absent, the check follows the list. A list (`OURO_FORBIDDEN_TOKENS` set and non-empty) names the
-repositories it protects on a comment line `# protects: <owner/repo> ...`, and then a hit blocks
-only a call that lands in one of them, by the directory's `repo.slug` or else its `origin`, or that
-names one with a `-R`, `--repo` or `GH_REPO` value or an issue or pull request URL; a directory whose repository cannot be resolved counts as
-protected. A list with no such line protects every repository, whatever the visibility. So a
-consumer repository the list does not name needs no key. When no list is set, the hook reads the visibility with one `gh repo view` call:
-`PRIVATE` or `INTERNAL` passes the call, while `PUBLIC`, a read that fails or runs past its time
-bound, or any other value blocks as a missing list does. A private repository that wants the block
-declares `"required"`.
-
-The hook reads the key from the working directory's binding, and honours it only when that
-binding's `repo.slug` is the repository the call posts to, compared case-insensitively, and
-`ouro-binding.py check` passes that binding: with `-R` or `--repo` naming another repository, the
-key counts as absent whatever its value. No binding is absent too. For a binding naming the
-repository the call posts to, a failed `check` or any other value counts as `"required"`. A binding
-read that fails counts as `"required"` whatever the binding names. The key is repository policy, so
-the machine-local overlay below cannot set it. It does not reach `bin/forbidden-tokens.py`'s `scan`
-gate, which stays fail-closed whatever a binding declares, since it guards the plugin's own text.
-The hook's scan of the command text leaves out the value of a `-R` or `--repo` written outside
-quotes: it addresses the call, it is not published.
-
 ## The developer binding
 
 Worker execution is selected outside the repository in `~/.config/ouro/developer.toml`
@@ -379,8 +345,8 @@ worker is supported. READ still requires the outer read-only CLI and the file br
 Ouro runs no sandbox setup, creates no accounts and changes no global configuration, ACLs or
 firewall policy. For a Windows driver, select a separate Claude developer profile via
 `--developer-config` or `OURO_DEVELOPER_CONFIG` and use repository CI validation, or use native
-Linux Codex. Execution evidence, caller validation and its lock, and interrupted BUILD recovery
-are the driver's rules, in [contract §4](contract.md).
+Linux Codex. Execution evidence, caller validation and its lock are the driver's rules, in
+[contract §4](contract.md).
 
 Every node uses a fresh session. Final results are validated against complete node schemas;
 missing results, error events or unusable file tools are driver errors. The CLI prints usage and
@@ -461,9 +427,6 @@ sees as a directory. The overlay entry is unchecked.
   adapter's own effort, which `"default"` and an empty value on the reader's command line name too.
 - Every `[models]` key is optional, and each must be one of `opus`, `sonnet`, `haiku`, `fable` —
   see "Model tiers".
-- `ship.forbidden_check` is optional and, when present, must be `"required"` or `"off"`; any
-  other value or type is refused. Absent follows the list's `# protects:` line, or with no list
-  the target repository's visibility, as "The forbidden-token check" says. Like every key but `repo.checkout`, the overlay may not set it.
 - `ship.landing` must name one of the four pairs above, and an explicit `ship.sync` or
   `ship.merge` beside it must agree with the pair it names — the error names both keys. All three
   are optional; absent means today's behaviour, which is what `merge-squash` names.

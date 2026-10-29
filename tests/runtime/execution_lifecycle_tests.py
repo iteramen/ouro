@@ -90,7 +90,7 @@ class GateExecutionTests(unittest.TestCase):
 
     def native(self):
         if not sys.platform.startswith("linux"):
-            self.skipTest("native Linux validation lease controls")
+            self.skipTest("native Linux validation controls")
         try:
             validation.check_platform()
         except sh.DriverError as error:
@@ -106,24 +106,6 @@ class GateExecutionTests(unittest.TestCase):
                 self.assertEqual(Run.missing_execution(run), [] if code == 0 else [command])
                 self.assertEqual(run.execution_results[-1]["exit"], code)
                 self.assertTrue(pathlib.Path(run.execution_results[-1]["log"]).is_file())
-
-    def test_zero_parent_with_detached_work_never_produces_successful_proof(self):
-        self.native()
-        child = ("import pathlib,time; pathlib.Path('output/ready').touch(); "
-                 "time.sleep(.4); pathlib.Path('output/delayed').touch()")
-        run, command = self.fixture(
-            "import pathlib,subprocess,sys,time\n"
-            f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True, "
-            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
-            "deadline=time.monotonic()+3\n"
-            "while not pathlib.Path('output/ready').exists() and time.monotonic()<deadline: time.sleep(.01)\n"
-            "assert pathlib.Path('output/ready').exists()\n")
-        result = Run.settled_gates(run, run.tree.head(), [(command, {})], [])
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(result[:2], (command, 1))
-        self.assertIn("owned descendants", result[2])
-        self.assertEqual(Run.missing_execution(run), [command])
-        self.assertFalse(list((run.tree.path / ".git" / "ouro-validation").glob("*/receipt.json")))
 
     def test_final_proof_has_real_time_and_output_bounds(self):
         self.native()
@@ -163,19 +145,14 @@ class GateExecutionTests(unittest.TestCase):
         self.assertFalse((run.tree.path / "output/ran").exists())
         self.assertEqual(Run.missing_execution(run), [command])
 
-    def test_private_observations_alone_never_clear_the_final_barrier(self):
-        run, command = self.fixture("print('not executed')\n")
-        with patch.object(execution, "proven", return_value={command}):
-            self.assertEqual(Run.missing_execution(run), [command])
-
-    def test_non_linux_posix_refuses_before_any_unowned_lease_or_launch(self):
+    def test_non_linux_posix_refuses_before_any_lock_or_launch(self):
         run, command = self.fixture("raise SystemExit(0)\n", caller=True)
         head = run.tree.head()
         for system in ("Darwin", "FreeBSD"):
             kernel = types.SimpleNamespace(sysname=system, release="fixture", version="fixture")
             with self.subTest(system=system), patch.object(validation.os, "name", "posix"), \
                     patch.object(validation.os, "uname", create=True, return_value=kernel), \
-                    patch.object(validation.validation_lock, "Lease") as lease, \
+                    patch.object(validation, "lock") as lease, \
                     patch.object(validation.subprocess, "Popen") as launch:
                 self.assertEqual(validation.validate(run.tree, [{"cmd": command, "reason": "fixture"}], run.wait_hint), ([], 75))
                 self.assertEqual(validation.check_inputs(run.tree, head, run.wait_hint), 75)
@@ -325,19 +302,6 @@ class GateExecutionTests(unittest.TestCase):
                     self.assertFalse((probe / "ready.json").exists())
                     self.assertFalse(self.probe_live(probe))
                     self.assertNotIn("delayed fixture mutation", (run.tree.path / "gate.py").read_text())
-
-    def test_leased_guard_rejects_an_incomplete_fsmonitor_snapshot(self):
-        self.native()
-        run, state = self.resumed_run()
-        private = run.tree.path / ".git" / "ouro-validation"
-        before = {str(path.relative_to(private)): path.read_bytes() for path in private.rglob("*") if path.is_file()}
-        probe, nonce = self.fsmonitor(run, only_without_lock=False)
-        with self.assertRaisesRegex(sh.DriverError, "helper snapshot refused"):
-            Run.drive(run, None)
-        self.assertFalse(state["ready"])
-        self.assertEqual(json.loads((probe / "ready.json").read_text())["nonce"], nonce)
-        self.assertEqual(before, {str(path.relative_to(private)): path.read_bytes()
-                                 for path in private.rglob("*") if path.is_file()})
 
     @unittest.skipUnless(os.name == "nt", "actual Windows unsupported caller boundary")
     def test_actual_windows_refuses_proof_before_launch_even_with_consent(self):

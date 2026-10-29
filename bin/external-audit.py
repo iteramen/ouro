@@ -194,7 +194,8 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
     else:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            if type(proc.pid) is int and proc.pid > 1:  # killpg(1) is kill(-1): every process the user owns
+                os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
 

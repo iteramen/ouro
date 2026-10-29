@@ -49,7 +49,7 @@ class ValidationTests(unittest.TestCase):
                 with patch.object(validation, "check_platform", side_effect=sh.DriverError("unsupported host")), \
                         patch.object(validation.sh, "say") as say, \
                         patch.object(validation, "receipt") as receipt, \
-                        patch.object(validation.validation_lock, "Lease") as lease:
+                        patch.object(validation, "lock") as lease:
                     self.assertEqual(validation.validate(None, pending, hint), ([], 75))
                     message = say.call_args.args[0]
                     self.assertIn("authority=" + authority, message)
@@ -114,6 +114,17 @@ class ValidationTests(unittest.TestCase):
             launch.assert_not_called()
         self.assertIn("including through native launchers", (self.root / "attempt.log").read_text())
 
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups")
+    def test_a_mocked_child_never_reaches_killpg(self):
+        # A mocked pid reads as 1, and killpg(1) is kill(-1): every process the user owns.
+        with patch.object(validation, "check_platform"), patch.object(validation.subprocess, "Popen") as launch, \
+                patch.object(validation.os, "killpg") as killpg:
+            launch.return_value.poll.return_value = 0
+            launch.return_value.wait.return_value = 0
+            self.assertEqual(validation.execute(sys.executable + " -V", self.root, self.root / "attempt.log"), 0)
+        launch.assert_called_once()
+        killpg.assert_not_called()
+
     def driver_fixture(self, *, validating=True, script="raise SystemExit(75)\n"):
         from ouro.run import Run, RunOptions
         base = self.fixture({"native.py": script})
@@ -139,7 +150,7 @@ class ValidationTests(unittest.TestCase):
         with patch.object(validation, "check_platform", side_effect=sh.DriverError("unsupported platform")), \
                 patch.object(validation, "clean") as clean, \
                 patch.object(validation, "receipt") as receipt, \
-                patch.object(validation.validation_lock, "Lease") as lease:
+                patch.object(validation, "lock") as lease:
             # Real BUILD metadata parsing must not trigger receipt/state preflight.
             self.assertEqual(Run.drive(run, None), 0)
             clean.assert_not_called()
@@ -170,7 +181,7 @@ class ValidationTests(unittest.TestCase):
         run.run_gates = next_phase
         original = validation.receipt
         def leased_receipt(*args, **kwargs):
-            self.assertIsNotNone(kwargs.get("inputs"), "receipt preflight escaped the lease")
+            self.assertIsNotNone(kwargs.get("inputs"), "receipt preflight escaped the lock")
             self.assertTrue((self.root / ".git/ouro-validation/lock").exists())
             return original(*args, **kwargs)
         with patch.object(validation, "receipt", side_effect=leased_receipt) as receipt, \
@@ -193,41 +204,6 @@ class ValidationTests(unittest.TestCase):
                 unittest.mock.call(run.tree, [], run.wait_hint, check_head=run.tree.head()),
             ])
             execute.assert_not_called()
-
-    @unittest.skipUnless(sys.platform.startswith("linux"), "native Linux admission controls")
-    def test_native_delayed_children_cannot_reach_gates(self):
-        from ouro.run import Run
-        try:
-            validation.check_platform()
-        except sh.DriverError as ex:
-            self.skipTest(str(ex))
-        run, pending = self.driver_fixture(script=
-            "import os,pathlib,time\n"
-            "print('parent evidence',flush=True)\n"
-            "if os.fork()==0:\n"
-            " os.setsid(); time.sleep(.4); pathlib.Path('output/marker').touch(); os._exit(0)\n"
-            "os._exit(0)\n")
-        (self.root / "output").mkdir()
-        def fix(note, records):
-            self.assertIn("exited 1", note)
-            raise RuntimeError("failed attempt reached fix")
-        run.fix_round = fix
-        with patch.object(validation, "process_table",
-                          side_effect=lambda env=None: {os.getpid(): (os.getppid(), "executor")}), \
-                patch.object(run, "run_gates") as gates:
-            with self.assertRaisesRegex(RuntimeError, "failed attempt reached fix"):
-                Run.drive(run, None)
-            gates.assert_not_called()
-        self.assertTrue((self.root / "output/marker").exists())
-        directory = validation.state(run.tree, pending)[2]
-        attempt = json.loads(next(directory.glob("attempt-*/attempt.json")).read_text())
-        result = attempt["results"][0]
-        self.assertEqual(result["exit"], 1)
-        self.assertIn("parent evidence", pathlib.Path(result["log"]).read_text())
-        self.assertIn("incomplete execution", pathlib.Path(result["log"]).read_text())
-        self.assertIsNone(validation.receipt(run.tree, pending))
-        self.assertEqual(validation.attempts(run.tree), attempt["results"])
-        self.assertFalse((self.root / ".git/ouro-validation/lock").exists())
 
     @unittest.skipUnless(os.name == "posix", "simulated WSL receipt barrier")
     def test_wsl_rejects_existing_proof_before_preflight(self):
@@ -255,20 +231,15 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(results, [])
         self.assertEqual(len(list(directory.glob("attempt-*/attempt.json"))), 1)
 
-    @unittest.skipUnless(os.name == "posix", "POSIX visibility and PID identities")
-    def test_visibility_failure_and_pid_reuse_never_authorize_launch_or_cleanup(self):
-        with patch.object(validation, "check_platform"), \
-                patch.object(validation, "process_table", side_effect=sh.DriverError("visibility unavailable")), \
-                patch.object(validation.subprocess, "Popen") as launch:
-            self.assertEqual(validation.execute("python3 native.py", self.root, self.root / "attempt.log"), 75)
-            launch.assert_not_called()
+    @unittest.skipUnless(os.name == "posix", "POSIX PID identities")
+    def test_pid_reuse_never_authorizes_cleanup(self):
         # A reused parent PID must neither acquire the new parent's children nor
         # authorize signalling it. The original still-live child remains owned.
         owned = {10: "old-parent", 20: "owned-child"}
         table = {10: (1, "reused-parent"), 20: (1, "owned-child"), 30: (10, "unrelated-child")}
         process = types.SimpleNamespace(wait=lambda: None)
         with patch.object(owned_process, "process_table", return_value=table), \
-                patch.object(validation.os, "kill") as kill:
-            validation.terminate_owned(process, owned)
+                patch.object(owned_process.os, "kill") as kill:
+            owned_process.terminate_owned(process, owned)
         self.assertEqual(set(owned), {10, 20})
         self.assertEqual([args[0][0] for args in kill.call_args_list], [20, 20])

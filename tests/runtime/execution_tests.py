@@ -5,8 +5,6 @@ import os
 import pathlib
 import sys
 import tempfile
-import threading
-import time
 import types
 import unittest
 from unittest.mock import patch
@@ -60,10 +58,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(run.code, code)
                 self.assertEqual(row["exit"], code)
                 self.assertEqual(row["inputs"], execution.fingerprint(root))
-            if os.name == "nt":
-                self.assertIsNone(execution.fingerprint(root), "unsupported held reads cannot provide Windows proof")
-            else:
-                self.assertNotEqual(inputs, execution.fingerprint(root))
+            self.assertNotEqual(inputs, execution.fingerprint(root))
             with patch.object(sys, "argv", [str(helper), "run", str(policy), "0"]), \
                     patch.object(observed.process, "run", side_effect=sh.DriverError("execution unavailable")), \
                     patch.object(sys, "stderr", io.StringIO()):
@@ -73,7 +68,6 @@ class ExecutionTests(unittest.TestCase):
             self.assertIsNone(row["inputs"])
             self.assertEqual(row["error"], "execution unavailable")
 
-    @unittest.skipUnless(os.name == "posix", "POSIX held-file fingerprint positive control")
     def test_git_state_and_submodules_are_execution_inputs(self):
         with tempfile.TemporaryDirectory(prefix="ouro-proof-git-") as temporary:
             root = pathlib.Path(temporary) / "root"
@@ -111,8 +105,7 @@ class ExecutionTests(unittest.TestCase):
             git(root, "submodule", "deinit", "-q", "-f", "--", "dep")
             self.assertIsNotNone(execution.fingerprint(root), "an uninitialized gitlink has a recorded identity")
 
-    @unittest.skipUnless(os.name == "posix", "POSIX held-file fingerprint positive control")
-    def test_receipts_bind_every_input_and_head_and_reject_corruption(self):
+    def test_receipts_bind_inputs_and_head_and_reject_corruption(self):
         with tempfile.TemporaryDirectory(prefix="ouro-proof-inputs-") as temporary:
             root = pathlib.Path(temporary)
             self.assertEqual(sh.run(["git", "init", "-q", str(root)]).code, 0)
@@ -120,72 +113,65 @@ class ExecutionTests(unittest.TestCase):
             source = root / "café.py"
             source.write_text("input")
             private = root / ".git"
-            tree = types.SimpleNamespace(path=root, head=lambda: "a" * 40, admin=lambda: private)
-            def retain(code=0):
-                execution.retain(tree, [{"tool": "run", "command": "approved", "exit": code,
-                                         "inputs": execution.fingerprint(root)}], [])
+            tree = types.SimpleNamespace(path=root, head=lambda: "a" * 40, admin=lambda: private,
+                                         git=lambda *args, **kw: types.SimpleNamespace(out=""), env=types.SimpleNamespace(default="main"))
+            def retain():
+                execution.retain(tree, [], recheck=["approved"])
             retain()
-            self.assertEqual(execution.proven(tree), {"approved"})
+            self.assertEqual(execution.candidates(tree), ["approved"])
             (root / "output").mkdir()
             (root / "output" / "ignored").write_text("output")
-            self.assertEqual(execution.proven(tree), {"approved"})
+            self.assertEqual(execution.candidates(tree), ["approved"], "ignored output is not an input")
             source.write_text("changed")
-            self.assertEqual(execution.proven(tree), set())
+            self.assertEqual(execution.candidates(tree), [], "an untracked file's bytes are inputs")
             retain()
             extra = root / "untracked"
             extra.write_text("new")
-            self.assertEqual(execution.proven(tree), set())
+            self.assertEqual(execution.candidates(tree), [])
             extra.unlink()
-            retain(9)
-            self.assertEqual(execution.proven(tree), set(), "a later failed attempt invalidates success")
-            retain()
-            execution.retain(tree, [{"tool": "run", "command": "approved", "exit": 9, "inputs": None}], [])
-            self.assertEqual(execution.proven(tree), set(), "a later attempt with changed inputs invalidates success")
-            retain()
+            self.assertEqual(execution.candidates(tree), ["approved"])
             tree.head = lambda: "b" * 40
-            self.assertEqual(execution.proven(tree), set())
+            self.assertEqual(execution.candidates(tree), [], "another head has its own receipt")
             tree.head = lambda: "a" * 40
             proof = execution.directory(tree) / (tree.head() + ".json")
             value = json.loads(proof.read_text())
-            value["results"][0]["command"] = "forged"
+            value["recheck"] = ["forged"]
             proof.write_text(json.dumps(value))
-            self.assertEqual(execution.proven(tree), set(), "valid JSON edits also corrupt the receipt")
+            self.assertEqual(execution.candidates(tree), [], "valid JSON edits also corrupt the receipt")
             if os.name != "nt":
                 retain()
                 source.chmod(0o755)
-                self.assertEqual(execution.proven(tree), set())
+                self.assertEqual(execution.candidates(tree), [], "the exec bit is an input")
 
-    @unittest.skipIf(os.name == "posix", "unsupported-platform negative control")
-    def test_unsupported_fingerprint_never_reads_or_proves(self):
-        with tempfile.TemporaryDirectory() as temporary:
+    def test_hidden_entries_and_nested_repositories_never_prove_a_mutating_command(self):
+        with tempfile.TemporaryDirectory(prefix="ouro-proof-hidden-") as temporary:
             root = pathlib.Path(temporary)
-            with patch.object(execution, "snapshot") as reader:
-                self.assertIsNone(execution.fingerprint(root))
-            reader.assert_not_called()
+            def git(*args, cwd=root):
+                r = sh.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", *args], cwd=cwd)
+                self.assertEqual(r.code, 0, r.err)
+            git("init", "-q")
+            for name in ("hidden-a", "hidden-b"):
+                (root / name).write_text("original")
+            git("add", "-A"); git("commit", "-qm", "base")
+            git("update-index", "--assume-unchanged", "hidden-a")
+            git("update-index", "--skip-worktree", "hidden-b")
+            for name in ("hidden-a", "hidden-b"):
+                before = execution.fingerprint(root)
+                (root / name).write_text("changed " + name)
+                self.assertNotEqual(before, execution.fingerprint(root), name + " is read though Git hides its change")
+            nested = root / "nested"
+            nested.mkdir()
+            git("init", "-q", cwd=nested)
+            (nested / "inner").write_text("inside")
+            self.assertIsNone(execution.fingerprint(root), "a nested repository's contents are not listed, so nothing is proved")
+            many = root / "many"
+            many.mkdir()
+            for i in range(3000):
+                (many / f"untracked-{i:04}.txt").write_text(str(i))
+            (nested / ".git").rename(nested / "git-off")
+            self.assertIsNotNone(execution.fingerprint(root), "thousands of untracked files still fit")
 
-
-@unittest.skipUnless(os.name == "posix", "actual relative no-follow descriptor controls require POSIX")
-class FingerprintTests(unittest.TestCase):
-    @staticmethod
-    def inventory(names, index=""):
-        def query(*args):
-            if args[0] == "rev-parse":
-                return "a" * 40 + "\n"
-            return index if "--stage" in args else "\0".join(names) + "\0"
-        return query
-
-    def test_streams_binary_and_stable_links_without_following_targets(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
-            (root / "input").write_bytes(bytes(range(256)) * 300)
-            (root / "link").symlink_to("missing-target")
-            query = self.inventory(["input", "link"])
-            first = execution.fingerprint(root, query)
-            self.assertIsNotNone(first)
-            self.assertEqual(first, execution.fingerprint(root, query))
-            (root / "missing-target").write_text("not an inventoried input")
-            self.assertEqual(first, execution.fingerprint(root, query))
-
+    @unittest.skipUnless(os.name == "posix", "byte file names Windows cannot create")
     def test_real_git_lossy_names_refuse_while_valid_utf8_stays_observable(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -208,78 +194,3 @@ class FingerprintTests(unittest.TestCase):
                         self.assertIsNone(execution.fingerprint(root))
                     finally:
                         os.unlink(path)
-            # Custom transports must also reject text that cannot encode losslessly.
-            self.assertIsNone(execution.fingerprint(root, self.inventory(["surrogate-\udcff"])))
-
-    def test_leaf_replacement_never_reads_symlink_target_or_fifo(self):
-        for kind in ("symlink", "fifo"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
-                root = pathlib.Path(temporary);path = root / "input"
-                path.write_text("original")
-                outside = root / "outside";outside.write_text("must not read")
-                original = execution.Directory.file
-                def replace(directory, name):
-                    path.unlink()
-                    if kind == "fifo":os.mkfifo(path)
-                    else:path.symlink_to(outside)
-                    return original(directory, name)
-                answer = [];errors = []
-                def observe():
-                    try:answer.append(execution.fingerprint(root, self.inventory(["input"])))
-                    except BaseException as ex:errors.append(ex)
-                with patch.object(execution.Directory, "file", replace), patch.object(execution.os, "read", wraps=os.read) as read:
-                    thread = threading.Thread(target=observe, daemon=True);thread.start();thread.join(1)
-                    blocked = thread.is_alive()
-                    if blocked and kind == "fifo":
-                        release = os.open(path, os.O_RDWR | os.O_NONBLOCK)
-                        os.close(release);thread.join(1)
-                    self.assertFalse(blocked, "FIFO replacement must not block the snapshot")
-                    self.assertEqual(errors, [])
-                    self.assertEqual(answer, [None])
-                    read.assert_not_called()
-
-    def test_replaced_parent_and_changed_held_file_are_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary);(root / "dir").mkdir();(root / "dir/input").write_text("old")
-            original = execution.directory_fd
-            def replace(stack, parent, name):
-                held = original(stack, parent, name)
-                (root / "dir").rename(root / "old-dir");(root / "dir").mkdir();(root / "dir/input").write_text("new")
-                return held
-            with patch.object(execution, "directory_fd", replace):
-                self.assertIsNone(execution.fingerprint(root, self.inventory(["dir/input"])))
-            real_read = os.read;changed = False
-            def mutate(fd, amount):
-                nonlocal changed
-                data = real_read(fd, amount)
-                if not changed:
-                    changed = True;(root / "dir/input").write_text("changed while held")
-                return data
-            with patch.object(execution.os, "read", mutate):
-                self.assertIsNone(execution.fingerprint(root, self.inventory(["dir/input"])))
-
-    def test_resource_and_inventory_budgets_fail_closed(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary);(root / "one").write_bytes(b"x" * 100);(root / "two").write_bytes(b"y" * 100)
-            query = self.inventory(["one", "two"])
-            self.assertIsNotNone(execution.fingerprint(root, query))
-            for setting, limit in [("MAX_FILE", 99), ("MAX_TOTAL", 200), ("MAX_ENTRIES", 1), ("INVENTORY_LIMIT", 10), ("SNAPSHOT_SECONDS", 0)]:
-                with self.subTest(setting=setting), patch.object(execution, setting, limit):
-                    self.assertIsNone(execution.fingerprint(root, query))
-            calls = 0
-            def changing(*args):
-                nonlocal calls
-                calls += 1
-                return query(*args) if calls <= 3 else query(*args) + "changed"
-            self.assertIsNone(execution.fingerprint(root, changing))
-
-    def test_submodules_share_count_depth_and_byte_budgets(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary);(root / "dep").mkdir();(root / "dep/.git").write_text("gitdir: fixture")
-            (root / "dep/input").write_text("submodule data")
-            def query(*args):
-                if args[0] == "-C":return self.inventory(["input"])(*args[2:])
-                return self.inventory(["dep"], "160000 " + "b" * 40 + " 0\tdep\0")(*args)
-            self.assertIsNotNone(execution.fingerprint(root, query))
-            with patch.object(execution, "MAX_DEPTH", 0):self.assertIsNone(execution.fingerprint(root, query))
-            with patch.object(execution, "MAX_ENTRIES", 1):self.assertIsNone(execution.fingerprint(root, query))

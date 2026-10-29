@@ -1760,7 +1760,7 @@ def sec_no_pr_workflow():
           not any(s.startswith(("run list", "pr checks", "pr merge")) for s in v.sigs()))
     code, out, err = v.ouro("run", "1", "--dry-run")
     check("its resume's dry run retains owner merge",
-          code == 0 and ("would: leave it to the owner's merge, since no workflow at origin/master names pull_request" in out
+          code == 0 and ("is open on direct/1: merge or close it" in out
                          if inline_supported else "would post **Ready for merge** and exit 0" in out))
 
 
@@ -2857,7 +2857,7 @@ def sec_lane_source_guard():
 
 
 def sec_lane_pr_authority():
-    """Real public controller: portable fallback and exact-head resumed PR proof."""
+    """Real public controller: an inline refusal falls back to ordinary CI PR delivery."""
     absent = "ouro-fixture-ci-only-tool validate"
     local = "python3 gates/forbidden-tokens.py"
     binding = (BINDING.format(policy="stop-at-pr", review="adversarial-review") +
@@ -2868,82 +2868,6 @@ def sec_lane_pr_authority():
                "def git(*a): return subprocess.check_output(['git',*a],encoding='utf-8').strip()\n"
                "p=pathlib.Path(git('rev-parse','--git-common-dir'))/'direct-local-heads'\n"
                "with p.open('a',encoding='utf-8') as f:f.write(git('rev-parse','HEAD')+'\\n')\n")
-    check("resumed CI-owned toolchain is actually unavailable locally", shutil.which(absent.split()[0]) is None)
-    for fault in ("good", "pending", "stale", "local-fail", "advance-head", "advance-base", "no-cheap", "uncovered-code", "acceptance", "setup-absolute", "transient-history"):
-        selected = binding.replace("cheap=true", "cheap=false") if fault == "no-cheap" else binding
-        if fault in ("uncovered-code", "transient-history"):
-            selected = selected.replace('direct = ["docs/*.md"]', 'direct = ["docs/*.md", "src/*.py"]')
-        if fault == "transient-history":
-            selected += f'\n[[gate]]\npaths=["src/"]\ndirect_code_check=true\nrun="{absent}-code"\nci="echo external code workflow"\n'
-        setup_marker = TMP / ("direct-pr-authority-" + fault) / "main/.git/setup-should-not-execute"
-        setup = TMP / ("direct-pr-authority-" + fault) / "main/gates/setup.py"
-        if fault == "setup-absolute":
-            selected = selected.replace("[repo]\n", '[repo]\nsetup=' + json.dumps(f'python3 "{setup.as_posix()}"') + '\n')
-        body = DIRECT_BODY + ("\n## Acceptance\n`python3 gates/unapproved.py` passes.\n" if fault == "acceptance" else "")
-        extra = "raise SystemExit(9)\n" if fault == "local-fail" else ""
-        if fault in ("advance-head", "advance-base"):
-            target = "direct/1" if fault == "advance-head" else "master"
-            value = "HEAD~1" if fault == "advance-head" else "HEAD"
-            extra = f"subprocess.check_call(['git','--git-dir',git('remote','get-url','origin'),'update-ref','refs/heads/{target}',git('rev-parse','{value}')])\n"
-        c = Case("direct-pr-authority-" + fault, binding=selected,
-                 files={"gates/forbidden-tokens.py": program + extra, "gates/setup.py": "print('tracked setup')\n"}, table={"_issue_1": issue(body=body)})
-        c.real_executor = True
-        base = git(c.main, "rev-parse", "HEAD")
-        git(c.main, "checkout", "-qb", "direct/1")
-        c.write("docs/note.md", "note, updated\n")
-        if fault == "uncovered-code":
-            c.write("src/tiny.py", "pass\n")
-        if fault == "transient-history":
-            c.write("src/transient.py", "pass\n")
-            git(c.main, "add", "-A")
-            git(c.main, "commit", "-qm", "temporary source change")
-            (c.main / "src/transient.py").unlink()
-        git(c.main, "add", "-A")
-        git(c.main, "commit", "-qm", "prepared direct PR\n\nFixes #1")
-        head = git(c.main, "rev-parse", "HEAD")
-        git(c.main, "push", "-q", "origin", "direct/1")
-        git(c.main, "checkout", "-q", "master")
-        c.write("owner-wip.txt", "preserve owner work\n")
-        if fault == "setup-absolute":
-            c.write("gates/setup.py", f"from pathlib import Path\nPath({str(setup_marker)!r}).write_text('owner bytes executed')\n")
-        table = {"_issue_1": issue(body=body), "_pr": dict(number=7, head="direct/1", state="OPEN", title="prepared direct PR",
-                  body="Fixes #1\n", isDraft=False, url="https://x/pull/7")}
-        if fault == "pending":
-            table["_rollup"] = [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]
-        if fault == "stale":
-            table["_rollup_stale"] = True
-        c.set_table(table)
-        code, out, err = c.ouro("run", "1")
-        merged = any(sig.startswith("pr merge") for sig in c.sigs())
-        marker = c.main / ".git/direct-local-heads"
-        observed = marker.read_text(encoding="utf-8").splitlines() if marker.is_file() else []
-        if fault == "good":
-            check("actual resumed CI vehicle merges with absent toolchain and genuine local checks at H",
-                  code == 0 and merged and observed == [head] and "resumed mandatory checks passed" in out)
-        elif fault in ("pending", "stale"):
-            check(f"{fault}: green watcher alone cannot replace fresh exact named CI proof",
-                  code == 0 and not merged and observed == [head] and "waiting for CI validation" in out)
-        else:
-            check(f"{fault}: resumed green PR cannot bypass its structural/local/freshness obligations",
-                  (code == 0 and "pull request head changed" in out if fault == "advance-head" else code == 1) and not merged)
-            if fault in ("local-fail", "advance-head", "advance-base"):
-                check(f"{fault}: refusal follows the genuine mandatory local command at H", observed == [head])
-            else:
-                check(f"{fault}: structural refusal precedes any mandatory local execution", observed == [])
-            if fault == "setup-absolute":
-                check("absolute setup relocation refuses before dirty original setup can execute",
-                      "command relocation is unproved" in err and not setup_marker.exists()
-                      and "owner bytes executed" in setup.read_text(encoding="utf-8"))
-            if fault == "transient-history":
-                check("a code path only the history touched has no merge-base gate, so the plan refuses it",
-                      "no complete trusted structural mandatory-check plan" in err
-                      and git(c.main, "diff", "--name-only", f"{base}..{head}") == "docs/note.md")
-        check(f"{fault}: owner edits survive and no BUILD or caller receipt is invented",
-              (c.main / "owner-wip.txt").read_text(encoding="utf-8") == "preserve owner work\n"
-              and not c.prompts("BUILD") and not list((c.main / ".git").rglob("ouro-validation/*/receipt.json")))
-        if fault not in ("good", "advance-base"):
-            check(f"{fault}: default branch remains at original base", git(c.origin, "rev-parse", "master") == base)
-
     # Real inline --check must refuse on Windows and route through ordinary CI.
     # A no-cheap policy exercises the same existing fallback on every platform.
     for reason in ("no-cheap", "platform", "acceptance"):
@@ -2985,119 +2909,10 @@ def sec_lane_pr_authority():
                   "explicit acceptance is outside the trusted mandatory floor" in out and not c.prompts("BUILD"))
 
 
-def sec_lane_resume_copy_guards():
-    """Model the helper result; exercise real owned directory identity and Env.close behavior."""
+def sec_lane_guards():
+    """The direct lane's fallback input guards, acceptance base pin, late mutations and post-merge cleanup."""
     from unittest import mock
-    for fault in ("none", "checkout-only", "ship-policy", "gate-policy", "partial-add", "copy-reparse", "copy-stat", "parent-stat", "replace-copy", "cleanup", "execution-error"):
-        root = TMP / ("resume-copy-guard-" + fault)
-        root.mkdir()
-        main, scratch = root / "main", root / "scratch"
-        main.mkdir(); scratch.mkdir()
-        policy = {"repo": {"slug": "o/n", "default_branch": "master", "setup": "owned fixture setup", "checkout": "/shared/example"},
-                  "ship": {"direct": ["docs/*"], "policy": "stop-at-pr"},
-                  "gate": [{"cheap": True, "run": "python3 checks/reviewed.py"}]}
-        env = shmod.Env.__new__(shmod.Env)
-        loaded = json.loads(json.dumps(policy))
-        if fault == "checkout-only":
-            loaded["repo"]["checkout"] = str(main)
-        if fault == "ship-policy":
-            loaded["ship"]["policy"] = "trivial-merge"
-        if fault == "gate-policy":
-            loaded["gate"][0]["run"] = "python3 checks/unreviewed.py"
-        env.main, env.scratch, env.default, env.runtime, env.data = main, scratch, "master", None, loaded
-        env.lookup = lambda key: policy["repo"].get(key.removeprefix("repo."))
-        env.ob = types.SimpleNamespace(tomllib=types.SimpleNamespace(loads=lambda text: policy), plugin_root=lambda: None, OURO_TOKEN="<ouro>")
-        base, head = "a" * 40, "b" * 40
-        seen = {"setup": 0, "check": 0, "remove": 0, "copy": None}
-
-        def git(*args, **kwargs):
-            text = ""
-            if args[0] == "rev-parse":
-                text = base
-            elif args[0] == "ls-remote":
-                name = args[-1]
-                text = (base if name == "refs/heads/master" else head) + "\t" + name
-            elif args[:2] == ("worktree", "add"):
-                copy = pathlib.Path(args[-2]); seen["copy"] = copy
-                copy.mkdir()
-                (copy / "owned-marker").write_text("preserve me", encoding="utf-8")
-                if fault == "partial-add":
-                    raise shmod.DriverError("modeled partial Git add")
-            elif args[:2] == ("worktree", "remove"):
-                seen["remove"] += 1
-                if fault == "cleanup":
-                    return shmod.R(1, "", "modeled cleanup failure", args)
-                # This test created this exact plain directory; no external path is removed.
-                shutil.rmtree(seen["copy"])
-            return shmod.R(0, text, "", args)
-
-        env.git = git
-        env.gh_json = lambda *args: dict(headRefOid=head, headRefName="direct/1", baseRefName="master")
-        command = policy["gate"][0]["run"]
-
-        def checked(*args, **kwargs):
-            seen["check"] += 1
-            if fault == "execution-error" and "--check" in args[0]:
-                return shmod.R(1, "", "modeled uncertain executor failure", args)
-            if fault == "replace-copy" and seen["check"] == 1:
-                seen["copy"].rename(scratch / "original-owned-copy")
-                seen["copy"].mkdir()
-            data = dict(kind="checked-plan" if "--check" in args[0] else "plan", base=base, head=head, eligible=True, route="direct", execution_proof=False,
-                        commands=[dict(run=command, gates=[1])], checks=[dict(cmd=command, exit=0, sha=head)])
-            return shmod.R(0, json.dumps(data), "", args)
-
-        env.run = checked
-        run = runmod.Run.__new__(runmod.Run)
-        run.env, run.n, run.body, run.tree = env, 1, "", Tree(env, main, None)
-        run.spec_amendments = lambda: []
-        run.claim = types.SimpleNamespace(prepared=None)
-        if fault in ("ship-policy", "gate-policy"):
-            run.lane_checked = (base, head)  # Even this invocation's prior pair cannot authorize different policy.
-        run.lane_prepare = lambda *args: None
-        run.setup_tree = lambda copy: seen.__setitem__("setup", seen["setup"] + 1)
-        original_lstat = pathlib.Path.lstat
-
-        def lstat(path, *args, **kwargs):
-            if fault == "parent-stat" and path == scratch:
-                raise PermissionError("modeled parent visibility loss")
-            if seen["copy"] is not None and path == seen["copy"]:
-                if fault == "copy-stat":
-                    raise PermissionError("modeled copy visibility loss")
-                if fault == "copy-reparse":
-                    info = original_lstat(path, *args, **kwargs)
-                    return types.SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400, st_reparse_tag=1)
-            return original_lstat(path, *args, **kwargs)
-
-        error = None
-        with mock.patch.object(pathlib.Path, "lstat", lstat), mock.patch.object(runmod.node, "worktree_readiness", lambda *a, **k: None):
-            try:
-                run.lane_check_pr(7, head)
-            except shmod.DriverError as exc:
-                error = str(exc)
-        env.close()  # The real outer CLI cleanup, not a mocked deletion.
-        if fault in ("none", "checkout-only"):
-            check(f"{fault}: owned plain copy settles and cleans normally", error is None and seen["setup"] == seen["remove"] == 1 and seen["check"] == 2 and not scratch.exists())
-        elif fault in ("ship-policy", "gate-policy"):
-            check(f"{fault}: invocation cannot replace trusted BASE authority",
-                  error is not None and "binding differs from the trusted base" in error
-                  and seen["copy"] is None and seen["setup"] == seen["check"] == seen["remove"] == 0
-                  and not scratch.exists())
-        else:
-            check(f"{fault}: outer Env.close retains unproved owned scratch", error is not None and env.preserve_scratch and scratch.is_dir())
-            if fault in ("partial-add", "copy-reparse", "copy-stat", "parent-stat"):
-                check(f"{fault}: setup/checks never start before copy admission", seen["setup"] == seen["check"] == seen["remove"] == 0)
-            if fault == "replace-copy":
-                check("changed copy identity never reaches worktree removal", seen["remove"] == 0 and (scratch / "original-owned-copy" / "owned-marker").is_file())
-            if fault == "cleanup":
-                marker = seen["copy"] / "owned-marker"
-                check("failed owned cleanup preserves the exact evidence directory", seen["remove"] == 1 and marker.is_file() and marker.read_text(encoding="utf-8") == "preserve me")
-            if fault == "execution-error":
-                check("an unproved executor never triggers worktree deletion", seen["remove"] == 0 and (seen["copy"] / "owned-marker").is_file())
-            # Every directory here is created by this control, with no actual links.
-            env.preserve_scratch = False
-            env.close()
-
-    real_git = globals()["git"]  # The preceding modeled Env has a file-local Git stub.
+    real_git = globals()["git"]
     for fault in ("dirty", "new-head", "hidden", "ignored-overlap"):
         c = Case("direct-fallback-input-" + fault)
         expected = real_git(c.main, "rev-parse", "HEAD")
@@ -3223,7 +3038,6 @@ def sec_lane_resume_copy_guards():
         run.drive = drive
         with mock.patch.object(runmod.node, "worktree_readiness", lambda *a, **k: None), \
                 mock.patch.object(runmod.execution, "fingerprint", return_value=None), \
-                mock.patch.object(runmod.execution, "proven", return_value=set()), \
                 mock.patch.object(runmod.execution, "retain", return_value=None):
             try:
                 result, refused = run.lane_fallback(head), False
@@ -3282,7 +3096,7 @@ def sec_lane_resume_copy_guards():
     run.env = types.SimpleNamespace(main=c.main, default="master", git=query, pr_checks=lambda: True,
                                    gh_json=lambda *args: {"headRefOid": head})
     run.n, run.merge_pr = 1, merge
-    run.watch_pr, run.lane_check_pr = lambda *args: shmod.R(0, "", "", []), lambda *args: None
+    run.watch_pr = lambda *args: shmod.R(0, "", "", [])
     merged = run.lane_finish({"number": 7}, "reviewed head", "modeled merge body")
     retained = query("rev-parse", "refs/heads/direct/1", check=False)
     check("post-merge cleanup retains a late unpublished local direct-branch H2 by Git ancestry",
@@ -3520,32 +3334,15 @@ def sec_lane():
     check("vehicle: pr with the checks still running at the limit: exit 0, one pull request on direct/1", code == 0 and "still running" in out and creates == 1 and c.pr()["head"] == "direct/1")
     c.clear_prompts()
     code, out, err = c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "6"})
-    check("the next invocation finds the open pull request on direct/1: no build, no second pull request, exit 0", code == 0 and "still running" in out and c.prompts("BUILD") == []
-          and len([s for s in c.sigs() if s.startswith("pr create")]) == creates and git(c.origin, "rev-list", "--count", "master") == "1")
-    tbl = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
-    del tbl["run list*"]
-    c.set_table(tbl)
-    code, out, err = c.ouro("run", "1")
-    merged = git(c.origin, "rev-parse", "refs/heads/master")
-    check("once the checks are green the resumed run merges it and watches the merge commit, with no build", code == 0 and c.prompts("BUILD") == [] and len([s for s in c.sigs() if s.startswith("pr create")]) == creates
-          and any(s.startswith("pr merge") for s in c.sigs()) and any(s.startswith("run list") and f"--commit {merged}" in s for s in c.sigs()))
-    check("the main checkout is on a clean default branch at origin's tip, direct/1 gone locally", git(c.main, "status", "--porcelain") == "" and git(c.main, "rev-parse", "HEAD") == merged and git(c.main, "branch", "--list", "direct/1") == "")
+    check("the next invocation finds the open pull request on direct/1 and leaves it to the owner: no build, no second pull request, no merge, exit 0",
+          code == 0 and "is open on direct/1: merge or close it" in out and c.prompts("BUILD") == []
+          and len([s for s in c.sigs() if s.startswith("pr create")]) == creates and not any(s.startswith("pr merge") for s in c.sigs()))
     c = lane_case("lanelegacyprresume", protection=protected, table={"run list*": {"Exit": 0, "Out": []}})
     c.write("docs/note.md", "legacy note\n")
     git(c.main, "commit", "-qam", "legacy direct publication\n\nFixes #1")
     code, out, err = c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "6"})
     check("disabled legacy publication reaches a waiting direct PR without new provenance or BUILD",
           code == 0 and c.pr() is not None and "Ouro-Direct:" not in c.pr()["body"] and c.prompts("BUILD") == [])
-    creates = len([s for s in c.sigs() if s.startswith("pr create")])
-    code, out, err = c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "6"})
-    check("an older disabled direct PR resumes without requiring new provenance", code == 0 and "still running" in out
-          and c.prompts("BUILD") == [] and len([s for s in c.sigs() if s.startswith("pr create")]) == creates)
-    tbl = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
-    del tbl["run list*"]
-    c.set_table(tbl)
-    code, out, err = c.ouro("run", "1")
-    check("the older disabled direct PR lands normally when green", code == 0 and any(s.startswith("pr merge") for s in c.sigs())
-          and c.prompts("BUILD") == [])
     c = lane_case("lanepresumelabel", protection=protected, table={"run list*": {"Exit": 0, "Out": []}})
     c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "6"})
     tbl = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
@@ -3596,52 +3393,6 @@ def sec_live():
     ans = nodemod.run_node("FOLLOWUP", 'Answer with the JSON object {"issues": []} and nothing else.', "haiku", list(nodemod.READ_TOOLS), str(TMP), 300)
     check("a real claude -p call returns a parsed answer", ans == {"issues": []} or isinstance(ans.get("issues"), list))
     check("the call's usage is recorded", bool(nodemod.USAGE) and (nodemod.USAGE[0]["input"] + nodemod.USAGE[0]["cache_read"] + nodemod.USAGE[0]["cache_creation"]) > 0 and nodemod.USAGE[0]["output"] > 0)
-
-
-def sec_lane_moved_main():
-    """A lane resumed at its pull request after the owner moved the main checkout: no fix is built there."""
-    try:
-        runmod.validation.check_platform()
-    except shmod.DriverError:
-        print("INFO: inline repair lifecycle requires admitted caller execution; dirty-main CI resume is covered separately")
-        return
-    protected = {"api repos/o/n/rules/branches/master": {"Exit": 0, "Out": [{"type": "required_status_checks"}]},
-                 "api repos/o/n/branches/master/protection": {"Exit": 1, "Out": "Branch not protected"}}
-
-    def resumed(name, move, runs):
-        c = lane_case(name, protection=protected, table={"run list*": {"Exit": 0, "Out": []}})
-        c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "6"})
-        move(c)
-        tbl = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
-        del tbl["run list*"]
-        tbl["_runs"] = [["success"]] + [[r] for r in runs]  # the pull request's head, then each commit the lane pushes after it
-        c.set_table(tbl)
-        c.clear_prompts()
-        c.node("BUILD", {**NOTE_BUILD, "subject": "fix(note): second try", "writes": {"docs/note.md": "note, again\n"}})
-        return c, c.ouro("run", "1")
-
-    def stops(c):
-        return [x["body"] for x in (c.issue_state() or {"comments": []})["comments"] if x["body"].startswith("**Stop:**")]
-
-    c, (code, out, err) = resumed("lanewip", lambda c: c.write("owner-wip.txt", "my unfinished work\n"), ["failure", "success"])
-    check("a red run on a resumed lane whose main checkout holds an untracked file: exit 3, `**Stop:** open decision`, no BUILD",
-          code == 3 and len(stops(c)) == 1 and stop_comment_ok(stops(c)[0], "open decision") and c.prompts("BUILD") == [])
-    check("the owner's untracked file stays in the main checkout, untracked", (c.main / "owner-wip.txt").is_file() and git(c.main, "status", "--porcelain").strip() == "?? owner-wip.txt")
-
-    def branch_off(c):
-        git(c.main, "checkout", "-q", "-b", "feature-x")
-        c.write("src/feature.py", "x = 1\n")
-        git(c.main, "add", "-A")
-        git(c.main, "commit", "-qm", "owner: feature work")
-    c, (code, out, err) = resumed("lanebranch", branch_off, ["failure", "success"])
-    tip = git(c.main, "rev-parse", "feature-x")
-    check("a red run on a resumed lane whose main checkout is on the owner's branch: exit 3, no BUILD, the branch untouched and not pushed",
-          code == 3 and len(stops(c)) == 1 and c.prompts("BUILD") == [] and git(c.main, "rev-parse", "--abbrev-ref", "HEAD") == "feature-x"
-          and git(c.main, "log", "-1", "--format=%s", tip) == "owner: feature work" and "feature-x" not in git(c.origin, "branch", "--list"))
-    c, (code, out, err) = resumed("lanebranchgreen", lambda c: git(c.main, "checkout", "-q", "-b", "feature-y"), ["success", "success"])
-    check("a green run on a resumed lane whose main checkout is on a fresh owner's branch: exit 0, that branch not fast-forwarded to the merge",
-          code == 0 and git(c.main, "rev-parse", "feature-y") == git(c.main, "rev-parse", "master") != git(c.origin, "rev-parse", "refs/heads/master")
-          and git(c.main, "rev-parse", "--abbrev-ref", "HEAD") == "feature-y")
 
 
 def sec_builder_default():
@@ -3902,9 +3653,6 @@ if mode == 'pass-once' and sys.argv[1:] == ['second']:
     (state / 'mode').write_text('unavailable')
 if mode == 'unavailable':
     sys.exit(75)
-if mode == 'async-source':
-    subprocess.Popen([sys.executable, '-c', "import pathlib,time; time.sleep(0.8); pathlib.Path('src/app.py').write_text('late mutation')"], start_new_session=True)
-    time.sleep(0.2)
 if mode == 'source':
     pathlib.Path('src/app.py').write_text('mutated source\\n')
 if mode == 'untracked':
@@ -4324,25 +4072,9 @@ def sec_validation_handoff():
 
     if os.name != 'nt':
         from ouro import validation
-        c = validation_case('async-source', mode='async-source')
-        # A genuine failed execution takes the bounded fix route; stop the fix
-        # builder so this row cannot accidentally validate a replacement answer.
-        c.node('BUILD', {**BUILD, 'stop': {'reason': 'open decision', 'question': 'fixture incomplete worker'}}, 2)
-        code, out, err = validation_run(c, '--validate')
-        time.sleep(1)
-        check('successful parent with escaped live worker cannot create proof or reach review',
-              code != 0 and not validation_receipts(c) and not c.prompts('REVIEW')
-              and len(validation_logs(c)) == 1)
-        attempts = list((pathlib.Path(git(validation_wt(c), 'rev-parse', '--absolute-git-dir'))
-                         / 'ouro-validation').glob('*/attempt-*/attempt.json'))
-        check('incomplete execution retains a failed command row and log even after kernel settlement',
-              any(r['exit'] != 0 and pathlib.Path(r['log']).exists()
-                  for a in attempts for r in json.loads(a.read_text())['results']))
         # Bounded real children: a leaked child leaves an artifact and exits on its
-        # own. Include children which escape the runner's process group, as native
-        # worker launchers do. No unrelated PID or persistent worker is used.
-        for limit, escaped in (('time', False), ('output', False),
-                               ('time', True), ('output', True)):
+        # own. No unrelated PID or persistent worker is used.
+        for limit, escaped in (('time', False), ('output', False)):
             directory = TMP / ('validation-descendants-' + limit + str(escaped))
             directory.mkdir()
             marker = directory / 'survived'
@@ -4370,8 +4102,8 @@ def sec_validation_handoff():
     mutations = {
         'barrier': ('bin/ouro/run.py', '            if pending:\n', '            if False and pending:\n'),
         'allowlist': ('bin/ouro/validation.py', 'if cmd not in allowed or identity in seen:', 'if identity in seen:'),
-        'head': ('bin/ouro/validation.py', '        head = lease.execute(tree.head)\n',
-                 '        head = lease.execute(lambda: tree.git("rev-list", "--reverse", f"origin/{tree.env.default}..HEAD").out.split()[0])\n'),
+        'head': ('bin/ouro/validation.py', '        head = tree.head()\n',
+                 '        head = tree.git("rev-list", "--reverse", f"origin/{tree.env.default}..HEAD").out.split()[0]\n'),
         'failure': ('bin/ouro/validation.py', 'return 124 if limited else code', 'return 124 if limited else 0'),
     }
     tracked = git(BASE, 'ls-files', '-z').split('\0')
@@ -4406,96 +4138,9 @@ def sec_executable_acceptance():
     acceptance_cases.exercise(sys.modules[__name__])
 
 
-def sec_build_recovery():
-    import recovery_cases
-    recovery_cases.run(sys.modules[__name__])
-
-
 def sec_coordination_resume():
     import coordination_cases
     coordination_cases.resume_offline(sys.modules[__name__])
-@reap_fixture_children
-def sec_validation_driver_death():
-    from ouro import validation, validation_lock as locks
-    try:
-        validation.check_platform()
-    except runmod.DriverError as ex:
-        print(f'SKIP: native public driver abrupt-death control; {ex}')
-        return
-    if not sys.platform.startswith('linux'):
-        print('SKIP: native Linux subreaper control')
-        return
-    c = validation_case('driver-fsmonitor-death')
-    validation_run(c)  # Real BUILD and ordinary non-validating wait.
-    wt = validation_wt(c)
-    root = pathlib.Path(git(wt, 'rev-parse', '--absolute-git-dir')) / 'ouro-validation'
-    output = wt / '.validation'
-    output.mkdir(exist_ok=True)
-    hook = output / 'fsmonitor'
-    worker = ("import pathlib,time; r=pathlib.Path(" + repr(str(output)) + "); "
-              "end=time.monotonic()+20\n"
-              "while not (r/'release').exists() and time.monotonic()<end: time.sleep(.02)\n"
-              "(r/'done').touch()\n")
-    hook.write_text(
-        '#!' + sys.executable + '\n'
-        'import pathlib,subprocess,sys\n'
-        'r=pathlib.Path(' + repr(str(output)) + ')\n'
-        'if pathlib.Path.cwd()==r.parent and not (r/"helper").exists():\n'
-        ' p=subprocess.Popen([sys.executable,"-c",' + repr(worker) + '], '
-        'start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n'
-        ' (r/"helper").write_text(str(p.pid))\n'
-        'print("token\\n")\n', encoding='utf-8')
-    hook.chmod(0o700)
-    git(wt, 'config', 'core.fsmonitor', str(hook))
-    def until(fn):
-        end = time.monotonic() + 12
-        while time.monotonic() < end:
-            value = fn()
-            if value:
-                return value
-            time.sleep(.02)
-        raise AssertionError('bounded public driver lifecycle observation did not arrive')
-    with tempfile.TemporaryFile() as log:
-        p = subprocess.Popen([sys.executable, str(BIN / 'ouro'), 'run', '1', '--validate'],
-                             cwd=c.main, env={**os.environ, **c.env({'VALIDATION_STATE': str(c.root)})},
-                             stdout=log, stderr=log)
-        try:
-            until(lambda: (output / 'helper').exists())
-            # This is the first validation cleanliness helper at the public entry.
-            # A direct validate() control would miss the original escape.
-            check('driver preflight helper is under an active kernel lease',
-                  (root / 'lock').exists() and locks.inspect(root)['phase'] == 'active')
-            p.kill()
-            p.wait(timeout=5)
-        finally:
-            (output / 'release').touch()
-            if p.poll() is None:
-                p.kill()
-            p.wait(timeout=5)
-            until(lambda: (output / 'done').exists())
-            # The killed driver's executor outlives it; recovery is what lets it end (the lock suite proves the recovery).
-            def recover():
-                try:
-                    return locks.inspect(root, True)
-                except runmod.DriverError as ex:
-                    if 'lease is live' not in str(ex):
-                        raise
-            until(lambda: locks.inspect(root).get('phase') == 'settled')
-            until(recover)
-            git(wt, 'config', '--unset', 'core.fsmonitor')
-
-
-@reap_fixture_children
-def sec_validation_locks():
-    import unittest
-    from validation_lock_tests import ValidationLockTests
-    result = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(ValidationLockTests))
-    if result.testsRun and len(result.skipped) == result.testsRun:  # every row skipped is no evidence, never a pass
-        print(f"SKIP: the caller lock controls need native Linux ({result.skipped[0][1]})")
-        return
-    check("caller lock abrupt-death and recovery controls", result.wasSuccessful())
-
-
 def sec_coordination():
     import coordination_cases
     coordination_cases.exercise(sys.modules[__name__])
@@ -4781,10 +4426,10 @@ def sec_ci_validation():
 
 # Heaviest first, by the slower CI leg's section time: the pool starts sections in this order.
 SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("run: full class gates by paths", sec_full_paths),
-            ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: the builder default", sec_builder_default), ("run: BUILD recovery", sec_build_recovery), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
-            ("run: lane resumed in a moved main checkout", sec_lane_moved_main), ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
-            ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct PR copy guards", sec_lane_resume_copy_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("run: validation driver death", sec_validation_driver_death), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
-            ("run: node garbage", sec_node_garbage), ("run: validation locks", sec_validation_locks), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
+            ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
+            ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
+            ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
+            ("run: node garbage", sec_node_garbage), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
 INDEX = os.environ.get("OURO_TEST_INDEX")
 WORKERS = int(os.environ.get("OURO_TEST_WORKERS") or min(8, os.cpu_count() or 1))
 

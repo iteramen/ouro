@@ -78,9 +78,6 @@ MERGES = ("squash", "merge")
 # original shape -- merge to sync, squash to land, a linear default branch -- and it is what both
 # keys already default to, so a binding that declares none of the three lands that way.
 LANDINGS = {f"{sync}-{merge}": (sync, merge) for sync in SYNCS for merge in MERGES}
-# ship.forbidden_check: whether the forbidden-tokens hook matches what a session posts against the
-# private token list. Absent follows the target repository's visibility (see docs/binding.md).
-FORBIDDEN_CHECKS = ("required", "off")
 # ship.direct: globs of the files the direct lane may push without a pull request or a review. A
 # glob is matched with fnmatchcase against the repository-relative path in forward slashes, so `*`
 # crosses `/`. `check` refuses one that matches any of these paths, which full's list covers: the
@@ -131,7 +128,7 @@ SCHEMA = {
     "gate": {"run": str, "ci": str, "paths": list, "cheap": bool, "direct_code_check": bool},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
-             "external_effort": str, "test_first_for_bugs": bool, "forbidden_check": str, "direct": list,
+             "external_effort": str, "test_first_for_bugs": bool, "direct": list,
              "unattended_classes": list, "validation": str, "validation_checks": list, "direct_max_lines": int, "direct_max_files": int},
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
@@ -345,8 +342,6 @@ def validate(data):
         errors.append("ship.external_model: must be a non-empty string")
     if isinstance(ship.get("external_effort"), str) and not ship["external_effort"]:
         errors.append("ship.external_effort: must be a non-empty string")
-    if "forbidden_check" in ship and ship["forbidden_check"] not in FORBIDDEN_CHECKS:
-        errors.append(f"ship.forbidden_check: must be one of {', '.join(FORBIDDEN_CHECKS)}")
     for key in ("direct_max_lines", "direct_max_files"):
         if type(ship.get(key)) is int and ship[key] <= 0:
             errors.append(f"ship.{key}: must be a positive integer")
@@ -1082,14 +1077,6 @@ report_only = ["S9"]
         'review = "external-audit"\nexternal_cli = "grok"\nexternal_effort = ""'))
     assert validate(empty_effort) == ["ship.external_effort: must be a non-empty string"], validate(empty_effort)
 
-    # forbidden_check is optional; the two values are written out here, not read from the tuple.
-    for value in ("required", "off"):
-        assert validate(tomllib.loads(base.replace("[ship]\n", f'[ship]\nforbidden_check = "{value}"\n'))) == [], value
-    for value, want in (('"Off"', ["ship.forbidden_check: must be one of required, off"]),
-                        ("false", ["ship.forbidden_check: expected str", "ship.forbidden_check: must be one of required, off"])):
-        errs = validate(tomllib.loads(base.replace("[ship]\n", f"[ship]\nforbidden_check = {value}\n")))
-        assert errs == want, (value, errs)
-
     # ship.direct is optional and empty when absent; a docs glob passes, `**` and a glob naming a
     # gate's own script are refused with the glob and the probe it matched.
     def with_ship(lines):
@@ -1244,12 +1231,12 @@ type = {json.dumps(typ)}
             assert "repo.checkout" in str(e), e
 
         # The check is repo policy, so a machine cannot turn it off.
-        local.write_text('[ship]\nforbidden_check = "off"\n', encoding="utf-8")
+        local.write_text('[ship]\nreview = "none"\n', encoding="utf-8")
         try:
             load(committed)
-            raise AssertionError("an overlay setting ship.forbidden_check must fail loudly")
+            raise AssertionError("an overlay setting ship.review must fail loudly")
         except SystemExit as e:
-            assert "ship.forbidden_check" in str(e), e
+            assert "ship.review" in str(e), e
 
         local.write_text("[ship]\n", encoding="utf-8")  # empty forbidden table is still forbidden
         try:

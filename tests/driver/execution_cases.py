@@ -203,7 +203,7 @@ def exercise(h):
         # Prove the original commands genuinely at this new head. Otherwise the
         # run could stop on their missing proof and hide a dropped added gate.
         validator = types.SimpleNamespace(path=wt,
-            head=lambda: h.git(wt, "rev-parse", "HEAD"),
+            head=lambda: h.git(wt, "rev-parse", "HEAD"), admin=lambda: pathlib.Path(h.git(wt, "rev-parse", "--absolute-git-dir")),
             git=lambda *args, **kw: types.SimpleNamespace(out=h.git(wt, *args)),
             env=types.SimpleNamespace(default="master", runtime=developer.Settings()))
         known, failure = h.runmod.validation.validate(validator, [

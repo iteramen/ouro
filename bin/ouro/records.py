@@ -193,8 +193,6 @@ def render_body(rec, review):
     elif not gates:
         out.append("- Gates: none selected")
     out += [f"- Gate skipped, the diff touches none of its paths: `{s}`" for s in rec.get("skipped", [])]
-    out += [f"- Observed successful execution @ {rec.get('execution_head')}: `{cmd}`; "
-            f"evidence `{rec.get('execution_evidence')}`" for cmd in rec.get("execution_commands", [])]
     out += [f"- BUILD reported `{g.get('cmd')}`: exit {g.get('exit')}" for g in rec.get("build_gates") or []]
     out += [f"- Driver validation @ {g['sha']}: `{g['cmd']}` exit {g['exit']}; evidence `{g['log']}`"
             for g in rec.get("validation_results") or []]

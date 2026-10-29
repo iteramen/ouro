@@ -222,14 +222,10 @@ The entry points accept the same workflow arguments:
 
 | Command | Does |
 |---|---|
-| `run N [--part k] [--dry-run] [--validate] [--recover-build PATH] [--pr M]` | One `agent-ready` issue to a landed change. Each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. `--validate` executes pending approved validation in the caller's context. `--pr M` adopts open pull request M, whose body has its own `Fixes #N` line, instead of building a branch. |
+| `run N [--part k] [--dry-run] [--validate] [--pr M]` | One `agent-ready` issue to a landed change. Each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. `--validate` executes pending approved validation in the caller's context. `--pr M` adopts open pull request M, whose body has its own `Fixes #N` line, instead of building a branch. |
 | `triage N [--dry-run]` | The verdict comment, the `Size:`, `Flow:` and `Doc impact on close:` lines and the labels for one issue. |
 | `weekly [--post]` | The outcomes and quality tables of `bin/loop-outcomes.py`. |
 | `compile` | The next wave of the queue. |
-
-For a rejected fix BUILD that left partial edits, inspect the files and select each one with
-`run N --recover-build PATH --validate` (repeat the path flag); the
-[recovery contract](docs/contract.md#interrupted-build-recovery) says what it keeps and refuses.
 
 Each skill is `python3 <ouro>/bin/ouro <command>` from the repository root, and relays its exit
 code: 0 is landed, or waiting on a person or on running checks; 1 a driver error; 2 refused,
@@ -327,7 +323,7 @@ apply is `docs/binding.md`; this is the map.
 | `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the stricter of the repository's and the issue's |
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
 | `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe |
-| `ship.validation` | `local`, `ci` | `local` | final-input authority for PRs, including resumed direct PRs; inline direct checks remain local |
+| `ship.validation` | `local`, `ci` | `local` | final-input authority for PRs; inline direct checks remain local |
 | `ship.validation_checks` | exact GitHub check names | required in `ci` mode | nonempty unique names whose success covers selected nonlocal gates at the final PR head |
 | `ship.copilot_bot_id` | a Bot node id | required under `copilot` | the id the review request names |
 | `ship.external_cli` | `grok`, `claude`, `codex`, `copilot` | required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
@@ -338,7 +334,6 @@ apply is `docs/binding.md`; this is the map.
 | `ship.merge` | `squash`, `merge` | `squash` | how a pull request lands |
 | `ship.direct` | globs | none, the lane off | the files the direct lane may push to the default branch |
 | `ship.direct_max_lines` / `ship.direct_max_files` | positive integers | `20` / `3` | limits across the complete linear range; exceeding them uses PR delivery |
-| `ship.forbidden_check` | `required`, `off` | follows the list's `# protects:` line, or with no list the repository's visibility | whether the hook checks what a session posts against the private token list |
 | `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing |
 | `models.builder` | `opus`, `sonnet`, `haiku`, `fable` | `opus` | the BUILD, TRIAGE, CHECKPOINT and FOLLOWUP nodes |
 | `models.builder_trivial` | the same | `sonnet` | the BUILD node on a `trivial` issue |
@@ -418,29 +413,17 @@ the contract sections the driver pastes into them, and repository instructions.
 
 ## The private token list
 
-Some values must never ship in this plugin's text or in anything a session posts: a customer's
-name, an internal host. They live in one file outside every repository, named by the environment
-variable `OURO_FORBIDDEN_TOKENS`: one regular expression per line, matched case-insensitive.
-`python3 bin/forbidden-tokens.py scan` checks every tracked file under `skills/`, `agents/`,
-`templates/` and `docs/` and reports a hit by path, line and entry number, never by the matched
-text; it fails closed, exit 1, on a missing or unreadable list or an entry that does not compile.
-CI has no list and prints one `SKIP:` line; the check that matters runs on the machines that
-hold it. The hook, which `hooks/hooks.json` registers so that a plugin install runs it with
-`OURO_FORBIDDEN_TOKENS` set in the environment Claude Code starts in, refuses a `gh issue`,
-`gh pr` or `git commit` call whose text or body file matches. Set the variable in the launch
-environment, or in Claude Code's settings `env` map; Codex does not import that map. The plugin
-sets no such variable, and a Claude session that has none runs the hook under the no-list rule
-below. Installing the Codex skills does not register this interactive hook. A comment line
-`# protects: <owner/repo> ...` in the list names the repositories it guards, and then only a call
-that lands in one (by `repo.slug`, else `origin`, an unresolved one counted in) or names one (a
-`-R`, `--repo` or `GH_REPO` value, or an issue or pull request URL) is checked, so a consumer repository the line does not name needs no binding key;
-with no such line every call is checked. With no list on the machine, the hook refuses any such
-call unless every directory it lands in (the working directory, each `cd` target, one
-in a child shell's string included, each `git -C`, `--git-dir` or `--work-tree` target and each
-`GIT_DIR` assignment) is a repository `gh repo view` reports PRIVATE or INTERNAL or whose binding
-turns the check off; the refusal names its reason. It fails open where Claude Code treats a hook
-as non-blocking: a missing `python3` or a timeout. The commands, the exit codes and what the hook
-can and cannot see: the module docstring of `bin/forbidden-tokens.py`.
+Some values must never ship in this plugin's text: a customer's name, an internal host. They live
+in one file outside every repository, named by the environment variable `OURO_FORBIDDEN_TOKENS`:
+one regular expression per line, matched case-insensitive. `python3 bin/forbidden-tokens.py scan`
+checks every tracked file under `skills/`, `agents/`, `templates/` and `docs/` and reports a hit by
+path, line and entry number, never by the matched text; it fails closed, exit 1, on a missing or
+unreadable list or an entry that does not compile. CI has no list and prints one `SKIP:` line; the
+check that matters runs on the machines that hold it. `python3 bin/forbidden-tokens.py check`
+reads text on standard input the same way, for text that is about to be published; the release
+export runs it over every path and file it ships. Set the variable in the launch environment, or
+in Claude Code's settings `env` map; Codex does not import that map. The commands and exit codes:
+the module docstring of `bin/forbidden-tokens.py`.
 
 ## License
 

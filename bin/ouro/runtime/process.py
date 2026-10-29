@@ -268,7 +268,8 @@ def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output
                     if owned:
                         terminate_owned(p, owned, environment)
                     try:
-                        os.killpg(p.pid, signal.SIGKILL)
+                        if type(p.pid) is int and p.pid > 1:  # killpg(1) is kill(-1): every process the user owns
+                            os.killpg(p.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
                     p.wait()

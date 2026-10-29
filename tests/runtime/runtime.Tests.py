@@ -27,7 +27,7 @@ from network_tests import NetworkReadinessTests
 from records_tests import RecordsTests
 from file_only_tests import FileOnlyReadinessTests
 from validation_tests import ValidationTests
-from execution_tests import ExecutionTests, FingerprintTests
+from execution_tests import ExecutionTests
 from execution_lifecycle_tests import GateExecutionTests
 from timed_command_tests import TimedCommandTests
 from worktree_tests import WorktreeCleanupTests
@@ -48,8 +48,7 @@ class RuntimeTests(unittest.TestCase):
         from ouro import validation
         for name in ("DriverError", "R", "child_env"):
             self.assertIs(getattr(sh, name), getattr(process, name))
-        for name in ("check_platform", "process_table", "descendants", "terminate_owned"):
-            self.assertIs(getattr(validation, name), getattr(process, name))
+        self.assertIs(validation.check_platform, process.check_platform)
 
     def test_children_run_without_the_shared_multicore_jit_profile(self):
         r = sh.run([sys.executable, "-c", "import os; print(os.environ.get('DOTNET_MultiCoreJitMinNumCpus'))"])
@@ -507,9 +506,8 @@ class RuntimeTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "POSIX cleanup exception observation")
     def test_process_cleanup_failure_retains_diagnostics(self):
-        from ouro import validation
         self.addCleanup(diagnostics.ATTEMPTS.clear)
-        real_table, real_cleanup = validation.process_table, validation.terminate_owned
+        real_table, real_cleanup = process.process_table, process.terminate_owned
         for broken_observer in (False, True):
             with self.subTest(broken_observer=broken_observer):
                 ready = self.root / ("ready-" + str(broken_observer))
@@ -650,57 +648,6 @@ class RuntimeTests(unittest.TestCase):
         time.sleep(6.1)
         self.assertFalse(marker.exists())
         self.assertEqual(process.run([sys.executable, "-c", "print('synthetic')"]).out.strip(), "synthetic")
-
-    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux /proc completion interleaving")
-    @reap_fixture_children
-    def test_validation_completion_snapshot_distinguishes_waited_and_live_children(self):
-        import time
-        from ouro import validation
-        try:
-            validation.check_platform()
-        except sh.DriverError as ex:
-            self.skipTest(str(ex))
-        for mode in ("sync", "async"):
-            work = self.root / mode
-            work.mkdir()
-            (work / "child.py").write_text(
-                "import os,pathlib,time\npathlib.Path('child.pid').write_text(str(os.getpid()))\n"
-                "while not pathlib.Path('sampled').exists(): time.sleep(0.002)\n"
-                + ("time.sleep(1); pathlib.Path('escaped').write_text('escaped')\n" if mode == "async" else ""))
-            (work / "parent.py").write_text(
-                "import os,pathlib,subprocess,sys,time\npathlib.Path('parent.pid').write_text(str(os.getpid()))\n"
-                "child=subprocess.Popen([sys.executable,'child.py'])\n"
-                + ("while not pathlib.Path('sampled').exists(): time.sleep(0.002)\n" if mode == "async" else "child.wait()\n"))
-            original, delayed = validation.process_table, False
-            def snapshot(env=None):
-                nonlocal delayed
-                table = original(env)
-                try:
-                    child = int((work / "child.pid").read_text())
-                    parent = int((work / "parent.pid").read_text())
-                except (FileNotFoundError, ValueError):
-                    return table
-                if not delayed and child in table and parent in table:
-                    delayed = True
-                    (work / "sampled").write_text("observed real parent and child")
-                    deadline = time.monotonic() + 5
-                    while time.monotonic() < deadline:
-                        try:
-                            if (pathlib.Path('/proc') / str(parent) / 'stat').read_text().split()[2] == 'Z':
-                                break
-                        except FileNotFoundError:
-                            break
-                        time.sleep(0.002)
-                    else:
-                        self.fail("generated parent did not finish within the control bound")
-                return table
-            with patch.object(validation, "process_table", side_effect=snapshot):
-                code = validation.execute('"' + sys.executable + '" parent.py', work, work / "output.log")
-            self.assertTrue(delayed, "the snapshot must precede actual parent completion")
-            self.assertEqual(code, 0 if mode == "sync" else 1, (work / "output.log").read_text())
-            if mode == "async":
-                time.sleep(1.1)
-                self.assertFalse((work / "escaped").exists(), "genuine live descendants must be reaped")
 
     @unittest.skipUnless(os.name == "nt", "Windows job-assignment failure")
     def test_process_refuses_failed_containment_without_hanging(self):

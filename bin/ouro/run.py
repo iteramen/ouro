@@ -11,13 +11,12 @@ import posixpath
 import re
 import shlex
 import shutil
-import stat
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import briefs, execution, node, recovery, sh, validation, worktrees
+from . import briefs, execution, node, sh, validation, worktrees
 from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, empty_list
 from .coordination import Claim
 from .records import (
@@ -71,7 +70,6 @@ SKIPS = re.compile(r"\s*(?:echo|pwsh -NoProfile -Command [\"']Write-Host)\s+(?:-
 @dataclass
 class RunOptions:
     validate: bool = False
-    recover_build: list = field(default_factory=list)
     override_claim: bool = False
     adopt_pr: int | None = None
 
@@ -309,41 +307,36 @@ class Run:
         if not coordination:
             e.git("fetch", "origin", check=False)
         pr = self.find_pr()
-        if self.options.recover_build and (self.flow == "direct" or not pr or pr["state"] != "OPEN"):
-            raise Refused("BUILD recovery requires an open normal-path issue pull request; it cannot start a fresh or direct BUILD")
         if not pr and coordination:
             pr = self.find_pr(states=("CLOSED",))
         branch_known = self.branch_exists()
         lane_pr = self.find_pr(f"direct/{self.n}", states=("OPEN",)) if self.flow == "direct" and pr is None else None
         published = None
-        if self.flow == "direct" and (coordination and lane_pr or pr is None and lane_pr is None and not e.dry):
+        if self.flow == "direct" and pr is None and lane_pr is None and not e.dry:
             e.git("fetch", "origin", check=False)
-            if lane_pr:
-                self.lane_trace(lane_pr)  # before enter can post an override record
-            else:
-                # A merge message need not repeat the direct commit or PR body.
-                # Order publications by Git, so an old PR cannot supersede a fix/revert.
-                merged = self.lane_merged_direct()
-                marked = e.git("log", "--first-parent", "--format=%H", "--fixed-strings",
-                               f"--grep=Fixes #{self.n}", f"--grep=Revert the direct commits for #{self.n}",
-                               f"origin/{e.default}").out.splitlines()
-                candidates = set(merged) | {h for h in marked if self.lane_fixes(h) or self.lane_is_revert(h)}
-                heads = e.git("log", "--first-parent", "--format=%H", f"origin/{e.default}").out.splitlines()
-                head = next((h for h in heads if h in candidates), None)
-                if head:
-                    message = e.git("log", "-1", "--format=%B", head).out
-                    reconcile = (coordination or head in merged) and self.issue.get("state") == "CLOSED"
-                    trace = self.lane_provenance(head) if head in merged else None
-                    if ((trace and trace["stage"] == "revert")
-                            or self.lane_is_revert(head) and re.search(r"(?m)^Ouro-Direct:", message)):
-                        self.lane_provenance(head)  # validate even a completed stop's chain
-                        # A trusted developer's final write acknowledges this execution.
-                        reconcile = not self.lane_stop_complete(head) or "agent-ready" not in self.labels
-                    if reconcile:
-                        trace = self.lane_provenance(head)
-                        published = (head, trace["parent"], trace["stage"])
-                        self.lane_prepare(e.git("rev-parse", f"{head}^").out.strip(), head,
-                                          trace["stage"], check=False)
+            # A merge message need not repeat the direct commit or PR body.
+            # Order publications by Git, so an old PR cannot supersede a fix/revert.
+            merged = self.lane_merged_direct()
+            marked = e.git("log", "--first-parent", "--format=%H", "--fixed-strings",
+                           f"--grep=Fixes #{self.n}", f"--grep=Revert the direct commits for #{self.n}",
+                           f"origin/{e.default}").out.splitlines()
+            candidates = set(merged) | {h for h in marked if self.lane_fixes(h) or self.lane_is_revert(h)}
+            heads = e.git("log", "--first-parent", "--format=%H", f"origin/{e.default}").out.splitlines()
+            head = next((h for h in heads if h in candidates), None)
+            if head:
+                message = e.git("log", "-1", "--format=%B", head).out
+                reconcile = (coordination or head in merged) and self.issue.get("state") == "CLOSED"
+                trace = self.lane_provenance(head) if head in merged else None
+                if ((trace and trace["stage"] == "revert")
+                        or self.lane_is_revert(head) and re.search(r"(?m)^Ouro-Direct:", message)):
+                    self.lane_provenance(head)  # validate even a completed stop's chain
+                    # A trusted developer's final write acknowledges this execution.
+                    reconcile = not self.lane_stop_complete(head) or "agent-ready" not in self.labels
+                if reconcile:
+                    trace = self.lane_provenance(head)
+                    published = (head, trace["parent"], trace["stage"])
+                    self.lane_prepare(e.git("rev-parse", f"{head}^").out.strip(), head,
+                                      trace["stage"], check=False)
         if published:
             local = e.git("rev-parse", "HEAD").out.strip()
             if (local != e.git("rev-parse", f"origin/{e.default}").out.strip()
@@ -403,23 +396,14 @@ class Run:
             self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
             return self.lane_after(*published)
         if lane_pr:
-            return self.lane_resume(lane_pr)
+            say(f"[2a] direct: pull request #{lane_pr['number']} is open on direct/{self.n}: merge or close it, "
+                f"then invoke `run {self.n}` again")
+            return 0
         if pr and pr["state"] == "MERGED":
             return self.after_merge(pr)
         if e.dry:
-            if self.options.recover_build:
-                say("  would: preserve the dirty original and offer only explicitly selected files in a private recovery checkout; normal validation/review/caps still apply")
             return self.plan(pr, branch_known)
-        if self.options.recover_build:
-            checkout, files, original = recovery.prepare(self, pr, self.options.recover_build)
-            e.main = checkout
-            self.tree = self.issue_tree()
-            self.claim = Claim(self)  # A new clone never adopts/copies the original claim cache.
-            self.claim.enter()  # A known original claim still requires the person's explicit override.
-            self.ensure_worktree()
-            recovery.offer(self.tree, checkout, files, original)
-        else:
-            self.ensure_worktree()
+        self.ensure_worktree()
         return self.drive(pr)
 
     def preflight(self):
@@ -945,7 +929,6 @@ class Run:
                                comments=self.spec_comments(), manual=self.manual_block(), anchors=briefs.anchors_block(self.tree.path, self.body),
                                implement_docs=briefs.implement_docs(e, self.tree.path), flow=self.flow,
                                commands=cmds, findings=findings or "(none)", contract=contract)
-        prompt += recovery.brief(self.tree, self.n, self.k)
         tools = node.builder(gates)
         model = self.build_model()
         say(f"[4] BUILD node ({model})" + (" fix round" if findings else ""))
@@ -990,7 +973,7 @@ class Run:
                    and type(call.get("exit")) is int and call["exit"] == 0]
         self.tree.git("add", "-A")
         self.tree.git("commit", "-q", "--allow-empty", "-F", f)
-        execution.retain(self.tree, [], self.execution_grants, recheck=recheck)
+        execution.retain(self.tree, self.execution_grants, recheck=recheck)
         self.committed_here.add(self.tree.head())
         self.last_build = ans
         say(f"  committed: {subject}")
@@ -1306,7 +1289,7 @@ class Run:
 
     def build_facts(self, *, evidence=True):
         """The record's door, blast, summary, residue and build_gates: the newest BUILD answer on the branch, which describes the whole branch; its manual steps, the union over the branch's answers."""
-        # Metadata-only callers must not collect receipt/state evidence before validation owns a lease.
+        # Metadata-only callers must not collect receipt/state evidence before validation holds its lock.
         shas = self.tree.git("rev-list", f"origin/{self.env.default}..HEAD").out.split()
         facts = [(s, self.commit_facts(s)) for s in shas]
         sha, f = next(((s, x) for s, x in facts if x), (shas[-1], {}))  # no facts anywhere: the first commit's body
@@ -1325,9 +1308,7 @@ class Run:
                 "summary": without_build_lines(self.tree.git("log", "-1", "--format=%b", sha).out),
                 "residue": [str(x) for x in f.get("residue") or []], "build_gates": f.get("gates_run") or [], "manual": list(manual.values()),
                 "validation_pending": requested, "validation_results": validation.receipt(self.tree, caller) if caller and evidence else [],
-                "validation_attempts": validation.attempts(self.tree) if caller and evidence else [],
-                "execution_commands": sorted(execution.proven(self.tree)) if evidence else [],
-                "execution_head": shas[0], "execution_evidence": str(execution.directory(self.tree) / (shas[0] + ".json")) if evidence else ""}
+                "validation_attempts": validation.attempts(self.tree) if caller and evidence else []}
 
     def evidence_lines(self):
         """The validation and CI evidence a reviewer reads, from one fingerprint."""
@@ -1966,28 +1947,6 @@ class Run:
             return self.lane_fallback(publication_head)
         return self.lane_after(sha, trace["parent"], trace["stage"])
 
-    def lane_resume(self, pr):
-        """An open pull request on direct/<N>: the lane goes on from its checks, with no build."""
-        e = self.env
-        say(f"[2a] direct: pull request #{pr['number']} is open on direct/{self.n}: the lane resumes at its checks")
-        if e.dry:
-            say("  would: watch its checks, merge it, watch the default branch's run on the merge commit" if e.pr_checks() else
-                f"  would: leave it to the owner's merge, since no workflow at origin/{e.default} names pull_request")
-            return 0
-        self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
-        if not self.lane_coordinated():
-            head = e.gh_json("pr", "view", str(pr["number"]), "--json", "headRefOid")["headRefOid"]
-            message = e.git("log", "-1", "--format=%B", head).out
-            if not re.search(r"(?m)^Ouro-Direct:", message):
-                # Existing disabled integrations did not require execution metadata.
-                # Explicitly recorded executions still use their validated stage chain.
-                body = e.body_file("direct-pr.md", (pr.get("body") or "").strip() + "\n")
-                return self.lane_after(self.lane_finish(pr, pr["title"], body))
-        trace = self.lane_trace(pr)
-        message = re.sub(r"(?m)^Ouro-Direct: .*\n?", "", pr.get("body") or "").strip()
-        body = e.body_file("direct-pr.md", message + "\n\nOuro-Direct: " + json.dumps(trace, sort_keys=True) + "\n")
-        return self.lane_after(self.lane_finish(pr, pr["title"], body), trace["parent"], trace["stage"])
-
     def lane_after(self, sha, parent=None, stage="parent"):
         """The default branch's run on the shipped `sha`: green ends the lane, a red run gets one fix commit, a second red is reverted."""
         e = self.env
@@ -2054,15 +2013,6 @@ class Run:
         self.claim.update(f"direct checks red: {fix}")
         self.lane_revert([fix, sha], [url, url2])
         return 0
-
-    def lane_trace(self, pr):
-        """Restore a direct PR's actual scope before any resumed claim write."""
-        e = self.env
-        head = e.gh_json("pr", "view", str(pr["number"]), "--json", "headRefOid")["headRefOid"]
-        base = e.git("merge-base", f"origin/{e.default}", head).out.strip()
-        trace = self.lane_provenance(head)
-        self.lane_prepare(base, head, trace["stage"], check=False)
-        return trace
 
     def lane_fixes(self, head):
         return bool(re.search(rf"(?m)^Fixes #{self.n}\s*$",
@@ -2278,132 +2228,6 @@ class Run:
             raise DriverError(f"gh pr create ran but no pull request reads back for {branch}")
         return self.lane_finish(pr, subject, body)
 
-    def lane_check_pr(self, n, head):
-        """A resumed vehicle proves its mandatory obligations at the actual PR head."""
-        e, branch = self.env, f"direct/{self.n}"
-        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
-            raise DriverError("the direct PR has no exact immutable head; nothing merged")
-        e.git("fetch", "origin", f"+refs/heads/{e.default}:refs/remotes/origin/{e.default}",
-              f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
-        base = e.git("rev-parse", f"origin/{e.default}").out.strip()
-        policy = e.ob.tomllib.loads(e.git("show", f"{base}:.claude/ouro.toml").out)
-        def authority(data):
-            return {**data, "repo": {k: v for k, v in data["repo"].items() if k != "checkout"}}
-        if authority(policy) != authority(e.data):
-            raise DriverError("direct resume binding differs from the trusted base; nothing merged")
-        def unchanged():
-            view = e.gh_json("pr", "view", str(n), "--json", "headRefOid,headRefName,baseRefName")
-            if (view.get("headRefOid") != head or view.get("headRefName") != branch
-                    or view.get("baseRefName") != e.default):
-                raise DriverError("the direct PR identity changed before merge; nothing merged")
-            for name, expected in ((e.default, base), (branch, head)):
-                rows = e.git("ls-remote", "--heads", "origin", f"refs/heads/{name}").out.splitlines()
-                if len(rows) != 1 or rows[0].split() != [expected, f"refs/heads/{name}"]:
-                    raise DriverError("the direct PR head or trusted base changed before merge; nothing merged")
-        unchanged()
-        if e.git("merge-base", "--is-ancestor", base, head, check=False).code != 0:
-            raise DriverError("the direct PR is not based on the current trusted default; reconcile it manually, nothing merged")
-        # Relocating an absolute checkout-owned operand would execute main's bytes.
-        try:
-            commands = [policy.get("repo", {}).get("setup") or ""] + [
-                gate.get(field) or "" for gate in policy.get("gate", []) for field in ("run", "ci")]
-            for command in commands:
-                for token in shlex.split(command):
-                    path = Path(token.split("=", 1)[1] if token.startswith("-") and "=" in token else token)
-                    if path.is_absolute() and path.resolve().is_relative_to(e.main.resolve()):
-                        raise ValueError("absolute original-checkout command operand")
-        except (ValueError, OSError) as error:
-            raise DriverError(f"direct resume command relocation is unproved ({error}); nothing merged") from error
-        copy = e.scratch / ("direct-check-" + uuid.uuid4().hex)
-        preserve, checked_tree = getattr(e, "preserve_scratch", False), worktrees.Tree(e, copy, branch)
-        e.preserve_scratch = True
-        def directory(path, expected=None):
-            info = path.lstat()
-            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                    or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT or getattr(info, "st_reparse_tag", 0)
-                    or expected is not None and not os.path.samestat(info, expected)):
-                raise DriverError(f"direct-check directory identity is unproved: {path}")
-            return info
-        try:
-            parent_identity = directory(e.scratch)
-            node.worktree_readiness(e.runtime, e.main, copy, None, head, scratch=e.scratch)
-            directory(e.scratch, parent_identity)
-            e.git("worktree", "add", "--detach", str(copy), head)
-            directory(e.scratch, parent_identity)
-            identity = directory(copy)
-        except (OSError, DriverError) as error:
-            raise DriverError(f"direct-check creation is unproved; preserved {e.scratch}: {error}") from error
-        settled = False
-        try:
-            if policy.get("repo", {}).get("setup"):
-                self.setup_tree(copy)
-            checked = e.run(script("ouro-direct.py", "--repo", str(copy), "--base", base, "--head", head), cwd=copy)
-            try:
-                plan = json.loads(checked.out)
-                if (checked.code != 0 or plan["kind"] != "plan" or plan["base"] != base or plan["head"] != head
-                        or plan["eligible"] is not True or plan["route"] != "direct"
-                        or plan["execution_proof"] is not False or not plan["commands"]):
-                    raise ValueError()
-                floor = {row["run"] for row in plan["commands"]}
-                root = Path(e.ob.plugin_root() or sh.PLUGIN).as_posix()
-                if not set(acceptance_commands(acceptance_source(self))) <= {cmd.replace(e.ob.OURO_TOKEN, root) for cmd in floor}:
-                    raise ValueError()
-                gates = []
-                for row in plan["commands"]:
-                    owned = [policy["gate"][i - 1] for i in row["gates"] if type(i) is int and 1 <= i <= len(policy["gate"])]
-                    if (not owned or len(owned) != len(row["gates"]) or any(g["run"] != row["run"] for g in owned)
-                            or len({self.locally_run(row["run"], g) for g in owned}) != 1):
-                        raise ValueError()
-                    gates.append((row["run"].replace(e.ob.OURO_TOKEN, root), owned[0]))
-            except (ValueError, KeyError, TypeError, IndexError):
-                raise DriverError("direct PR has no complete trusted structural mandatory-check plan; nothing merged") from None
-            if e.lookup("ship.validation") == "ci":
-                if any(not self.locally_run(cmd, gate) and gate.get("paths") and not checked_tree.touches(gate["paths"])
-                       for cmd, gate in gates):
-                    raise DriverError("direct PR CI coverage is unproved: a mandatory historical gate is not selected by the final diff; nothing merged")
-                if self.portable_gates(head, [(cmd, g) for cmd, g in gates if self.locally_run(cmd, g)], [], ci=True, tree=checked_tree):
-                    raise DriverError("direct PR local mandatory check failed; nothing merged")
-                execution.ci_inputs(checked_tree, head)
-                settled = True
-                # Only an actual direct PR's trusted structural obligations use this
-                # route. Normal BUILD/in-lane admission and selection stay unchanged.
-                if not e.pr_checks():
-                    raise DriverError("direct CI validation requires the owner's PR validation checks")
-                if self.gate_entries(checked_tree) != e.data.get("gate", []):
-                    raise DriverError("CI gate coverage changed: update the owner's invoking binding before resuming")
-                if not self.check_ci({"number": n}, head, {cmd for cmd, gate in gates if not self.locally_run(cmd, gate)}):
-                    raise Stopped(0)
-                execution.ci_inputs(checked_tree, head)
-            else:
-                checked = e.run(script("ouro-direct.py", "--repo", str(copy), "--base", base, "--head", head, "--check"), cwd=copy)
-                try:
-                    data = json.loads(checked.out)
-                    rows = data["checks"]
-                    if (checked.code != 0 or data["kind"] != "checked-plan" or data["eligible"] is not True
-                            or data["route"] != "direct" or data["base"] != base or data["head"] != head
-                            or data["execution_proof"] is not False or data["commands"] != plan["commands"]
-                            or len(rows) != len(floor) or {r["cmd"] for r in rows} != floor
-                            or any(type(r["exit"]) is not int or r["exit"] != 0 or r["sha"] != head for r in rows)):
-                        raise ValueError()
-                except (ValueError, KeyError, TypeError):
-                    raise DriverError("direct PR returned no complete current-head mandatory checks; nothing merged") from None
-                self.gate_log, self.skipped = rows, []
-                settled = True
-            unchanged()
-            say(f"[2a] direct: resumed mandatory checks passed at {head[:7]}")
-        finally:
-            if not settled:
-                say(f"[2a] direct: incomplete checks; preserved {copy}")
-            else:
-                try:
-                    directory(e.scratch, parent_identity)
-                    directory(copy, identity)
-                    if e.git("worktree", "remove", "--force", str(copy), check=False).code != 0:
-                        raise DriverError("Git could not remove the owned direct-check worktree")
-                except (OSError, DriverError) as error:
-                    raise DriverError(f"direct-check cleanup is unproved; preserved {e.scratch}: {error}") from error
-                e.preserve_scratch = preserve
-
     def lane_finish(self, pr, subject, body):
         """The open pull request's checks, then its merge: the merge commit's sha."""
         e = self.env
@@ -2415,11 +2239,10 @@ class Run:
             raise Stopped(0)
         w = self.watch_pr(n, head, e.main)
         if w.code is None:
-            say(f"[2a] direct: the checks on #{n} are still running: invoke `run {self.n}` again")
+            say(f"[2a] direct: the checks on #{n} are still running: merge it once they are green, or close it")
             raise Stopped(0)
         if w.code != 0:
             raise DriverError(f"the checks on #{n} are not green: {w.text}")
-        self.lane_check_pr(n, head)
         sha = self.merge_pr(n, f"{subject} (#{n})", body, e.main, head)
         if sha is None:
             raise DriverError(f"#{n} conflicts with {e.default}: sync the direct/{self.n} branch by hand, then invoke `run {self.n}` again")
@@ -2521,9 +2344,6 @@ class Run:
                 or any(a and b and (a == b or a.startswith(b + "/") or b.startswith(a + "/"))
                        for a in ignored for b in restore)):
             raise Refused("direct fallback has hidden or overlapping ignored inputs; preserve and reconcile the main checkout")
-        inputs = execution.fingerprint(self.tree.path)
-        observations = [{"tool": "run", "command": cmd, "exit": 0, "inputs": inputs}
-                        for cmd in execution.proven(self.tree)]
         # The existing issue branch preserves H before leaving the default
         # checkout. Ordinary checkouts preserve late edits/ignored collisions;
         # the expected-old update cannot erase a concurrent default-branch H2.
@@ -2554,7 +2374,7 @@ class Run:
         self.claim.prepared = None  # direct trace remains on the board; subsequent PR records use their own head
         self.tree = self.issue_tree()
         self.ensure_worktree()
-        execution.retain(self.tree, observations, self.execution_grants)
+        execution.retain(self.tree, self.execution_grants)
         self.flow = "express"
         self.rederive()
         return self.drive(None)

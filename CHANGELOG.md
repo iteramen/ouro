@@ -20,6 +20,33 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.9.0] - 2026-10-29
+
+- The plugin no longer registers the forbidden-tokens PreToolUse hook, so a `gh` or `git commit`
+  call is never blocked by the private token list. `forbidden-tokens.py scan` (tracked files),
+  `check` (text on standard input) and the release export's check stay.
+  **Consumer contract:** `ship.forbidden_check` was `required` or `off`; `check` now refuses it as
+  an unknown key, and `forbidden-tokens.py hook` is gone. Migration: delete the `forbidden_check`
+  line from `[ship]`.
+
+- `ouro run` no longer offers BUILD recovery from a dirty worktree.
+  **Consumer contract:** `run N --recover-build PATH` is gone from the driver and the run skill.
+  Migration: commit or stash the partial files you want and resume with a plain `run N`.
+
+- `ouro run N --validate` takes a plain lock file per worktree and kills each command's process
+  group when it returns or passes its bound, in place of the lease and the process-table watch.
+  A worker that leaves its process group is no longer tracked.
+  **Consumer contract:** `ouro validation-lock [--recover]` is gone. Migration: a lock left by a
+  killed driver is deleted by hand; the refusal names its path.
+
+- A direct-lane pull request merges once its checks are green, with no second proof of its head in
+  a scratch copy. A run that finds a `direct/<N>` pull request already open waits for you to merge
+  or close it instead of resuming it.
+
+- The fingerprint that tells whether a command changed its own inputs is read from Git (HEAD, the
+  index, and the mode and bytes of each changed, untracked or hidden path) in place of a directory
+  walk. A dirty submodule or a nested repository gives no proof.
+
 ## [v1.8.1] - 2026-10-29
 
 **Net lines:** +69 across bin and tests, because three bug fixes and the BLOCKED verdict each carry

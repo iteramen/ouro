@@ -9,11 +9,11 @@ import signal
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from . import sh, validation_lock
-from .runtime.process import worker_env
-from .runtime.process import check_platform, process_table, descendants, terminate_owned
+from . import sh
+from .runtime.process import check_platform, worker_env
 
 TIMEOUT = 3600
 OUTPUT_LIMIT = 1024 * 1024
@@ -143,15 +143,25 @@ def attempts(tree):
 
 
 
+@contextmanager
+def lock(root):
+    """One validation per worktree at a time."""
+    path = root / "lock"
+    try:
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        raise sh.DriverError(f"validation is already running in this worktree; if none is, delete {path}") from None
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def execute(cmd, cwd, log, settings=None):
     argv, extra = command(cmd)
-    exclusions = worker_env(settings) if settings else {}
-    env = sh.child_env({**extra, **exclusions})
-    # Approved command assignments must never choose the lifecycle observer.
-    helpers = sh.child_env(exclusions)
+    env = sh.child_env({**extra, **(worker_env(settings) if settings else {})})
     try:
         check_platform()
-        process_table(helpers)
     except sh.DriverError as ex:
         log.write_text(str(ex) + "\n", encoding="utf-8")
         return 75
@@ -164,63 +174,29 @@ def execute(cmd, cwd, log, settings=None):
     # overflow; only the bounded prefix is retained as durable evidence.
     with tempfile.TemporaryFile() as output:
         try:
-            p = subprocess.Popen(argv, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
-                                 start_new_session=os.name != "nt")
+            p = subprocess.Popen(argv, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as ex:
             log.write_text(str(ex)[:OUTPUT_LIMIT], encoding="utf-8")
             return 75
-        start, limited, owned = time.monotonic(), False, {}
-        incomplete = False
-        while True:
-            done = p.poll() is not None  # completion must precede the ownership snapshot used to judge it
-            if os.name != "nt":
-                try:
-                    table = process_table(helpers)
-                    if not owned and p.pid in table:
-                        owned[p.pid] = table[p.pid][1]
-                    descendants(table, owned)
-                except sh.DriverError:
-                    # Do not report success when lifecycle accounting was lost.
-                    p.kill()
-                    p.wait()
-                    raise sh.DriverError("validation lost process visibility; inspect descendants before resuming")
-            if done:
-                # Parent success is not completion while owned workers can still
-                # change inputs. Reap only our recorded descendants and refuse
-                # proof rather than silently turning interrupted work green.
-                live = {pid for pid, born in owned.items()
-                        if pid != p.pid and pid in table and table[pid][1] == born}
-                if live:
-                    terminate_owned(p, owned, helpers)
-                    incomplete = True
-                break
+        start, limited = time.monotonic(), False
+        while p.poll() is None:
             if time.monotonic() - start > TIMEOUT or os.fstat(output.fileno()).st_size > OUTPUT_LIMIT:
                 limited = True
-                if os.name == "nt":
-                    # taskkill's tree traversal needs the parent to still exist.
-                    try:
-                        subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                       timeout=30, check=True, env=helpers)
-                    except (OSError, subprocess.SubprocessError) as ex:
-                        p.kill()
-                        p.wait()
-                        raise sh.DriverError("validation process-tree cleanup failed; inspect descendants before resuming") from ex
-                else:
-                    terminate_owned(p, owned, helpers)
                 break
             time.sleep(0.02)
+        # A worker left in the command's group cannot change inputs after the proof. Only a real child pid:
+        # killpg(1) is kill(-1), which signals every process the user owns.
+        if type(p.pid) is int and p.pid > 1:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         code = p.wait()
         output.seek(0)
         raw = output.read(OUTPUT_LIMIT + 1)
         if len(raw) > OUTPUT_LIMIT:
             limited = True
-        if limited and os.name != "nt":
-            terminate_owned(p, owned, helpers)
-        log.write_bytes(raw[:OUTPUT_LIMIT] + (b"\nvalidation time/output limit exceeded\n" if limited else b"")
-                        + (b"\nvalidation parent exited with owned descendants; incomplete execution\n" if incomplete else b""))
-        if incomplete:
-            return 1
+        log.write_bytes(raw[:OUTPUT_LIMIT] + (b"\nvalidation time/output limit exceeded\n" if limited else b""))
         return 124 if limited else code
 
 
@@ -232,7 +208,7 @@ def record_attempt(evidence, head, commands, results):
 
 
 def check_inputs(tree, head, hint):
-    """Check the proof boundary under its existing lease, without executing a command or writing a receipt."""
+    """Check the proof boundary under the validation lock, without executing a command or writing a receipt."""
     return validate(tree, [], hint, check_head=head)[1]
 
 
@@ -259,43 +235,22 @@ def validate(tree, pending, hint, *, reuse=False, execute_missing=True, check_he
         sh.say(f"{ex}; {hint(None if check_head is not None else [p['cmd'] for p in pending])}")
         return [], 75
     commands = [p["cmd"] for p in pending]
-    # Locate the standard worktree administrative directory without launching Git
-    # before ownership exists. Refuse other layouts rather than run an unowned helper.
-    marker = tree.path / ".git"
-    if marker.is_dir():
-        gitdir = marker.resolve()
-    else:
-        text = marker.read_text(encoding="utf-8").strip()
-        if not text.startswith("gitdir: "):
-            raise sh.DriverError("validation requires a standard Git worktree directory")
-        gitdir = (tree.path / text[8:]).resolve()
-    root = gitdir / "ouro-validation"
+    root = tree.admin() / "ouro-validation"
     if root.is_symlink():
         raise sh.DriverError("validation state must be Git-private directories")
     root.mkdir(parents=True, exist_ok=True)
-    lease = validation_lock.Lease(root / "lock", None, commands)
-    try:
-        actual = lease.execute(lambda: tree.git("rev-parse", "--absolute-git-dir").out.strip())
-        if Path(actual).resolve() != gitdir:
-            raise sh.DriverError("validation Git directory differs from owned directory")
-        head = lease.execute(tree.head)
-        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
-            raise sh.DriverError("validation HEAD identity unavailable")
-        lease.data["sha"] = head
-        validation_lock.write(lease.fd, lease.data)
+    with lock(root):
+        head = tree.head()
         if check_head is not None:
-            return [], None if lease.execute(inputs_match, tree, check_head) else 1
+            return [], None if inputs_match(tree, check_head) else 1
         directory = root / key(head, commands)
         if directory.is_symlink():
             raise sh.DriverError("validation state must be Git-private directories")
         directory.mkdir(parents=True, exist_ok=True)
-        lease.execute(clean, tree, head)
+        clean(tree, head)
         if reuse:
-            # These inputs were acquired under the lease. Reading their evidence
-            # launches no helper and keeps full batch results out of the bounded lock.
             results = receipt(tree, pending, inputs=(head, commands, directory))
             if results is not None:
-                lease.execute(clean, tree, head)
                 return results, None
         if not execute_missing:
             return [], 75
@@ -305,20 +260,17 @@ def validate(tree, pending, hint, *, reuse=False, execute_missing=True, check_he
         record_attempt(evidence, head, commands, results)
         for i, cmd in enumerate(commands):
             log = evidence / f"{i}.log"
-            code = lease.execute(execute, cmd, tree.path, log, tree.env.runtime, command_log=log)
+            code = execute(cmd, tree.path, log, tree.env.runtime)
             r = {"cmd": cmd, "sha": head, "exit": code, "log": str(log),
                  "digest": hashlib.sha256(log.read_bytes()).hexdigest()}
             results.append(r)
             sh.say(f"validation @ {head}: `{cmd}` exit {code}; evidence {log}")
             # Every attempt is evidence, including failures and source mutation.
             record_attempt(evidence, head, commands, results)
-            lease.execute(clean, tree, head)
+            clean(tree, head)
             if code != 0:
                 return results, code
-        lease.execute(clean, tree, head)
         temporary = directory / "receipt.tmp"
         temporary.write_text(json.dumps({"sha": head, "commands": commands, "results": results, "attempt": evidence.name}), encoding="utf-8")
         temporary.replace(directory / "receipt.json")
         return results, None
-    finally:
-        lease.close()

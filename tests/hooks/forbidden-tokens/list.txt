@@ -1,2 +1,0 @@
-# The fixture list for the forbidden-tokens hook: one entry.
-\bzzqx-secret\b
