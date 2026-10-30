@@ -15,6 +15,11 @@ from unittest.mock import patch
 from ouro import developer, sh, worktrees
 from ouro.run import Run
 
+# Removal needs a process observer: Windows handles or Linux /proc. Without one (Darwin) cleanup keeps
+# every worktree, which test_unobserved_platform_keeps_every_worktree pins.
+OBSERVED = os.name == "nt" or Path("/proc").is_dir()
+REMOVES = unittest.skipUnless(OBSERVED, "no process observer here: cleanup keeps every worktree")
+
 
 class WorktreeCleanupTests(unittest.TestCase):
     def setUp(self):
@@ -89,6 +94,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         with patch.object(Path, "iterdir", entries):
             yield proc
 
+    @REMOVES
     def test_unreadable_external_reports_limitation_without_overriding_own_proofs(self):
         self.create()
         original = worktrees.resources
@@ -120,6 +126,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertIn("external process visibility limited", output.getvalue())
         self.assertTrue((self.path / "tracked").exists())
 
+    @REMOVES
     def test_closed_and_merged_remove_only_local_refs(self):
         for state in ("CLOSED", "MERGED"):
             self.path = self.path.parent / state.lower()
@@ -312,6 +319,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         with patch.object(worktrees.os, "open", side_effect=replace), self.assertRaises(ValueError):
             worktrees.read_record(self.record)
 
+    @REMOVES
     def test_partial_removal_names_residual_and_retains_branch(self):
         self.create()
         original = worktrees.git
@@ -327,6 +335,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "refs/heads/" + self.branch), self.head)
         self.assertTrue(self.record.exists())
 
+    @REMOVES
     def test_failed_remove_after_mutation_never_reports_intact_retention(self):
         self.create()
         original = worktrees.git
@@ -342,6 +351,7 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "refs/heads/" + self.branch), self.head)
         self.assertTrue(self.record.exists())
 
+    @REMOVES
     def test_branch_race_and_failed_remove_preserve_new_work(self):
         self.create()
         original_git = worktrees.git
@@ -364,6 +374,15 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "refs/heads/" + self.branch), self.new)
         self.assertTrue(self.record.exists())
 
+    @unittest.skipIf(OBSERVED, "this platform has a process observer: the removal rows run")
+    def test_unobserved_platform_keeps_every_worktree(self):
+        self.create()
+        out = self.sweep()
+        self.assertIn("kept one: resource observer unavailable", out)
+        self.assertTrue((self.path / "tracked").exists())
+        self.assertEqual(self.git("rev-parse", "refs/heads/" + self.branch), self.head)
+
+    @REMOVES
     def test_native_resource_users_refused_before_any_removal(self):
         self.create()
         for kind in ("cwd", "nested", "reader", *( ["shared-delete-reader"] if os.name == "nt" else [])):

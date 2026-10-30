@@ -205,6 +205,14 @@ def _external_leaf(repo, lexical):
     return parent / lexical.name
 
 
+def _app_alias(path):
+    try:
+        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
+    except OSError:
+        return False
+    return bool(tag) and tag == getattr(stat, "IO_REPARSE_TAG_APPEXECLINK", None)
+
+
 def _executable(repo, name, *, required=False):
     # Resolve using the execution checkout, not this planner's own working directory.
     if Path(name).is_absolute() or "/" in name or "\\" in name:
@@ -218,6 +226,11 @@ def _executable(repo, name, *, required=False):
         try:
             resolved = lexical.resolve(strict=True)
         except OSError:
+            if _app_alias(lexical):
+                # realpath cannot follow a Windows app execution alias (the Store's python3);
+                # the alias file is the identity, owned by its resolved directory. The non-strict
+                # resolve spells it as the disk does, not as PATHEXT matched it.
+                return str(_external_leaf(repo, lexical.resolve()))
             # Structural CI obligations do not require a usable local external
             # toolchain. Execution still resolves strictly, and an unresolved
             # checkout-owned executable never becomes eligible this way.

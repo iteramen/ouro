@@ -120,6 +120,16 @@ names it under `[authority].local` and the skills cite it rather than restate it
 
 ## 3. Issue hygiene
 
+Failed or incomplete execution is a driver error, distinct from normal waiting for checks,
+merge or environment validation. On a failed initial BUILD, verify the old worker ended and
+inspect and preserve only identified task-owned partial files and retained logs before a normal
+run again. Preserve unrelated edits; never reset the directory, include unknown edits, or accept
+a partial final report as a completed stage. If ownership or liveness is unproved, stop with the
+concrete evidence gap. Resume needs a genuine new completed BUILD, fresh exact-head proof and
+independent review. There is no automatic retry or recovery execution API. Successful CI or a
+worker report does not continue ownership of the invoking chat turn; the caller remains
+responsible for its foreground run through its reported outcome.
+
 - **One issue = one deliverable**, plus a **`Doc impact on close:`** line naming the doc(s)
   that get the forward-facing edit when the work lands. Written at creation, executed at close
   in the same PR. `none` is a valid value — say it explicitly. A deliverable may list parts:
@@ -467,6 +477,8 @@ never resume automatically.
   Commands use the single-command grammar; shell operators and leading environment assignments
   are not worker grants. An unreachable
   required acceptance stops as `acceptance unrunnable` before committing or spending a fix round.
+  Triage applies the same check: a field it would declare that the run refuses is posted as prose,
+  not a grant, and a body whose acceptance the run refuses gets NEEDS-RULING, not PROMOTE.
   BUILD and REVIEW can return that explicit stop with the missing command/proof and a meaningful
   question; an observed refusal of a required command has the same disposition.
   The configured external reader is read-only. It receives the required acceptance and
@@ -489,8 +501,10 @@ never resume automatically.
   it. A prose round (§7) runs no gate locally under any class, except a gate the pull request's
   checks do not run at all or run only to print a skip (Gates above), and its verification does
   not wait on the pull request's checks.
-- **After the merge.** full: the default branch's runs on the merge commit are watched to their
-  verdicts. express and standard: cleanup, and the run's URL goes in the report.
+- **After the merge.** full: the default branch's push runs on the merge commit are watched to
+  their verdicts, and each workflow whose push filters select that commit must show one; until
+  it does, the run keeps its worktree and its checklist part for the resume. express and
+  standard: cleanup, and the run's URL goes in the report.
 
 Flow is re-derived from the diff after the commit, the way Size is below, and only tightens:
 direct to express to standard to full; a direct run whose diff reaches a path outside the globs is

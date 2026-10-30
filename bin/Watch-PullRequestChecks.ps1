@@ -8,8 +8,9 @@
     this script), and every gh call names that repository with -R.
 
     With -Pr, the runs are the head's `pull_request` runs (`gh run list --commit <head> --event
-    pull_request`); with -Sha, every run of each commit on the default branch (`--branch <default>
-    --commit <sha>`). Either way the set watched is the newest run per workflow and event across
+    pull_request`); with -Sha, the `push` runs of each commit on the default branch (`--branch
+    <default> --commit <sha> --event push`), so a run another event starts on the same commit, such
+    as a label workflow, proves nothing. Either way the set watched is the newest run per workflow and event across
     the commits: the workflow by its id, not its name, which two workflow files can share; the
     newest by `createdAt`, the higher run id on a tie. A run a newer run of the same workflow and
     event supersedes is not judged -- that is the run a workflow's `concurrency` cancel ends as
@@ -27,9 +28,11 @@
     the missing workflow and `Install-Ouro.ps1 -CI`; a pull request that then reads CONFLICTING has
     no run because GitHub dispatches none for a head that conflicts with the base, and the stop
     says to sync the branch; otherwise nothing is known to have built the head, so the stop says
-    to push (or re-push) it and come back. With -Sha, no run after a minute is
-    reported and is no failure: a workflow with a `paths:` filter runs for a push only when that
-    push's diff touches its list. `-Sha none` watches nothing and exits 0, for a batch in which
+    to push (or re-push) it and come back. With -Sha, the workflows whose push filters select the
+    commits (`ouro-binding.py push-workflows`; a disabled one is not counted) must each show a run:
+    the list is read up to sixty times, ten minutes in all, since GitHub can start a push run
+    minutes late, and one still missing then is a stop, never a pass. With no such workflow, no
+    run after a minute is reported and is no failure: nothing was triggered. `-Sha none` watches nothing and exits 0, for a batch in which
     nothing landed. A run that concluded outside success, skipped and neutral is named with its
     conclusion for the caller to judge; a run still in progress in the last list is a stop
     too, since it has no conclusion yet.
@@ -79,6 +82,7 @@ function Invoke-WatchPullRequestChecks {
     param([int]$Pr, [string[]]$Sha = @())
     if (($Pr -gt 0) -eq ($Sha.Count -gt 0)) { throw 'name -Pr <number> or -Sha <commit>..., one of the two' }
     $b = Get-LandBinding
+    $expected = @()
     if ($Pr -gt 0) {
         $head = "$((Get-PullRequest $b.Slug $Pr @('headRefOid')).headRefOid)"
         if (-not $head) { throw "#$Pr's head read empty" }
@@ -86,13 +90,26 @@ function Invoke-WatchPullRequestChecks {
     }
     else {
         if ($Sha.Count -eq 1 -and $Sha[0] -eq 'none') { Write-Output 'nothing landed: nothing to watch'; return }
-        $commits = $Sha; $branch = $b.Default; $event = $null; $what = $Sha -join ' '
+        $commits = $Sha; $branch = $b.Default; $event = 'push'; $what = $Sha -join ' '
+        $listen = Invoke-Native python3 (@((Join-Path $PSScriptRoot 'ouro-binding.py'), 'push-workflows') + $Sha)
+        if ($listen.Code -ne 0) { throw "ouro-binding.py push-workflows failed (exit $($listen.Code)): $($listen.Text)" }
+        if ($listen.Out.Count) {
+            $r = Invoke-Native gh @('workflow', 'list', '-R', $b.Slug, '--limit', '200', '--json', 'id,path')
+            if ($r.Code -ne 0) { throw "cannot list the workflows (exit $($r.Code)): $($r.Text)" }
+            # A disabled workflow is not listed, so it is not waited for.
+            $expected = @(($r.Out -join "`n") | ConvertFrom-Json | Where-Object { "$($_.path)" -in $listen.Out })
+        }
     }
-    $runs = @()
-    for ($i = 1; $i -le 6; $i++) {
+    $runs = @(); $missing = @()
+    $limit = if ($expected.Count) { 60 } else { 6 }
+    for ($i = 1; $i -le $limit; $i++) {
         $runs = @(Get-NewestRuns $b.Slug $commits $branch $event)
-        if ($runs.Count) { break }
-        if ($i -lt 6) { Wait-Poll 10 }
+        $missing = @($expected | Where-Object { [long]$_.id -notin @($runs | ForEach-Object { [long]$_.workflowDatabaseId }) })
+        if ($runs.Count -and -not $missing.Count) { break }
+        if ($i -lt $limit) { Wait-Poll 10 }
+    }
+    if ($missing.Count) {
+        throw "no push run of $(@($missing.path) -join ', ') for $what after ten minutes, though its push filter selects them: GitHub has not started it, so nothing proves the merge green - run again once it has"
     }
     if (-not $runs.Count) {
         if ($Pr -gt 0) {

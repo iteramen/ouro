@@ -178,17 +178,21 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
         prompt = ("First call the ouro bridge list tool to verify file access. Use only the ouro file bridge. Its list/read/search tools are file operations, not commands. "
                   "Do not substitute unavailable built-in tools. Optional stop is null when continuing.\n\n" +
                   instructions(cwd) + "\n\n" + prompt)
+        preserve = ("; failed BUILD: verify the old worker ended; inspect and preserve only identified "
+                    "task-owned partial files and retained logs, preserve unrelated edits before a normal run; "
+                    "stop if ownership or liveness is unproved. Require a new completed BUILD and fresh "
+                    "exact-head proof/review" if name == "BUILD" else "")
         try:
             r = process.run([*argv, "-"], cwd=cwd, prompt=prompt, timeout=timeout, env=worker_env(settings),
                             observe=lambda output, code: diagnostics.transport(diagnostic, output, code),
                             output_limit=codex_events.CAPTURE_LIMIT)
         except sh.DriverError as ex:
-            raise sh.DriverError(f"codex {name}: {ex}") from ex
+            raise sh.DriverError(f"codex {name}: {ex}{preserve}") from ex
         diagnostics.transport(diagnostic, r.out, r.code)
         transcript = codex_events.scan(r.out)
         if r.code != 0 or transcript.error or transcript.failure or not transcript.completed:
-            reason = r.err or transcript.error or transcript.failure or "completion missing"
-            raise sh.DriverError(f"codex {name}: execution failed (exit {r.code}); {tail(reason)}")
+            reason = transcript.error or diagnostic["incomplete_reason"]
+            raise sh.DriverError(f"codex {name}: execution failed (exit {r.code}); {reason}{preserve}")
         diagnostic["phase"] = "structured_result"
         try:
             if (scratch / "answer.json").stat().st_size > codex_events.FINAL_LIMIT:

@@ -29,18 +29,24 @@ def events(row, output):
                                ("cache_read", "cached_input_tokens")):
             row[target] = count(transcript.usage.get(source))
     row["events"] = transcript.count
+    return transcript
 
 
 def transport(row, output, code):
-    events(row, output)
+    transcript = events(row, output)
     # Preserve signed process statuses and unsigned Windows DWORD/NTSTATUS values.
     row["exit"] = code if type(code) is int and -(2**31) <= code <= 2**32 - 1 else None
+    row["incomplete_reason"] = (transcript.failure or
+                                ("unknown" if row["exit"] is None else
+                                 "terminated_transport" if row["exit"] != 0 else
+                                 "unknown" if transcript.error else
+                                 "missing_completion" if not transcript.completed else None))
 
 
 @contextmanager
 def attempt(name, backend, model):
     row = dict.fromkeys(("session", "input", "output", "cache_read", "cache_creation", "cost",
-                         "exit", "events"))
+                         "exit", "events", "incomplete_reason"))
     row.update(node=identifier(name), backend=identifier(backend), model=identifier(model),
                provider_completed=None, phase="execution", outcome="failed", failure_class=None)
     start = time.monotonic()
@@ -61,7 +67,7 @@ def table():
         return ""
     keys = ("node", "backend", "model", "session", "elapsed_seconds", "provider_completed",
             "input", "output", "cache_read", "cache_creation", "cost", "exit", "events",
-            "phase", "outcome", "failure_class")
+            "phase", "outcome", "failure_class", "incomplete_reason")
     rows = ["Runtime attempt diagnostics (adapter return is not workflow acceptance):",
             "| " + " | ".join(keys) + " |", "|" + "---|" * len(keys)]
     rows.extend("| " + " | ".join("unknown" if row[k] is None else str(row[k]) for k in keys) + " |"

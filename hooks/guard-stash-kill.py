@@ -121,6 +121,8 @@ def process_cwd(pid):
 
 def under_same_worktree(where, cwd):
     """Whether the process's directory lies in the worktree the event's cwd lies in."""
+    # lsof reports the resolved path (macOS /private/var), the event the spelled one (/var).
+    where, cwd = os.path.realpath(where), os.path.realpath(cwd)
     m = WORKTREES.search(cwd + "/")
     if not m:
         return False

@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from . import developer, node, ops, run, sh, triage, worktrees
-from .runtime.process import worker_env
+from .runtime.process import cancellation, worker_env
 from .sh import DriverError, Env, Refused, Stopped
 from .runtime import diagnostics
 
@@ -55,6 +55,7 @@ def bind(dry, developer_config=None):
     return Env(main, ob, data, dry, runtime=runtime)
 
 
+@cancellation()
 def main(argv):
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):

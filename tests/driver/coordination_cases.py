@@ -389,6 +389,20 @@ def exercise(h):
               and (c.main / ".claude/worktrees/1-fix-the-total-p1").exists()
               and b.threads["1"]["thread"]["status"] == "open")
 
+    c = h.happy_case("pending-default-no-board", table={"_issue_1": h.issue(body=parts_body), "run list *--branch master*": {"Out": []}})
+    c.ouro("run", "1")
+    h.sh(h.sys.executable, h.STUB, "pr", "merge", "7", "--squash", "--subject", "fixture merge", "--delete-branch", env=c.env())
+    code, out, err = c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "3"})
+    tree = c.main / ".claude/worktrees/1-fix-the-total-p1"
+    check("pending default-branch checks with no board leave the part unticked and the worktree for the resume",
+          code == 0 and "still running" in out and "- [ ] 1." in (c.issue_state() or h.issue(body=parts_body))["body"] and tree.exists())
+    table = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
+    table.pop("run list *--branch master*")
+    c.set_table(table)
+    code, out, err = c.ouro("run", "1")
+    check("the resume, once the run is green, completes once: the part ticked, the worktree removed",
+          code == 0 and "runs are green" in out and c.issue_state()["body"].count("- [x] 1.") == 1 and not tree.exists())
+
     with board() as (b, endpoint):
         b.add("<!-- ouro-claim: " + "[" * 2000 + "0" + "]" * 2000 + " -->", "nested holder")
         c = h.happy_case("claim-nested")
@@ -1201,7 +1215,7 @@ def offline(h):
     # Pending default checks must not tick a checklist part and strand its open claim.
     pending = object.__new__(h.runmod.Run)
     pending.env = SimpleNamespace(run=lambda *a, **k: h.runmod.sh.run(*a, **k), dry=False, main=h.TMP, git=lambda *a, **kw: None)
-    pending.flow = "full"
+    pending.flow, pending.n = "full", 1
     pending.claim = SimpleNamespace(config=SimpleNamespace(credential_env=ENV), owned="owned-thread",
                                     update=lambda *a, **kw: outcomes.append((a, kw)))
     pending.branch_exists = lambda: (_ for _ in ()).throw(AssertionError("premature cleanup"))

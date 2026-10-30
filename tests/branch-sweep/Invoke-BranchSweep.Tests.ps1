@@ -911,7 +911,9 @@ try {
     $zwDir = Join-Path $m '.claude/worktrees/zw-wt'
     $null = G $m worktree add -q -b $zw .claude/worktrees/zw-wt master
     Set-Answer $w $zw @(New-PrRow 121 OPEN (New-Commit $zwDir 'zw.txt'))
-    foreach ($c in ($plain, 120, 'MERGED'), ($nfc, 122, 'MERGED'), ($nfd, 0, $null)) {
+    # APFS stores the two spellings of café as one file, so a loose ref for each cannot coexist there.
+    $twins = @(($plain, 120, 'MERGED'), ($nfc, 122, 'MERGED')) + @(if (-not $IsMacOS) { , ($nfd, 0, $null) })
+    foreach ($c in $twins) {
         $b, $pr, $state = $c
         $null = G $m checkout -q -b $b master
         $head = New-Commit $m "$pr.txt"

@@ -55,7 +55,9 @@ try {
     Assert-Equal '' $r.Stop 'the run ends without a stop'
     Assert-Line $r.Gh 'pr view 7 -R o/n --json state,headRefName' 'the PR is read, naming the repository'
     Assert-Line $r.Gh 'pr list -R o/n --base feat/x --state open --json number' 'the PRs based on the branch are counted'
-    Assert-Equal "deleted: origin feat/x,removed: worktree $((Get-Item -LiteralPath $w.Main).FullName)$([IO.Path]::DirectorySeparatorChar).claude$([IO.Path]::DirectorySeparatorChar)worktrees$([IO.Path]::DirectorySeparatorChar)x,deleted: local feat/x,deleted: backup backup/feat/x-20260101000000" ($r.Lines -join ',') 'one line per deletion, in order'
+    # The script prints the path git lists, which on macOS is the resolved one (/private/var for /var).
+    $mainPath = if ($IsMacOS) { @(Get-Worktrees)[0].Path } else { (Get-Item -LiteralPath $w.Main).FullName }
+    Assert-Equal "deleted: origin feat/x,removed: worktree $mainPath$([IO.Path]::DirectorySeparatorChar).claude$([IO.Path]::DirectorySeparatorChar)worktrees$([IO.Path]::DirectorySeparatorChar)x,deleted: local feat/x,deleted: backup backup/feat/x-20260101000000" ($r.Lines -join ',') 'one line per deletion, in order'
     Assert-Equal 'master' (Get-Heads $w.Origin) 'origin keeps master alone'
     Assert-Equal 'master' (Get-Heads $w.Main) 'the local branches are master alone'
     Assert-Equal $false (Test-Path -LiteralPath $w.Worktree) 'the worktree directory is gone from the filesystem'

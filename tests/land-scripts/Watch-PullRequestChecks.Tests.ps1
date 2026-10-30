@@ -13,7 +13,9 @@
     verdict, each run by its own conclusion: success, skipped and neutral pass, a failure stops
     with the run and its conclusion, and a run still in progress stops. No run after six lists,
     fifty seconds apart in all, stops with -Pr (a CONFLICTING pull request named as such, else
-    nothing built the head) and is reported with -Sha (path filters); `-Sha none` watches nothing. With -Sha the runs of every commit are listed on
+    nothing built the head) and is reported with -Sha when no enabled workflow's push filters
+    select the commits; one that does and shows no run in sixty lists stops, and one that starts
+    late is watched; `-Sha none` watches nothing. With -Sha the push runs of every commit are listed on
     the default branch and the newest per workflow and event is taken across them all. Neither
     parameter, or both, stops before any call; a list that fails stops; a tree with no binding
     stops before any call. The child rows pin the entry point: exit 0 and the verdict lines on
@@ -109,20 +111,38 @@ try {
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
     Assert-Equal 'run 11 is still in_progress, with no conclusion yet' $r.Stop 'a run without a conclusion in the last list stops'
 
-    Write-Host 'with -Sha, every commit is listed on the default branch and the newest per workflow is taken across them'
-    Set-Gh @{ "run list --commit $H" = Answer @(Run 11 1 push $t1)
+    Write-Host 'with -Sha, every commit''s push runs are listed on the default branch and the newest per workflow is taken across them'
+    $workflows = Answer @(@{ id = 1; path = '.github/workflows/push.yml' }, @{ id = 9; path = '.github/workflows/ci.yml' })
+    Set-Gh @{ 'workflow list' = $workflows; "run list --commit $H" = Answer @(Run 11 1 push $t1)
         "run list --commit $H2" = Answer @((Run 15 1 push $t2), (Run 16 2 push $t1 completed neutral))
         'run watch 15' = @{ Exit = 0; Out = '' }; 'run watch 16' = @{ Exit = 0; Out = '' } }
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Sha $H, $H2 }
     Assert-Equal '' $r.Stop 'the run ends without a stop'
-    Assert-Line $r.Gh "run list -R o/n --commit $H --limit 100 --json databaseId,workflowDatabaseId,workflowName,event,createdAt,status,conclusion --branch master" 'each commit is listed on the default branch, with no event filter'
+    Assert-Line $r.Gh "run list -R o/n --commit $H --limit 100 --json databaseId,workflowDatabaseId,workflowName,event,createdAt,status,conclusion --branch master --event push" 'each commit''s push runs are listed on the default branch: a run another event starts proves nothing'
+    Assert-Line $r.Gh 'workflow list -R o/n --limit 200 --json id,path' 'the enabled workflows are read, to name the expected ones by id'
     Assert-NoMatch 'run watch 11' ($r.Gh -join "`n") 'the older run of workflow 1, on the first commit, is superseded by the second commit''s'
     Assert-Line $r.Gh 'run watch 15 -R o/n --interval 15' 'the newest run of workflow 1 is watched'
     Assert-Line $r.Gh 'run watch 16 -R o/n --interval 15' 'the run of workflow 2 is watched'
     Assert-NoMatch 'pr view' ($r.Gh -join "`n") 'no pull request is read'
 
-    Write-Host 'no run after a minute is reported, not a stop, with -Sha; -Sha none watches nothing'
-    Set-Gh @{ "run list --commit $H" = Answer @() }
+    Write-Host 'with -Sha, a workflow its push filter selects that shows no run in ten minutes stops; one that starts late is watched'
+    Set-Gh @{ 'workflow list' = $workflows; "run list --commit $H" = Answer @(Run 17 5 push $t1) }
+    $script:polls = 0
+    $r = Invoke-Step { Invoke-WatchPullRequestChecks -Sha $H }
+    Assert-Match "^no push run of \.github/workflows/push\.yml for $H after ten minutes, though its push filter selects them: GitHub has not started it, so nothing proves the merge green" $r.Stop 'the missing run stops, named by its file; ci.yml, a pull_request workflow, is not waited for'
+    Assert-Equal 60 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'after sixty lists'
+    Assert-Equal 590 $script:polls 'ten seconds apart'
+    Assert-NoMatch 'run watch' ($r.Gh -join "`n") 'another workflow''s run does not stand in for it'
+    Set-Gh @{ 'workflow list' = $workflows; "run list --commit $H" = Seq @((Answer @()), (Answer @()), (Answer @(Run 18 1 push $t2)))
+        'run watch 18' = @{ Exit = 0; Out = '' } }
+    $script:polls = 0
+    $r = Invoke-Step { Invoke-WatchPullRequestChecks -Sha $H }
+    Assert-Equal '' $r.Stop 'a run that starts minutes late ends without a stop'
+    Assert-Line $r.Lines 'run 18 (wf1/push): success' 'and is judged'
+    Assert-Equal 20 $script:polls 'the lists wait for it'
+
+    Write-Host 'with -Sha and no enabled workflow its push filters select, no run after a minute is reported, not a stop; -Sha none watches nothing'
+    Set-Gh @{ 'workflow list' = Answer @(); "run list --commit $H" = Answer @() }
     $script:polls = 0
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Sha $H }
     Assert-Equal '' $r.Stop 'no stop'
@@ -131,6 +151,19 @@ try {
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Sha none }
     Assert-Equal 'nothing landed: nothing to watch' ($r.Lines -join ';') 'none is nothing to watch'
     Assert-Equal 0 $r.Gh.Count 'and no call is made'
+
+    Write-Host 'push-workflows: a path filter selects a commit only when its diff from its first parent matches'
+    Add-Workflow 'src.yml' "on:`n  push:`n    branches: [master]`n    paths: ['src/**']`n"
+    $outside = "$(G $w.Main rev-parse HEAD)"
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $w.Main 'src')
+    New-Commit $w.Main 'src/a.txt'
+    $null = G $w.Main push -q origin master
+    $inside = "$(G $w.Main rev-parse HEAD)"
+    $binding = Join-Path (Split-Path $Script) 'ouro-binding.py'
+    $l = Invoke-Native python3 @($binding, 'push-workflows', $outside)
+    Assert-Equal '.github/workflows/push.yml' ($l.Out -join ',') 'a commit outside the paths selects the unfiltered workflow alone'
+    $l = Invoke-Native python3 @($binding, 'push-workflows', $inside)
+    Assert-Equal '.github/workflows/push.yml,.github/workflows/src.yml' ($l.Out -join ',') 'a commit inside them selects the filtered one too'
 
     Write-Host 'neither parameter, or both, stops before any call; a failed list stops'
     $r = Invoke-Step { Invoke-WatchPullRequestChecks }

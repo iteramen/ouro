@@ -153,6 +153,19 @@ class TimedCommandTests(unittest.TestCase):
             self.assertIsNone(answer["code"])
             self.assertEqual((answer["out"], answer["err"]), ("", "timed out after 1s"))
 
+    @unittest.skipUnless(os.name == "posix", "POSIX process groups")
+    def test_an_exited_unreaped_group_is_not_running(self):
+        import subprocess
+        child = subprocess.Popen([sys.executable, "-c", "import sys;sys.stdin.read()"], stdin=subprocess.PIPE,
+                                 start_new_session=True)
+        try:
+            self.assertTrue(process.group_running(child.pid))
+            child.stdin.close()
+            os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)  # exited, left a zombie
+            self.assertFalse(process.group_running(child.pid))
+        finally:
+            child.wait()
+
     @unittest.skipUnless(os.name == "nt", "actual Windows timed-pipe capture")
     def test_real_base_and_venv_pipes_preserve_eof_and_timeout_contracts(self):
         with tempfile.TemporaryDirectory(prefix="ouro-timed-capture-") as directory:

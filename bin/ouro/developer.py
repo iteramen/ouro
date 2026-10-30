@@ -21,6 +21,7 @@ class Settings:
     models: dict = field(default_factory=dict)
     effort: str | None = None
     coordination: Coordination | None = None
+    assignees: list = field(default_factory=list)
 
     def model(self, role, legacy):
         return self.models.get(role, legacy if self.backend == "claude" else "default")
@@ -33,8 +34,8 @@ def load(path=None):
         return Settings()
     try:
         data = tomllib.loads(p.read_text(encoding="utf-8-sig"))
-        if not data or set(data) - {"runtime", "coordination"}:
-            raise ValueError("only [runtime] and [coordination] are allowed")
+        if not data or set(data) - {"runtime", "coordination", "followup"}:
+            raise ValueError("only [runtime], [coordination] and [followup] are allowed")
         runtime = data.get("runtime", {})
         if not isinstance(runtime, dict):
             raise ValueError("runtime must be a table")
@@ -57,6 +58,10 @@ def load(path=None):
         effort = runtime.get("effort")
         if effort is not None and (backend != "codex" or effort not in ("low", "medium", "high", "xhigh", "max")):
             raise ValueError("runtime.effort requires Codex and low, medium, high, xhigh or max")
-        return Settings(backend, models, effort, coordination)
+        followup = data.get("followup", {})
+        assignees = followup.get("assignees", []) if isinstance(followup, dict) else None
+        if not isinstance(followup, dict) or set(followup) - {"assignees"} or not isinstance(assignees, list)                 or not all(isinstance(a, str) and a.strip() and a == a.strip() for a in assignees):
+            raise ValueError("followup.assignees must be a list of GitHub logins (or @me)")
+        return Settings(backend, models, effort, coordination, assignees)
     except (OSError, ValueError, TypeError) as ex:
         raise DriverError(f"developer binding {p}: {ex}") from ex

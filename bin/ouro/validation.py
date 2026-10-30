@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import sh
-from .runtime.process import check_platform, worker_env
+from .runtime.process import cancellation, check_platform, defer_cancellation, finish_cleanup, worker_env
 
 TIMEOUT = 3600
 OUTPUT_LIMIT = 1024 * 1024
@@ -157,6 +157,7 @@ def lock(root):
         path.unlink(missing_ok=True)
 
 
+@cancellation()
 def execute(cmd, cwd, log, settings=None):
     argv, extra = command(cmd)
     env = sh.child_env({**extra, **(worker_env(settings) if settings else {})})
@@ -178,20 +179,26 @@ def execute(cmd, cwd, log, settings=None):
         except OSError as ex:
             log.write_text(str(ex)[:OUTPUT_LIMIT], encoding="utf-8")
             return 75
-        start, limited = time.monotonic(), False
-        while p.poll() is None:
-            if time.monotonic() - start > TIMEOUT or os.fstat(output.fileno()).st_size > OUTPUT_LIMIT:
-                limited = True
-                break
-            time.sleep(0.02)
-        # A worker left in the command's group cannot change inputs after the proof. Only a real child pid:
-        # killpg(1) is kill(-1), which signals every process the user owns.
-        if type(p.pid) is int and p.pid > 1:
+        try:
+            start, limited = time.monotonic(), False
             try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-        code = p.wait()
+                while p.poll() is None:
+                    if time.monotonic() - start > TIMEOUT or os.fstat(output.fileno()).st_size > OUTPUT_LIMIT:
+                        limited = True
+                        break
+                    time.sleep(0.02)
+            finally:
+                defer_cancellation()
+        finally:
+            def cleanup():
+                # Preserve the validator's process-group boundary on cancellation.
+                if type(p.pid) is int and p.pid > 1:
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                return p.wait()
+            code = finish_cleanup(cleanup)
         output.seek(0)
         raw = output.read(OUTPUT_LIMIT + 1)
         if len(raw) > OUTPUT_LIMIT:

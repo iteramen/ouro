@@ -218,7 +218,7 @@ missing file, malformed TOML, unknown key or provider/model mismatch is a driver
 | Scope | Location | Owns |
 |---|---|---|
 | Repository | `.claude/ouro.toml` | workflow, gates, review and shipping policy, labels and approvers |
-| Developer | `~/.config/ouro/developer.toml` or the XDG configuration directory | worker backend, models, reasoning effort and optional board connection |
+| Developer | `~/.config/ouro/developer.toml` or the XDG configuration directory | worker backend, models, reasoning effort, optional board connection and follow-up assignees |
 | Checkout on this machine | `.claude/ouro.local.toml` | the optional `repo.checkout` value |
 | Launch environment | process or user environment | host variables such as `OURO_FORBIDDEN_TOKENS` |
 
@@ -234,7 +234,7 @@ reviewer = "default"
 ```
 
 The runtime table admits only `runtime.backend`, `runtime.effort` and the three `runtime.models` roles.
-The optional `coordination` table below is the only other developer table.
+The optional `coordination` and `followup` tables below are the only other developer tables.
 Developer settings never merge into repository shipping policy, review requirements, gates,
 approvers or the external reader selection. For Claude, developer role overrides precede the
 repository's model aliases and the usual role defaults. For Codex, roles use explicit
@@ -276,6 +276,18 @@ A timeout, authentication failure, malformed response or incomplete MCP tool dis
 unavailable evidence with a short fixed notice, never proof that no claim exists; errors expose no
 response bodies, headers, credentials or endpoint URLs. Board text and self-announced identities
 are data, with no verified identity or shipping authority.
+
+### Follow-up assignees
+
+`[followup].assignees` lists the GitHub logins a run assigns to each follow-up issue it files,
+`@me` naming the signed-in `gh` account; absent or empty files them unassigned. An append to an
+existing ledger issue only comments, and assigns no one. Anything but a list of non-empty
+logins is refused.
+
+```toml
+[followup]
+assignees = ["@me"]
+```
 
 ### Git capability readiness
 
@@ -353,7 +365,26 @@ missing results, error events or unusable file tools are driver errors. The CLI 
 attempt tables on exit, including coordinator errors after successful nodes and interrupted
 attempts; missing metadata and unreported cost are unknown. Attempt diagnostics keep no event
 bodies, prompts, source, tool arguments, environment values or error messages. Node timeouts and
-cancellation clean up owned descendants.
+cancellation clean up owned descendants. On the main thread of POSIX callers, the CLI lifetime,
+direct runtime subprocess calls and caller-validation execution temporarily translate default
+SIGTERM into exit 143 through existing cleanup; SIGINT retains Python's interruption behavior.
+Cleanup entry and body defer a first SIGTERM until owned cleanup finishes; an outer finally
+still guarantees cleanup if cancellation interrupts the transition into that deferred phase.
+Prior handlers are restored on every exit, and custom or ignored SIGTERM handlers remain under
+the caller's control. Runtime descendants are selected by observed ownership and birth identity;
+caller validation retains its separate process-group boundary. Cancellation is not a successful
+node result or validation receipt. SIGKILL and uncontrolled host death cannot run this cleanup;
+there is no restart or exactly-once guarantee. A monitor sharing the invoking turn's tool lifetime
+does not provide durable continuation: the lead retains execution ownership through a terminal
+result or explicit blocker unless a separately authorized durable mechanism owns the work.
+
+Codex attempt metadata adds `incomplete_reason`:
+`output_budget_exhausted` for the known output-limit reason, `missing_completion` for a
+zero-exit transcript without completion, `terminated_transport` for a nonzero/terminated
+transport, and `unknown` for other provider failures. A normal completion leaves it unknown
+in the table (null internally). Provider text is discarded; failure remains sticky across later
+completion events. A final answer or partial source never overrides a failed transport or turn.
+Observed provider usage belongs only to diagnostics until the node is accepted.
 
 `python3 bin/ouro-developer.py install` installs user-wide Codex skills and a launcher;
 `inspect --check` inspects selection and runs preflight; `uninstall` removes owned installation

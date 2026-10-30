@@ -6,12 +6,21 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
+from contextlib import contextmanager
 
 from pathlib import Path
 import re
 
 class DriverError(Exception):
     """Exit 1: a script failed, a node answered nothing parseable, the platform refused."""
+
+
+_cancellation_state = threading.local()
+
+
+class _Terminated(KeyboardInterrupt):
+    """Internal cancellation; translated only by its owning boundary."""
 
 
 class R:
@@ -169,6 +178,88 @@ def feed(stdin, pending):
     return pending
 
 
+@contextmanager
+def cancellation():
+    """Unwind default POSIX SIGTERM through cleanup; leave caller handlers alone."""
+    if os.name != "posix" or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    if previous != signal.SIG_DFL:
+        yield
+        return
+
+    def terminate(signum, frame):
+        # Repeated requests cannot interrupt cleanup, including its transition.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        terminate.pending = True
+        if not terminate.deferred:
+            raise _Terminated()
+
+    terminate.deferred = terminate.pending = False
+    _cancellation_state.handler = terminate
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+        if terminate.pending:
+            raise _Terminated()
+    except _Terminated:
+        # Binding readers catch SystemExit as a refusal. Translate only after
+        # the owning boundary has unwound, keeping cancellation out of that path.
+        raise SystemExit(128 + signal.SIGTERM) from None
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        del _cancellation_state.handler
+
+
+def defer_cancellation():
+    """Only our active handler defers; an outer finally protects this transition."""
+    handler = getattr(_cancellation_state, "handler", None)
+    if handler is not None:
+        handler.deferred = True
+
+
+def finish_cleanup(action):
+    """Finish owned cleanup, then propagate pending cancellation without success."""
+    handler = getattr(_cancellation_state, "handler", None)
+    try:
+        try:
+            result = action()
+        except _Terminated:
+            # A request before deferral disabled repeats. Preserve it after retry.
+            action()
+            raise
+    finally:
+        if handler is not None:
+            handler.deferred = False
+    if handler is not None and handler.pending:
+        raise _Terminated()
+    return result
+
+
+def _cleanup_posix(p, owned, environment):
+    if owned:
+        terminate_owned(p, owned, environment)
+    try:
+        if type(p.pid) is int and p.pid > 1:  # killpg(1) is kill(-1): every process the user owns
+            os.killpg(p.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if group_running(p.pid, environment):  # Darwin refuses a group whose members all exited, unreaped
+            raise
+    p.wait()
+
+
+def group_running(pgid, env=None):
+    """Whether a process of the group is still running, an exited one unreaped not counting."""
+    result = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True, encoding="utf-8",
+                            errors="replace", timeout=5, check=True, env=env)
+    return any(int(group) == pgid and not state.startswith("Z")
+               for group, state in (line.split(None, 1) for line in result.stdout.splitlines() if line.strip()))
+
+
+@cancellation()
 def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output_limit=None, stderr_limit=None):
     output_limit = LIMIT if output_limit is None else output_limit
     stderr_limit = LIMIT if stderr_limit is None else stderr_limit
@@ -196,56 +287,59 @@ def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output
         except OSError as ex:
             raise DriverError(f"cannot start runtime: {ex}") from ex
         try:
-            if os.name == "nt":
-                os.set_blocking(p.stdin.fileno(), False)
-                pending = memoryview((prompt or "").encode("utf-8"))
-                import ctypes
-                from ctypes import wintypes
-                kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-                kernel.CreateJobObjectW.restype = wintypes.HANDLE
-                kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-                kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-                kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-                job = kernel.CreateJobObjectW(None, None)
-                class BasicLimits(ctypes.Structure):
-                    _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
-                                ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
-                                ("max_working_set", ctypes.c_size_t), ("active", wintypes.DWORD),
-                                ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
-                class ExtendedLimits(ctypes.Structure):
-                    _fields_ = [("basic", BasicLimits), ("io", ctypes.c_ulonglong * 6),
-                                ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
-                                ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
-                limits = ExtendedLimits()
-                limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                if (not job or not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits))
-                        or not kernel.AssignProcessToJobObject(job, int(p._handle))):
-                    raise DriverError("runtime process-tree containment unavailable")
-                ntdll = ctypes.WinDLL("ntdll")
-                ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
-                if ntdll.NtResumeProcess(int(p._handle)) != 0:
-                    raise DriverError("runtime process could not resume")
-            start = time.monotonic()
-            while p.poll() is None:
-                if os.name != "nt":
-                    table = process_table(environment)
-                    if p.pid in table:
-                        owned.setdefault(p.pid, table[p.pid][1])
-                    descendants(table, owned)
-                if time.monotonic() - start >= timeout:
-                    raise DriverError(f"runtime timed out after {timeout}s")
-                bound()
-                if os.name == "nt" and not p.stdin.closed:
-                    pending = feed(p.stdin, pending)
-                time.sleep(0.03)
-            bound()
-            out.seek(0)
-            err.seek(0)
-            return R(p.returncode, out.read(output_limit).decode("utf-8", "replace"),
-                     err.read(stderr_limit).decode("utf-8", "replace"), argv)
-        finally:
             try:
+                if os.name == "nt":
+                    os.set_blocking(p.stdin.fileno(), False)
+                    pending = memoryview((prompt or "").encode("utf-8"))
+                    import ctypes
+                    from ctypes import wintypes
+                    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+                    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+                    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+                    kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+                    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+                    job = kernel.CreateJobObjectW(None, None)
+                    class BasicLimits(ctypes.Structure):
+                        _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                                    ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                                    ("max_working_set", ctypes.c_size_t), ("active", wintypes.DWORD),
+                                    ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
+                    class ExtendedLimits(ctypes.Structure):
+                        _fields_ = [("basic", BasicLimits), ("io", ctypes.c_ulonglong * 6),
+                                    ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                                    ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+                    limits = ExtendedLimits()
+                    limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    if (not job or not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits))
+                            or not kernel.AssignProcessToJobObject(job, int(p._handle))):
+                        raise DriverError("runtime process-tree containment unavailable")
+                    ntdll = ctypes.WinDLL("ntdll")
+                    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+                    if ntdll.NtResumeProcess(int(p._handle)) != 0:
+                        raise DriverError("runtime process could not resume")
+                start = time.monotonic()
+                while p.poll() is None:
+                    if os.name != "nt":
+                        table = process_table(environment)
+                        if p.pid in table:
+                            owned.setdefault(p.pid, table[p.pid][1])
+                        descendants(table, owned)
+                    if time.monotonic() - start >= timeout:
+                        raise DriverError(f"runtime timed out after {timeout}s")
+                    bound()
+                    if os.name == "nt" and not p.stdin.closed:
+                        pending = feed(p.stdin, pending)
+                    time.sleep(0.03)
+                bound()
+                out.seek(0)
+                err.seek(0)
+                return R(p.returncode, out.read(output_limit).decode("utf-8", "replace"),
+                         err.read(stderr_limit).decode("utf-8", "replace"), argv)
+            finally:
+                defer_cancellation()
+        finally:
+            def cleanup():
                 if p.stdin is not None:
                     p.stdin.close()
                 if os.name == "nt":
@@ -265,14 +359,9 @@ def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output
                             raise DriverError(f"{primary}; {ex}") from ex
                         raise
                 else:
-                    if owned:
-                        terminate_owned(p, owned, environment)
-                    try:
-                        if type(p.pid) is int and p.pid > 1:  # killpg(1) is kill(-1): every process the user owns
-                            os.killpg(p.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    p.wait()
+                    _cleanup_posix(p, owned, environment)
+            try:
+                finish_cleanup(cleanup)
             finally:
                 if observe is not None:
                     failed = sys.exception() is not None

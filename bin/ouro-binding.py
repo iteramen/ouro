@@ -26,6 +26,11 @@ Usage:
         Print, one per line, each workflow file under .github/workflows/ at origin/<default
         branch> whose top-level `on:` names the pull_request event: what runs a pull request's
         checks. Nothing printed: a pull request gets no check.
+    python3 ouro-binding.py push-workflows <sha>...
+        Print, one per line, each workflow file at origin/<default branch> whose `on: push`
+        filters (branches, tags, paths and their -ignore forms) select a push of any given
+        commit to the default branch, its diff from its first parent: the runs that commit's
+        merge must show. A commit whose diff git cannot read passes every path filter.
     python3 ouro-binding.py --selftest
         Run the in-memory self-check.
 
@@ -459,16 +464,87 @@ def names_pull_request(text):
     return bool(m and PULL_REQUEST.search(m.group(1)))
 
 
-def pr_workflows(default, cwd=None, env=None):
-    """The workflow files at origin/<default> whose `on:` names pull_request: what runs a pull request's checks."""
-    def git(*args):
+def workflow_files(default, cwd=None, env=None):
+    """(name, text) of each workflow file at origin/<default>, and the git reader that read them."""
+    def git(*args, check=True):
         r = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True)
-        if r.returncode:
+        if r.returncode and check:
             sys.exit(f"error: git {' '.join(args)} failed: {r.stderr.decode('utf-8', 'replace').strip()}")
-        return r.stdout.decode("utf-8", "replace")
+        return r.stdout.decode("utf-8", "replace") if not r.returncode else None
     ref = f"origin/{default}"
     names = git("ls-tree", "-z", "--full-tree", "--name-only", ref, "--", ".github/workflows/").split("\0")
-    return [n for n in names if n.endswith((".yml", ".yaml")) and names_pull_request(git("show", f"{ref}:{n}"))]
+    return [(n, git("show", f"{ref}:{n}")) for n in names if n.endswith((".yml", ".yaml"))], git
+
+
+def pr_workflows(default, cwd=None, env=None):
+    """The workflow files at origin/<default> whose `on:` names pull_request: what runs a pull request's checks."""
+    return [n for n, text in workflow_files(default, cwd, env)[0] if names_pull_request(text)]
+
+
+PUSH = re.compile(r"(?<![\w.-])push(?![\w-])")
+PUSH_FILTERS = ("branches", "branches-ignore", "tags", "tags-ignore", "paths", "paths-ignore")
+
+
+def push_filters(text):
+    """The filters of a workflow's `on: push` as {key: [pattern, ...]}, {} when it has none, None when `on:` names no push.
+    shortcut: reads the block and flow-list forms workflows write, not all of YAML; an unread form reads as no filter, so a run is expected."""
+    m = ON_BLOCK.search(re.sub(r"(?m)(^|[ \t])#.*", r"\1", text.lstrip("﻿")))
+    if not m or not PUSH.search(m.group(1)):
+        return None
+    lines = m.group(1).replace("\r", "").split("\n")
+    at = next((i for i, line in enumerate(lines) if re.match(r"[ \t]+[\"']?push[\"']?[ \t]*:[ \t]*$", line)), None)
+    if at is None:
+        return {}
+    indent, filters, key = len(lines[at]) - len(lines[at].lstrip()), {}, None
+    unquote = lambda s: s.strip().strip("'\"")
+    for line in lines[at + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        item = re.match(r"[ \t]*-[ \t]*(.+)$", line)
+        k = re.match(r"[ \t]*([\w-]+)[ \t]*:[ \t]*(.*)$", line)
+        if item and key in filters:
+            filters[key].append(unquote(item.group(1)))
+        elif k:
+            key, value = k.group(1), k.group(2).strip()
+            if key in PUSH_FILTERS:
+                filters[key] = [unquote(v) for v in value[1:-1].split(",") if v.strip()] if value.startswith("[") else [unquote(value)] if value else []
+    return filters
+
+
+def filter_match(patterns, value):
+    """GitHub's filter patterns: `**` crosses `/`, `*` does not, `?` and `+` repeat the character before, `!` negates, the last match wins."""
+    hit = False
+    for p in patterns:
+        neg = p.startswith("!")
+        rx = "".join(".*" if t == "**" else "[^/]*" if t == "*" else t if t in "?+" or t.startswith("[") else re.escape(t)
+                     for t in re.findall(r"\*\*|\*|\[[^\]]*\]|.", p[neg:]))
+        if re.fullmatch(rx, value):
+            hit = not neg
+    return hit
+
+
+def push_selects(filters, branch, files):
+    """Whether a push of `files` (None: unknown, every path filter passes) to `branch` runs a workflow with these filters."""
+    f = filters
+    if ("tags" in f or "tags-ignore" in f) and not ("branches" in f or "branches-ignore" in f):
+        return False  # a tag filter alone runs for tag pushes only
+    if ("branches" in f and not filter_match(f["branches"], branch)) or ("branches-ignore" in f and filter_match(f["branches-ignore"], branch)):
+        return False
+    if files is None:
+        return True
+    if "paths" in f and not any(filter_match(f["paths"], x) for x in files):
+        return False
+    return not ("paths-ignore" in f and files and all(filter_match(f["paths-ignore"], x) for x in files))
+
+
+def push_workflows(default, shas, cwd=None, env=None):
+    """The workflow files at origin/<default> whose push filters select a push of any of `shas` to <default>: the runs its merge must show."""
+    files, git = workflow_files(default, cwd, env)
+    changed = []
+    for sha in shas:
+        out = git("diff", "--name-only", "-z", "--no-renames", f"{sha}^1", sha, check=False)
+        changed.append(None if out is None else [x for x in out.split("\0") if x])
+    return [n for n, text in files if (f := push_filters(text)) is not None and any(push_selects(f, default, c) for c in changed)]
 
 
 def default_path():
@@ -541,11 +617,17 @@ def check(path):
 
 
 def main(argv):
-    if not argv or argv[0] not in ("check", "get", "gates", "direct", "pr-workflows"):
+    if not argv or argv[0] not in ("check", "get", "gates", "direct", "pr-workflows", "push-workflows"):
         sys.exit(__doc__.strip())
     cmd, rest = argv[0], argv[1:]
     if cmd == "pr-workflows":
         for name in pr_workflows(load(rest[0] if rest else None)["repo"]["default_branch"]):
+            print(name)
+        return 0
+    if cmd == "push-workflows":
+        if not rest:
+            sys.exit("usage: push-workflows <sha>...")
+        for name in push_workflows(load(None)["repo"]["default_branch"], rest):
             print(name)
         return 0
     if cmd == "direct":
@@ -1152,6 +1234,22 @@ report_only = ["S9"]
                        ("on:\n  pull_request_target:\njobs:\n  a:\n    if: github.event.pull_request.draft == false\n", False),
                        ("on:\n  push:\n  # pull_request:\njobs:\n  pull_request:\n", False), ("jobs: {}\n", False)):
         assert names_pull_request(text) is want, text
+
+    # The push filters in each form a workflow writes them, and what they select for a push to master.
+    for text, want in (("on: [push, pull_request]\n", {}), ("on:\n  pull_request:\n", None),
+                       ("on:\n  push:\n    branches: [master]\n    tags: ['v*']\n  schedule:\n    - cron: '1 2 * * 1'\n",
+                        {"branches": ["master"], "tags": ["v*"]}),
+                       ("on:\r\n  push:\r\n    branches:\r\n      - master\r\n    paths-ignore:\r\n      - '**.md'\r\n      - \"docs/**\"\r\n",
+                        {"branches": ["master"], "paths-ignore": ["**.md", "docs/**"]}),
+                       ("on:\n  workflow_dispatch:\n  push:\n  pull_request:\n    paths: [x]\n", {})):
+        assert push_filters(text) == want, (text, push_filters(text))
+    for f, files, want in (({}, ["a"], True), ({"tags": ["v*"]}, ["a"], False), ({"branches": ["main"]}, ["a"], False),
+                           ({"branches": ["release/**", "master"]}, ["a"], True), ({"branches-ignore": ["mas*"]}, ["a"], False),
+                           ({"paths": ["src/*"]}, ["src/a/b.py"], False), ({"paths": ["src/**"]}, ["src/a/b.py"], True),
+                           ({"paths": ["src/**", "!src/gen/**"]}, ["src/gen/x"], False), ({"paths": ["src/**"]}, None, True),
+                           ({"paths-ignore": ["**.md", "docs/**"]}, ["README.md", "docs/a"], False),
+                           ({"paths-ignore": ["**.md"]}, ["README.md", "bin/x.ps1"], True)):
+        assert push_selects(f, "master", files) is want, (f, files)
 
     # [models] is optional, and so is every key in it; each key holds one of MODEL_VALUES.
     # Absent means the reading skill's own default (docs/binding.md), never a pinned version.

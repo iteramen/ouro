@@ -1,4 +1,5 @@
 """Real command observation and final-input receipt controls."""
+import errno
 import io
 import json
 import os
@@ -188,7 +189,14 @@ class ExecutionTests(unittest.TestCase):
                 with self.subTest(name=name):
                     path = os.fsencode(root) + b"/" + name
                     try:
-                        with open(path, "wb") as stream:stream.write(b"before")
+                        stream = open(path, "wb")
+                    except OSError as ex:
+                        if ex.errno != errno.EILSEQ:
+                            raise
+                        self.skipTest(f"the filesystem refuses the name {name!r} (APFS): Git can never report it")
+                    with stream:
+                        stream.write(b"before")
+                    try:
                         self.assertIsNone(execution.fingerprint(root))
                         with open(path, "wb") as stream:stream.write(b"after")
                         self.assertIsNone(execution.fingerprint(root))

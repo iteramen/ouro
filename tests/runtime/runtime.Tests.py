@@ -635,6 +635,260 @@ class RuntimeTests(unittest.TestCase):
             model.assert_not_called()
 
 
+    def test_run_skill_retains_caller_execution_ownership(self):
+        skill = (BASE / "skills" / "run" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Retain execution ownership until the driver returns a terminal result or an explicit blocker", skill)
+        self.assertIn("separately authorized durable execution mechanism", skill)
+        self.assertIn("monitor is not continuation", skill)
+        self.assertIn("do not authorize ending the coordinating turn", skill)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX coordinator signals")
+    @reap_fixture_children
+    def test_production_cancellation_boundaries(self):
+        import signal
+        import time
+        # CLI, imported runtime and native caller validation use production
+        # entry code; no fixture installs a cancellation handler.
+        boundaries = ("cli", "runtime", "validation") if sys.platform.startswith("linux") else ("cli", "runtime")
+        for boundary in boundaries:
+            for ending in ("normal", "SIGINT", "SIGTERM", "cleanup-entry-SIGTERM",
+                           "cleanup-callsite-SIGTERM", "cleanup-definition-SIGTERM",
+                           "cleanup-transition-SIGTERM", "cleanup-SIGTERM", "default-SIGTERM"):
+                with self.subTest(boundary=boundary, ending=ending):
+                    folder = self.root / (boundary + ending)
+                    folder.mkdir()
+                    heartbeat, ready, release, restored = [folder / n for n in
+                                                          ("heartbeat", "ready", "release", "restored")]
+                    child = (
+                        "import os,pathlib,time\n"
+                        f"beat=pathlib.Path({str(heartbeat)!r})\n"
+                        "deadline=time.monotonic()+20\n"
+                        "while time.monotonic()<deadline:\n"
+                        " beat.write_text(str(os.getpid())); time.sleep(.05)\n")
+                    worker = (
+                        "import subprocess,sys,time,pathlib\n"
+                        f"p=subprocess.Popen([sys.executable,'-c',{child!r}],start_new_session={boundary != 'validation'!r})\n"
+                        "deadline=time.monotonic()+20\n"
+                        f"while time.monotonic()<deadline and not pathlib.Path({str(release)!r}).exists(): time.sleep(.03)\n")
+                    worker_script = folder / "worker.py"
+                    worker_script.write_text(worker, encoding="utf-8")
+                    program = (
+                        "import sys,signal,pathlib\n"
+                        f"sys.path.insert(0,{str(BASE / 'bin')!r})\n"
+                        "from ouro import cli, validation\n"
+                        "from ouro.runtime import process\n"
+                        "from unittest.mock import patch\n"
+                        "from types import SimpleNamespace\n"
+                        "import os,time,json\n"
+                        "prior=signal.getsignal(signal.SIGTERM)\n"
+                        + ("cli.main=cli.main.__wrapped__; process.run=process.run.__wrapped__; validation.execute=validation.execute.__wrapped__\n"
+                           if ending == "default-SIGTERM" else "")
+                        + ("def interrupt_entry(frame,event,arg):\n"
+                           " if event=='line' and frame.f_code.co_filename.endswith(('runtime/process.py','ouro/validation.py')):\n"
+                           "  import linecache\n"
+                           "  line=linecache.getline(frame.f_code.co_filename,frame.f_lineno).strip()\n"
+                           f"  target={ending!r}\n"
+                           "  targets={'cleanup-entry-SIGTERM': ('if p.stdin is not None:', 'if type(p.pid) is int and p.pid > 1:'), 'cleanup-callsite-SIGTERM': ('finish_cleanup(cleanup)', 'code = finish_cleanup(cleanup)'), 'cleanup-definition-SIGTERM': ('def cleanup():',), 'cleanup-transition-SIGTERM': ('defer_cancellation()',)}\n"
+                           f"  if line in targets[target] and pathlib.Path({str(release)!r}).exists():\n"
+                           "   sys.settrace(None)\n"
+                           f"   pathlib.Path({str(folder / 'injected')!r}).touch()\n"
+                           "   os.kill(os.getpid(),signal.SIGTERM)\n"
+                           " return interrupt_entry\n"
+                           "sys.settrace(interrupt_entry)\n" if ending in ("cleanup-entry-SIGTERM", "cleanup-callsite-SIGTERM", "cleanup-definition-SIGTERM", "cleanup-transition-SIGTERM") else "")
+                        + ("real_kill=os.kill\n"
+                           "def interrupt_cleanup(pid,sig):\n"
+                           " real_kill(pid,sig)\n"
+                           " if sig==signal.SIGSTOP:\n"
+                           "  os.kill=real_kill\n"
+                           "  real_kill(os.getpid(),signal.SIGTERM)\n"
+                           "os.kill=interrupt_cleanup\n" if ending == "cleanup-SIGTERM" and boundary != "validation" else "")
+                        + ("real_killpg=os.killpg\n"
+                           "def interrupt_group(pid,sig):\n"
+                           " os.killpg=real_killpg\n"
+                           " os.kill(os.getpid(),signal.SIGTERM)\n"
+                           " real_killpg(pid,sig)\n"
+                           "os.killpg=interrupt_group\n" if ending == "cleanup-SIGTERM" and boundary == "validation" else "")
+                        + "original_sleep=time.sleep\n"
+                        "original=process.descendants\n"
+                        "def handshake(table,owned):\n"
+                        " original(table,owned)\n"
+                        f" beat=pathlib.Path({str(heartbeat)!r})\n"
+                        " if beat.exists():\n"
+                        "  pid=int(beat.read_text() or '0')\n"
+                        f"  ready=pathlib.Path({str(ready)!r})\n"
+                        "  if pid in owned and not ready.exists():\n"
+                        "   temporary=ready.with_suffix('.tmp')\n"
+                        "   identities={p:b for p,b in owned.items() if p!=os.getpid()}\n"
+                        "   temporary.write_text(json.dumps({'heartbeat':pid,'owned':identities})); temporary.replace(ready)\n"
+                        "def tick(delay):\n"
+                        " table=process.process_table()\n"
+                        " handshake(table,{os.getpid():table[os.getpid()][1]})\n"
+                        " original_sleep(delay)\n"
+                        "def dispatch(*args):\n"
+                        + (" with patch.object(validation,'time',SimpleNamespace(monotonic=time.monotonic,sleep=tick)):\n"
+                           f"  code=validation.execute(__import__('shlex').join([sys.executable,{str(worker_script)!r}]),pathlib.Path({str(folder)!r}),pathlib.Path({str(folder / 'log')!r}))\n"
+                           " result=SimpleNamespace(code=code)\n" if boundary == "validation" else
+                           f" result=process.run([sys.executable,'-c',{worker!r}],timeout=15)\n")
+                        + " assert result.code==0\n"
+                        " return 0\n"
+                        "try:\n"
+                        " with patch.object(process,'descendants',side_effect=handshake):\n"
+                        + ("  with patch.object(cli,'bind',return_value=SimpleNamespace(close=lambda:None)), patch.object(cli.ops,'compile_',side_effect=dispatch):\n"
+                           "   code=cli.main(['compile'])\n" if boundary == "cli" else
+                           "  code=dispatch()\n")
+                        + "except SystemExit as ex:\n"
+                        " code=ex.code\n"
+                        "finally:\n"
+                        f" pathlib.Path({str(restored)!r}).write_text(str(signal.getsignal(signal.SIGTERM)==prior))\n"
+                        "sys.exit(code)\n")
+                    peer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+                    coordinator = None
+                    identity = None
+                    fixture_owned = {}
+                    try:
+                        coordinator = subprocess.Popen([sys.executable, "-B", "-c", program],
+                                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        table = process.process_table()
+                        if coordinator.pid in table:
+                            fixture_owned[coordinator.pid] = table[coordinator.pid][1]
+                        deadline = time.monotonic() + 10
+                        while not ready.exists():
+                            if coordinator.poll() is not None or time.monotonic() >= deadline:
+                                self.fail("coordinator failed before owned descendant handshake")
+                            time.sleep(.03)
+                        handshake = json.loads(ready.read_text())
+                        fixture_owned.update({int(pid): born for pid, born in handshake["owned"].items()})
+                        pid = handshake["heartbeat"]
+                        identity = (pid, fixture_owned[pid])
+                        if ending in ("normal", "cleanup-SIGTERM", "cleanup-entry-SIGTERM", "cleanup-callsite-SIGTERM", "cleanup-definition-SIGTERM", "cleanup-transition-SIGTERM"):
+                            release.touch()
+                        else:
+                            coordinator.send_signal(signal.SIGTERM if ending == "default-SIGTERM" else getattr(signal, ending))
+                        out, err = coordinator.communicate(timeout=10)
+                        self.assertIsNone(peer.poll(), "unrelated peer must survive")
+                        if ending == "default-SIGTERM":
+                            # Negative control strips only the production boundaries:
+                            # default SIGTERM leaves the handshaken worker running.
+                            self.assertEqual(coordinator.returncode, -signal.SIGTERM, err.decode())
+                            before = heartbeat.stat().st_mtime_ns
+                            time.sleep(.25)
+                            self.assertGreater(heartbeat.stat().st_mtime_ns, before)
+                            continue
+                        self.assertEqual(coordinator.returncode == 0, ending == "normal", err.decode())
+                        if ending in ("SIGTERM", "cleanup-SIGTERM", "cleanup-entry-SIGTERM", "cleanup-callsite-SIGTERM", "cleanup-definition-SIGTERM", "cleanup-transition-SIGTERM"):
+                            self.assertEqual(coordinator.returncode, 143, err.decode())
+                        if ending in ("cleanup-entry-SIGTERM", "cleanup-callsite-SIGTERM", "cleanup-definition-SIGTERM", "cleanup-transition-SIGTERM"):
+                            self.assertTrue((folder / "injected").exists(), "cleanup entry must be signalled")
+                        self.assertEqual(restored.read_text(), "True")
+                        self.assertIsNone(peer.poll(), "unrelated peer must survive")
+                        # Observe after parent exit: a stale heartbeat alone proves nothing.
+                        before = heartbeat.stat().st_mtime_ns
+                        time.sleep(.25)
+                        self.assertEqual(heartbeat.stat().st_mtime_ns, before)
+                        deadline = time.monotonic() + 2
+                        while True:
+                            table = process.process_table()
+                            if identity[0] not in table or table[identity[0]][1] != identity[1]:
+                                break
+                            # Linux zombies retain identity until reaped, but cannot run.
+                            stat = pathlib.Path(f"/proc/{identity[0]}/stat")
+                            if stat.exists() and stat.read_text().split(") ")[1].startswith("Z"):
+                                break
+                            if time.monotonic() >= deadline:
+                                self.fail("owned descendant remains alive")
+                            time.sleep(.03)
+                    finally:
+                        try:
+                            if coordinator is not None:
+                                # Discover before killing a live parent; after exit,
+                                # only handshaken birth identities authorize cleanup.
+                                table = process.process_table()
+                                process.descendants(table, fixture_owned)
+                                for pid, born in reversed(list(fixture_owned.items())):
+                                    if pid in table and table[pid][1] == born:
+                                        try:
+                                            os.kill(pid, signal.SIGKILL)
+                                        except ProcessLookupError:
+                                            pass
+                                coordinator.communicate(timeout=5)
+                                deadline = time.monotonic() + 2
+                                for pid in fixture_owned:
+                                    while True:
+                                        try:
+                                            settled, _ = os.waitpid(pid, os.WNOHANG)
+                                        except ChildProcessError:
+                                            break
+                                        if settled:
+                                            break
+                                        if time.monotonic() >= deadline:
+                                            self.fail("fixture child did not settle")
+                                        time.sleep(.01)
+                        finally:
+                            peer.kill()
+                            peer.wait(timeout=5)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX binding cancellation")
+    def test_sigterm_is_not_a_binding_refusal_and_cleanup_ignores_repeat(self):
+        import signal
+        from ouro import cli
+        prior = signal.getsignal(signal.SIGTERM)
+        try:
+            for stage in ("binding", "dispatch"):
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                closed = []
+                def close():
+                    signal.raise_signal(signal.SIGTERM)
+                    closed.append(True)
+                def binding(*args):
+                    try:
+                        if stage == "binding":
+                            signal.raise_signal(signal.SIGTERM)
+                    except SystemExit:
+                        self.fail("cancellation was exposed as a binding reader exit")
+                    return SimpleNamespace(close=close)
+                def dispatch(*args):
+                    signal.raise_signal(signal.SIGTERM)
+                    self.fail("SIGTERM returned a successful domain result")
+                with patch.object(cli, "bind", side_effect=binding), patch.object(cli.ops, "compile_", side_effect=dispatch):
+                    with self.assertRaises(SystemExit) as caught:
+                        cli.main(["compile"])
+                self.assertEqual(caught.exception.code, 143)
+                self.assertEqual(closed, [True] if stage == "dispatch" else [])
+                self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+        finally:
+            signal.signal(signal.SIGTERM, prior)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX handler restoration")
+    def test_cancellation_preserves_handlers_and_restores_on_all_exits(self):
+        import signal
+        from ouro import cli
+        from types import SimpleNamespace
+        prior = signal.getsignal(signal.SIGTERM)
+        custom = lambda signum, frame: None
+        try:
+            for handler in (signal.SIG_DFL, signal.SIG_IGN, custom):
+                for outcome in (0, sh.DriverError("failed"), SystemExit(143), KeyboardInterrupt()):
+                    signal.signal(signal.SIGTERM, handler)
+                    def dispatch(*args):
+                        active = signal.getsignal(signal.SIGTERM)
+                        if handler != signal.SIG_DFL:
+                            self.assertIs(active, handler)
+                            signal.raise_signal(signal.SIGTERM)
+                        else:
+                            self.assertTrue(callable(active))
+                        if isinstance(outcome, BaseException):
+                            raise outcome
+                        return outcome
+                    with patch.object(cli, "bind", return_value=SimpleNamespace(close=lambda: None)), patch.object(cli.ops, "compile_", side_effect=dispatch):
+                        if isinstance(outcome, (SystemExit, KeyboardInterrupt)):
+                            with self.assertRaises(type(outcome)):
+                                cli.main(["compile"])
+                        else:
+                            self.assertEqual(cli.main(["compile"]), 1 if isinstance(outcome, sh.DriverError) else 0)
+                    self.assertIs(signal.getsignal(signal.SIGTERM), handler)
+        finally:
+            signal.signal(signal.SIGTERM, prior)
+
     @reap_fixture_children
     def test_process_timeout_kills_child_tree(self):
         import time

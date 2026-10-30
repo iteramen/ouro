@@ -3,7 +3,7 @@ import json
 import re
 
 from . import briefs, node, sh
-from .acceptance import acceptance_commands, empty_list
+from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, declared_source, empty_list
 from .records import body_line, parse_parts, restamped
 from .run import Run
 from .sh import DriverError, argv_for, say
@@ -147,6 +147,24 @@ def granted_gates(env):
             if (g.get("cheap") is True or not env.pr_checks() or not Run.notice(g) and (Run.locally_run(str(g.get("run") or ""), g) or g.get("paths")))]
 
 
+def acceptance_callers(env):
+    """The gate commands the run admits as approved callers when it checks acceptance (its validation_commands, less acceptance)."""
+    return granted_gates(env) + [str(g["ci"]) for g in env.data.get("gate", []) if g.get("ci")]
+
+
+def ungranted_declarations(text, body, callers):
+    """The node's comment with each `Acceptance command:` field the run would refuse turned into prose, and what was turned:
+    the run reads the newest triage's fields as grants, so a refused one would stop every run of the issue."""
+    turned = []
+    for cmd in acceptance_declarations(text):
+        why = [p.split(": ", 1)[1] for p in acceptance_problems(declared_source(body, [cmd]), callers) if p.startswith(f"`{cmd}`: ")]
+        if why:
+            field = rf"(?m)^([ ]{{0,3}}(?:[-*][ ]+)?)(?:Acceptance command:|\*\*Acceptance command:\*\*)(\s*`{re.escape(cmd)}`)"
+            text = re.sub(field, lambda m: f"{m.group(1)}Acceptance check, not a grant ({why[0]}):{m.group(2)}", text)
+            turned.append(cmd)
+    return text, turned
+
+
 def binding_notes(env, body, labels):
     """What the binding makes of the issue's asks: a `Flow: direct` with no `ship.direct` globs, a `trivial` label under a policy that does not merge on it;
     the flow value and the label are read as the run reads them, exactly."""
@@ -248,6 +266,15 @@ def triage(env, n, dry):
         verdict = "NEEDS-RULING"
         ans["question"] = ("The anchor gate finds:\n\n" + "\n".join(f"- {a}" for a in dead) + "\n\nThe run stops on a dead anchor; fix the "
                            "anchors, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
+    elif verdict == "PROMOTE" and (unrunnable := acceptance_problems(body, acceptance_callers(env))):  # the run stops on these
+        preflight_failed = True
+        verdict = "NEEDS-RULING"
+        ans["question"] = ("The run refuses the body's acceptance as written:\n\n" + "\n".join(f"- {p}" for p in unrunnable)
+                           + "\n\nName a single exact runner command without shell operators or environment prefixes, or state the "
+                             "check as prose, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
+    ans["comment"], turned = ungranted_declarations(str(ans.get("comment") or ""), body, acceptance_callers(env))
+    if turned:
+        say("acceptance fields the run would refuse, kept as prose: " + ", ".join(f"`{cmd}`" for cmd in turned))
     comment = f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n"
     if verdict != "STALE" and (notes := binding_notes(env, body, labels)):  # a stale issue runs nowhere
         comment += "\n" + "\n".join(f"- {x}" for x in notes) + "\n"

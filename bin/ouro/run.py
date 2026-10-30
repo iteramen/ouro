@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import briefs, execution, node, sh, validation, worktrees
-from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, empty_list
+from .acceptance import (acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, declared_source,
+                         empty_list)
 from .coordination import Claim
 from .records import (
     BUILD_LINE, FIX_CAP, MIN_TIME, ORDER, PENDING_MARK, RELEASE_NOTES, body_line, derive_flow, derive_size,
@@ -57,8 +58,7 @@ def poll_seconds():
 def acceptance_source(run):
     """Only explicit fields in approved spec comments extend the body's grants."""
     comments = getattr(run, "spec_amendments", lambda: [])()
-    declared = [command for comment in comments for command in acceptance_declarations(str(comment.get("body") or ""))]
-    return run.body + ("\n## Acceptance commands\n" + "\n".join(f"Acceptance command: `{cmd}`" for cmd in declared) if declared else "")
+    return declared_source(run.body, [command for comment in comments for command in acceptance_declarations(str(comment.get("body") or ""))])
 
 
 # ---- the run ----------------------------------------------------------------------------------
@@ -838,10 +838,12 @@ class Run:
         required = set(acceptance_commands(acceptance_source(self))) - self.ci_commands(selected=False)
         refused = [str((denial.get("tool_input") or {}).get("command") or "")
                    for denial in ans.get("_denied") or [] if isinstance(denial, dict)]
+        ran = set()
         if node.USAGE and node.USAGE[-1].get("node") == name:
-            refused += [call.get("command") for call in node.USAGE[-1].get("tool_calls", [])
-                        if call.get("tool") == "run" and call.get("error")]
-        blocked = sorted(required.intersection(refused))
+            calls = [call for call in node.USAGE[-1].get("tool_calls", []) if call.get("tool") == "run"]
+            refused += [call.get("command") for call in calls if call.get("error")]
+            ran = {call.get("command") for call in calls if not call.get("error")}  # a retry that ran proves it runnable
+        blocked = sorted(required.intersection(refused) - ran)
         if blocked:
             self.stop_issue("acceptance unrunnable", "The " + name + " capability boundary refused required acceptance: "
                             + ", ".join(f"`{cmd}`" for cmd in blocked)
@@ -1754,13 +1756,14 @@ class Run:
             r = self.env.run(script("Watch-PullRequestChecks.ps1", "-Sha", sha), cwd=e.main, timeout=watch_limit())
             if r.code not in (0, None):
                 raise DriverError(f"the default branch's run on {sha} is not green: {r.text}")
-            say("[10] the default branch's runs are green" if r.code == 0 else "[10] the default branch's runs are still running")
+            say("[10] the default branch's runs are green" if r.code == 0 else
+                f"[10] the default branch's runs are still running: invoke `run {self.n}` again once they end")
             claim_ready = r.code == 0
-        if not claim_ready and self.claim.config and os.environ.get(self.claim.config.credential_env):
-            self.claim.update(f"merged: {sha}; waiting on default-branch checks")
-            return 0  # keep the current checklist part resumable while its claim is open
-        if claim_ready:
-            self.claim.update(f"landed: {sha}", close=True)
+        if not claim_ready:
+            if self.claim.config and os.environ.get(self.claim.config.credential_env):
+                self.claim.update(f"merged: {sha}; waiting on default-branch checks")
+            return 0  # keep the worktree and the current checklist part for the resume
+        self.claim.update(f"landed: {sha}", close=True)
         if self.branch_exists() or self.tree.path.exists():
             r = self.env.run(script("Remove-LandedBranch.ps1", "-Pr", str(n)), cwd=e.main)
             if r.code != 0:
@@ -1856,7 +1859,8 @@ class Run:
             area = title[len("Cleanup: "):] if title != "Cleanup" else ""
             known = next((str(x) for x in areas if str(x).lower() == area.lower()), None) if area else None
             labels += ["umbrella"] + ([known] if known else [])
-        argv = argv_for("gh", "issue", "create", "-R", e.slug, "--title", title, "--body-file", f, *[a for l in labels for a in ("--label", l)])
+        argv = argv_for("gh", "issue", "create", "-R", e.slug, "--title", title, "--body-file", f, *[a for l in labels for a in ("--label", l)],
+                       *[a for who in e.runtime.assignees for a in ("--assignee", who)])
         r = e.write(f"file follow-up {title!r}", argv)
         unlabelled = f", without the label {area!r}, which [labels].area does not declare" if ledger and area and not known else ""
         return (r.out.strip().splitlines()[-1] if r.out.strip() else title) + (f" (ledger filed{unlabelled})" if ledger else "")

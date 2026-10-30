@@ -848,9 +848,13 @@ def sec_worktree_cleanup():
                      "pr list --head * --state all --limit 1000 --json *": {"Out": discovery}})
         c.clear_prompts()
         code, out, err = c.ouro("run", "1" if resumed else "2")
-        check("next actual CLI startup removes closed driver's tree and local branch", not wt.exists()
-              and "deleted local branch" in out and not records[0].exists()
-              and sh("git", "show-ref", "--verify", "refs/heads/" + branch, cwd=c.main)[0] != 0)
+        if os.name == "nt" or pathlib.Path("/proc").is_dir():
+            check("next actual CLI startup removes closed driver's tree and local branch", not wt.exists()
+                  and "deleted local branch" in out and not records[0].exists()
+                  and sh("git", "show-ref", "--verify", "refs/heads/" + branch, cwd=c.main)[0] != 0)
+        else:  # no process observer (Darwin): nothing proves the tree unused
+            check("with no process observer, startup keeps the closed driver's tree and local branch", wt.is_dir()
+                  and "resource observer unavailable" in out and sh("git", "show-ref", "--verify", "refs/heads/" + branch, cwd=c.main)[0] == 0)
         check("cleanup never deletes or moves the remote branch", git(c.origin, "rev-parse", "refs/heads/" + branch) == head)
         check("closed discovery needs no coordination; unrelated run still reaches its own refusal",
               code == (0 if resumed else 2) and ("pull request closed externally" in out if resumed else "not agent-ready" in out + err)
@@ -1526,6 +1530,24 @@ def sec_fix_round_scope():
     check("a follow-up keeps the node's area and type labels in the binding's spelling and drops a state or unknown name; one naming no area inherits the run's",
           code == 0 and len(creates) == 2 and creates[0].endswith("--label needs-triage --label gates --label bug") and creates[1].endswith("--label needs-triage --label gates"))
     check("the FOLLOWUP brief carries the binding's label sets", '"area": ["gates"]' in open(cg.nodes / cg.prompts("FOLLOWUP")[0], encoding="utf-8").read())
+    ca = happy_case("followupassignees", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
+    ca.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
+    ca.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- a line\n", "labels": ["Gates"]}]})
+    cfg = ca.root / "developer.toml"
+    cfg.write_text('[followup]\nassignees = ["someone", "@me"]\n', encoding="utf-8")
+    code, out, err = ca.ouro("run", "1", "--validate", extra={"OURO_DEVELOPER_CONFIG": str(cfg)})
+    creates = [s for s in ca.sigs() if s.startswith("issue create")]
+    check("a developer binding's followup.assignees reach each follow-up's create, one --assignee per entry",
+          code == 0 and len(creates) == 1 and creates[0].endswith("--label needs-triage --label gates --assignee someone --assignee @me"))
+    from ouro import developer
+    for text in ('[followup]\nassignees = "someone"\n', '[followup]\nassignees = [""]\n', '[followup]\nassign = ["someone"]\n'):
+        cfg.write_text(text, encoding="utf-8")
+        try:
+            developer.load(cfg)
+            refused = ""
+        except shmod.DriverError as ex:
+            refused = str(ex)
+        check(f"a malformed followup table is a developer binding error: {text.splitlines()[1]!r}", "followup.assignees must be a list" in refused)
 
     cu = happy_case("ledgerundeclared", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     cu.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
@@ -1728,7 +1750,9 @@ def sec_no_pr_workflow():
     t = Case("noprworkflowtriage", binding=nb, files={".github/workflows/ci.yml": None}, table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body1)})
     t.node("TRIAGE", {"verdict": "PROMOTE", "size": "S", "flow": "express", "doc_impact": "none", "comment": "ok"})
     code, out, err = t.ouro("triage", "1", "--dry-run")
-    check("triage grants what the run grants: with no pull_request workflow the notice gate runs here, so no empty command list", code == 0 and "empty command list" not in out)
+    check("triage grants what the run grants: with no pull_request workflow the notice gate runs here, so no empty command list; "
+          "the env-prefixed acceptance the run refuses is no PROMOTE",
+          code == 3 and "empty command list" not in out and "The run refuses the body's acceptance" in out)
     k = happy_case("noprworkflowconflict", files={".github/workflows/ci.yml": None}, table={"_mergeable": ["CONFLICTING DIRTY", "MERGEABLE CLEAN"]})
     code, out, err = k.ouro("run", "1")
     tip = git(k.origin, "rev-parse", "refs/heads/gates/1-fix-the-total")
@@ -2179,6 +2203,25 @@ def sec_triage():
     check("triage posts a comment whose first line is exactly **Triage**", code == 0 and s["comments"][-1]["body"].split("\n")[0] == "**Triage**" and "Anchors resolve" in s["comments"][-1]["body"])
     check("triage writes Size, Flow and Doc impact lines where missing", all(x in s["body"] for x in ("Size: S", "Flow: express", "Doc impact on close: none")))
     check("triage sets the labels", "agent-ready" in labels_of(c) and "needs-triage" not in labels_of(c))
+    grep = 'grep -rn "compute_total(" --include=*.py src'
+    cg = Case("triageungranted", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"),
+                                                          body=body + "\n## Acceptance\nOne caller. Check with `" + grep + "`.\n")})
+    cg.node("TRIAGE", {**answer, "comment": "One deliverable.\n\nAcceptance command: `" + grep + "`\nAcceptance command: `python3 gates/check.py`\n"})
+    code, out, err = cg.ouro("triage", "1")
+    posted = cg.issue_state()["comments"][-1]["body"]
+    check("triage keeps an Acceptance command the run would refuse as prose, not a grant; a runnable one stays a field",
+          code == 0 and runmod.acceptance_declarations(posted) == ["python3 gates/check.py"]
+          and "Acceptance check, not a grant (this explicit command is outside the approved acceptance runner forms): `" + grep + "`" in posted
+          and "agent-ready" in labels_of(cg))
+    code, out, err = cg.ouro("run", "1", "--dry-run")
+    check("and the run that follows does not stop as acceptance unrunnable", "acceptance unrunnable" not in out + err and not stops_of(cg))
+    cp = Case("triagebodyunrunnable", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"),
+                                                               body=body + "\n## Acceptance\n`python3 gates/check.py | tail` passes.\n")})
+    cp.node("TRIAGE", answer)
+    code, out, err = cp.ouro("triage", "1", "--dry-run")
+    check("a body naming acceptance the run refuses is no PROMOTE: needs-ruling, naming the command",
+          code == 3 and "labels +['needs-ruling'] -['needs-triage']" in out and "The run refuses the body's acceptance" in out
+          and "python3 gates/check.py | tail" in out)
     waits = "**Unblocks when:** #62 lands\n\n" + body
     for name, verdict, text, want in (("triagewaits", "PROMOTE", waits, "labels +['blocked'] -['needs-triage']"),
                                       ("triageblocked", "BLOCKED", waits, "labels +['blocked'] -['needs-triage']"),
@@ -3504,11 +3547,14 @@ def sec_uncovered_commands():
     t = Case("uncoveredcmdtriage", binding=notice, table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
     t.node("TRIAGE", answer)
     code, out, err = t.ouro("triage", "1", "--dry-run")
-    check("triage says the BUILD node would get an empty command list, naming the command", code == 0 and "would get an empty command list" in out and "`OURO_X=1 python3 gates/check.py`" in out)
+    check("triage says the BUILD node would get an empty command list, naming the command, and asks rather than promote what the run refuses",
+          code == 3 and "would get an empty command list" in out and "`OURO_X=1 python3 gates/check.py`" in out
+          and "labels +['needs-ruling'] -['needs-triage']" in out)
     t2 = Case("uncoveredcmdtriagegate", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
     t2.node("TRIAGE", answer)
     code, out, err = t2.ouro("triage", "1", "--dry-run")
-    check("with a gate the node runs, triage says nothing of it", code == 0 and "empty command list" not in out)
+    check("with a gate the node runs, triage says nothing of the empty list, and still asks on the refused acceptance",
+          code == 3 and "empty command list" not in out and "The run refuses the body's acceptance" in out)
     t4 = Case("uncoveredcmdunnamed", table={"_issue_1": issue(labels=("needs-triage", "bug"), body=body)})
     t4.node("TRIAGE", answer)
     code, out, err = t4.ouro("triage", "1", "--dry-run")

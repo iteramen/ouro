@@ -62,6 +62,11 @@ def acceptance_declarations(text):
     return result
 
 
+def declared_source(body, declared):
+    """The body with the commands trusted comments declare, as the run reads its acceptance."""
+    return body + ("\n## Acceptance commands\n" + "\n".join(f"Acceptance command: `{cmd}`" for cmd in declared) if declared else "")
+
+
 def acceptance_problems(body, caller_commands=()):
     problems = []
     allowed = set(acceptance_commands(body))

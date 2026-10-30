@@ -55,7 +55,13 @@ def scan(output):
                 result.usage = {}
         elif kind in ("turn.failed", "error"):
             message = event.get("error") or event.get("message")
+            code = message.get("code") if isinstance(message, dict) else None
             if isinstance(message, dict):
-                message = message.get("message") or message.get("code")
-            result.failure = (message[:1600] or kind) if isinstance(message, str) else kind
+                message = message.get("message")
+            # Only known machine values and the CLI's exact incomplete wrapper are projected.
+            # Never retain arbitrary provider text, even transiently in the parsed result.
+            budget = code == "max_output_tokens" or message in (
+                "max_output_tokens", "Incomplete response returned, reason: max_output_tokens")
+            if result.failure != "output_budget_exhausted":
+                result.failure = "output_budget_exhausted" if budget else "unknown"
     return result

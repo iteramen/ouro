@@ -115,6 +115,14 @@ print('mutation counterfactual red; source restored')
                 code == 3 and len(case.prompts("BUILD")) == 1
                 and any(h.stop_comment_ok(stop, "acceptance unrunnable") for stop in h.stops_of(case)))
 
+    case = h.happy_case("acceptance-denied-retried", files=files, table={"_issue_1": h.issue(body=body)})
+    case.node("BUILD", {**acceptance_build(h, subset), "_denied": [{"tool_name": "PowerShell", "tool_input": {"command": subset}}]})
+    code, out, err = case.ouro("run", "1")
+    wt = case.main / ".claude/worktrees/1-fix-the-total"
+    h.check("a required BUILD denial that a later call of the same command ran does not stop the run",
+            not any("acceptance unrunnable" in stop for stop in h.stops_of(case))
+            and h.git(wt, "rev-list", "--count", "origin/master..HEAD") == "1")
+
     case = h.happy_case("acceptance-valid-handoff", files=files, table={"_issue_1": h.issue(comments=comments)})
     case.node("BUILD", {**h.BUILD, "validation_pending": [{"cmd": subset, "reason": "approved command blocked in worker environment"}]})
     code, out, err = case.ouro("run", "1")

@@ -31,6 +31,12 @@ description: >
    default branch, and its body has its own `Fixes #<N>` line, then gates, reviews and ships it as
    usual. Repeat `--pr <M>` on every resume of that run.
 
+   Retain execution ownership until the driver returns a terminal result or an explicit blocker,
+   unless a separately authorized durable execution mechanism owns continuation. A process
+   monitor is not continuation: commands and watchers in the same turn-owned tool lifecycle
+   do not authorize ending the coordinating turn with an implication of autonomous progress.
+   Poll an active command within the turn until it exits; then relay its actual result.
+
 3. **Relay** the driver's message and act on its exit code:
    - `0` landed, waiting on the owner's merge, or waiting on checks: say which; re-run after the
      merge or when the checks finish.
@@ -45,7 +51,16 @@ description: >
      comment names the branch and, once opened, the pull request, which stay for a person's fix round; pushed
      to the branch, with `agent-ready` back in place of `needs-ruling`, a new run verifies it.
    - `1` a driver error; quote the message, which names the transition and the command. Do not
-     retry it silently.
+     retry it silently. Failed or incomplete execution is not a normal wait, even with a
+     plausible partial final report. For a failed initial BUILD, verify the old worker ended,
+     inspect and preserve only identified task-owned partial files and retained logs before
+     invoking a normal run again. Preserve unrelated edits; never reset the directory or sweep
+     unknown edits into the task. If ownership or liveness cannot be established, stop and name
+     the concrete evidence gap. Resume requires a genuine new completed BUILD and fresh
+     exact-head proof and independent review, without automatic retries.
+
+Successful CI or a worker report does not continue ownership of the invoking chat turn.
+The caller must retain responsibility for its foreground run through the reported outcome.
 
 The driver edits, commits, pushes and writes to the tracker itself. This session does none of
 that and answers no stop it posts.

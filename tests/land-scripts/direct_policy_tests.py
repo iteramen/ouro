@@ -252,7 +252,8 @@ class DirectPolicyTests(unittest.TestCase):
             self.assertTrue(policy.plan(self.repo, base, head)["eligible"])
             result = policy.check(self.repo, base, head)
         self.assertFalse(result["eligible"])
-        self.assertIn("WSL", " ".join(result["reasons"]))
+        # Without /proc (Darwin) the visibility check refuses first, before the kernel is read.
+        self.assertIn("WSL" if os.path.isdir("/proc") else "platform visibility unavailable", " ".join(result["reasons"]))
         self.assertEqual(result["checks"], [])
         self.assertFalse((self.repo / ".git/inline-ran").exists())
 
@@ -698,6 +699,28 @@ class DirectPolicyTests(unittest.TestCase):
         result = self.evaluate(base)
         self.assertFalse(result["eligible"], result)
         self.assertIn("dynamic", " ".join(result["reasons"]))
+
+    def test_an_app_execution_alias_pins_its_own_path_and_never_one_in_the_checkout(self):
+        self.start(gates=[{"cheap": True, "run": "python3 --version"}])
+        suffix = ".exe" if os.name == "nt" else ""
+        outside = self.home / "WindowsApps" / ("alias" + suffix)
+        inside = self.repo / "tools" / ("alias" + suffix)
+        for path in (outside, inside):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"")
+            path.chmod(0o755)
+        original = Path.resolve
+        def resolve(path, strict=False):  # realpath cannot follow an app execution alias
+            if strict and path.name == outside.name:
+                raise OSError(1920, "The file cannot be accessed by the system")
+            return original(path, strict=strict)
+        with patch.object(Path, "resolve", resolve), patch.object(policy, "_app_alias", lambda path: True):
+            self.assertEqual(policy._executable(self.repo, str(outside), required=True), str(outside))
+            with self.assertRaises(policy.Unproved):
+                policy._executable(self.repo, str(inside), required=True)
+        with patch.object(Path, "resolve", resolve), patch.object(policy, "_app_alias", lambda path: False):
+            with self.assertRaises(OSError):
+                policy._executable(self.repo, str(outside), required=True)
 
     def test_execution_pin_resolves_portable_command_and_owned_executable_is_protected(self):
         with patch.dict(os.environ, {"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]}):

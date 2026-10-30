@@ -20,6 +20,46 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.9.1] - 2026-10-30
+
+**Net lines:** +838 across skills, docs, hooks, bin and tests, because this release is bug fixes
+only and each carries the rows that fail without it: +474 for the coordinator SIGTERM unwind and
+incomplete-attempt classification, mostly runtime rows, and +364 for the post-merge push-run
+reader, triage's acceptance check and the macOS and Windows platform fixes.
+
+- On macOS, the kill guard no longer calls the session's own process another session's when the
+  worktree's path runs through a symlink (`/var` is `/private/var` there): both directories are
+  resolved before they are compared.
+- Triage checks acceptance the way the run does. An `Acceptance command:` field the node writes
+  that the run would refuse, such as a `grep` or a pipeline, is posted as prose rather than a
+  grant, so it no longer stops every run of the issue as `acceptance unrunnable`. A body whose
+  own acceptance the run refuses gets NEEDS-RULING, naming each command, instead of PROMOTE.
+- On Windows, a gate command whose executable is an app execution alias, such as the Microsoft
+  Store's `python3`, no longer fails the direct lane's executable pin: the alias file is pinned
+  as its own identity, and one inside the checkout still requires a pull request.
+- On macOS, a timed-out or cancelled command whose process group had already exited no longer
+  fails with `PermissionError`: Darwin refuses to signal a group of exited, unreaped processes,
+  and that refusal now counts as nothing left to kill, once `ps` shows no running member.
+- Default POSIX SIGTERM now unwinds the CLI, runtime subprocess and caller-validation boundaries
+  through owned cleanup with a non-success exit, restoring prior handlers even when the first
+  termination request arrives at cleanup entry or interrupts its body. The run skill requires
+  the invoking lead to retain execution ownership; turn-owned monitors provide no durable
+  continuation, and SIGKILL or host death provides no cleanup guarantee.
+- Codex incomplete attempts report bounded reasons without provider error text; failed initial BUILD runs require explicit preservation, worker-exit inspection and a fresh completed build with proof and review.
+- A full run's post-merge watch no longer reads a missing default-branch run as green. Each
+  enabled workflow whose push filters (branches, tags, paths and their `-ignore` forms) select
+  the merge commit must show a push run, and the watch waits up to ten minutes for one GitHub
+  starts late, then stops. A run another event starts on the commit, such as a label workflow,
+  no longer counts. A commit no workflow's filters select still passes after a minute. A watch
+  that ends before the verdicts keeps the worktree and leaves the checklist part unticked for the
+  resume, with or without a claim board. `ouro-binding.py push-workflows <sha>...` prints the
+  selected workflows.
+- The developer binding accepts `[followup].assignees`, the GitHub logins (`@me` included) a run
+  assigns to each follow-up issue it files; absent, follow-ups are filed unassigned as before. An
+  older driver refuses the table, so set it only once the plugin is at this release.
+- A required acceptance command that BUILD's first call was denied for, and that a later call in
+  the same session ran, no longer stops the run as `acceptance unrunnable`.
+
 ## [v1.9.0] - 2026-10-29
 
 - The plugin no longer registers the forbidden-tokens PreToolUse hook, so a `gh` or `git commit`

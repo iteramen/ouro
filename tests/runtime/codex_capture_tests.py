@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ouro import developer, sh
+from ouro import cli, developer, node, sh
 from ouro.runtime import READ, PROBE, builder, codex, codex_events, diagnostics, process
 
 
@@ -140,6 +140,9 @@ print(json.dumps({'type':'thread.started','thread_id':'capture-fixture'}),flush=
 if mode in ('large','late-failure','nonzero'):
     frame=json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','result':'x'*(512*1024)}})
     for i in range(20):print(frame)
+if mode=='budget':
+    pathlib.Path('partial.txt').write_text('task-owned partial',encoding='utf-8')
+    print(json.dumps({'type':'turn.failed','error':{'message':'Incomplete response returned, reason: max_output_tokens'}}),flush=True)
 if mode=='malformed':answer.write_text('not JSON',encoding='utf-8')
 if mode=='large-final':answer.write_text(' '* (4*1024*1024+1),encoding='utf-8')
 if mode=='large-frame':print(json.dumps({'type':'item.completed','body':'x'*(8*1024*1024)}))
@@ -179,11 +182,69 @@ if mode=='nonzero':sys.exit(7)
                 self.execute("large")
 
     def test_capture_does_not_turn_failures_or_invalid_results_into_success(self):
-        for mode, message in (("late-failure", "late provider failure"), ("nonzero", "exit 7"),
-                              ("missing", "completion missing"), ("malformed", "final structured result"),
+        for mode, message in (("late-failure", "unknown"), ("nonzero", "exit 7"),
+                              ("missing", "missing_completion"), ("malformed", "final structured result"),
                               ("large-final", "result limit exceeded"), ("large-frame", "frame limit exceeded")):
             with self.subTest(mode=mode), self.assertRaisesRegex(sh.DriverError, message):
                 self.execute(mode)
+
+    def test_real_transport_budget_failure_survives_later_completion_and_final_file(self):
+        with self.assertRaisesRegex(sh.DriverError, "output_budget_exhausted"):
+            self.execute("budget")
+        self.assertEqual((self.root / "partial.txt").read_text(), "task-owned partial")
+        row = diagnostics.ATTEMPTS[-1]
+        self.assertEqual(row["incomplete_reason"], "output_budget_exhausted")
+        self.assertEqual(row["outcome"], "failed")
+        self.assertTrue(row["provider_completed"])
+        self.assertNotIn("Incomplete response", diagnostics.table())
+
+    def test_incomplete_attempt_cli_rejects_false_completion_and_preserves_edits(self):
+        import contextlib
+        import io
+        self.addCleanup(node.USAGE.clear)
+        answer = dict(subject="generated", body="", claims=[], gates_run=[],
+                      residue=[], manual=[], door="", blast_radius="")
+        for reason, expected in (("max_output_tokens", "output_budget_exhausted"),
+                                 ("private-provider-text", "unknown"),
+                                 (None, "missing_completion"), ("terminated", "terminated_transport")):
+            for completed in (False, True):
+                if reason is None and completed:
+                    continue
+                with self.subTest(reason=reason, completed=completed):
+                    def fake(argv, **kwargs):
+                        target = pathlib.Path(argv[argv.index("--output-last-message") + 1])
+                        target.write_text(json.dumps(answer), encoding="utf-8")
+                        # An inert provider models a completed tool edit before its turn fails.
+                        (self.root / "partial.txt").write_text("task-owned partial", encoding="utf-8")
+                        events = [{"type": "thread.started", "thread_id": "bad|session"}]
+                        if reason not in (None, "terminated"):
+                            events.append({"type": "turn.failed", "error": {
+                                "message": "Incomplete response returned, reason: " + reason}})
+                        if completed:
+                            events.append({"type": "turn.completed", "usage": {"output_tokens": 7}})
+                        return sh.R(9 if reason == "terminated" else 0,
+                                    "\n".join(map(json.dumps, events)), "private-stderr", argv)
+                    output = io.StringIO()
+                    def dispatch(*args):
+                        return node._real("BUILD", "generated", "default", builder([]),
+                                          self.root, 5, None, developer.Settings("codex"))
+                    with patch.object(codex, "WINDOWS", False), patch.object(codex, "git_readiness"), \
+                            patch.object(sh, "which", side_effect=lambda name: name), \
+                            patch.object(process, "run", side_effect=fake), \
+                            patch.object(cli, "bind", return_value=None), patch.object(cli.worktrees, "sweep"), \
+                            patch.object(cli.run, "main", side_effect=dispatch), \
+                            contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                        self.assertEqual(cli.main(["run", "1"]), 1)
+                    row = diagnostics.ATTEMPTS[-1]
+                    self.assertEqual(row["incomplete_reason"], expected)
+                    self.assertIsNone(row["session"])
+                    self.assertEqual(node.USAGE, [])
+                    self.assertEqual(row["output"], 7 if completed else None)
+                    self.assertIsNone(row["cost"])
+                    self.assertEqual((self.root / "partial.txt").read_text(), "task-owned partial")
+                    self.assertNotIn("private-", output.getvalue())
+                    self.assertIn("verify the old worker ended", output.getvalue())
+                    self.assertEqual(list(self.root.glob("*.json")), [])
 
     def test_generic_capture_and_stderr_keep_their_existing_limit(self):
         command = [sys.executable, "-c", "import sys; sys.stdout.write('x'*(9*1024*1024))"]
@@ -252,6 +313,19 @@ if mode=='nonzero':sys.exit(7)
                 process.run(command, cwd=cwd, output_limit=512 * 1024, timeout=5)
         cwd.rmdir()
 
+    def test_budget_code_is_recognized_without_retaining_provider_message(self):
+        for error in ({"code": "max_output_tokens", "message": "private-provider-text"},
+                      {"code": "max_output_tokens"},
+                      {"message": "max_output_tokens"}):
+            with self.subTest(error=error):
+                transcript = codex_events.scan("\n".join(map(json.dumps, [
+                    {"type": "turn.failed", "error": error},
+                    {"type": "turn.completed", "usage": {}},
+                    {"type": "error", "message": "private-provider-text"},
+                ])))
+                self.assertEqual(transcript.failure, "output_budget_exhausted")
+                self.assertNotIn("private-provider-text", repr(transcript))
+
     def test_projection_discards_items_and_bounds_metadata_and_frames(self):
         output = '\n'.join(map(json.dumps, [
             {"type": "thread.started", "thread_id": "known"},
@@ -262,13 +336,13 @@ if mode=='nonzero':sys.exit(7)
         transcript = codex_events.scan(output)
         self.assertEqual(transcript.count, 4)
         self.assertEqual(transcript.usage, {"input_tokens": 3})
-        self.assertEqual(len(transcript.failure), 1600)
+        self.assertEqual(transcript.failure, "unknown")
         self.assertNotIn("discard me", repr(transcript))
         invalid = codex_events.scan(json.dumps({"type": "turn.completed", "usage": {
             "input_tokens": {"huge_body": "discard me"}, "output_tokens": True,
             "cached_input_tokens": -1, "cost_usd": float("inf")}}))
         self.assertEqual(invalid.usage, {})
-        self.assertEqual(codex_events.scan('{"type":"error","message":""}').failure, "error")
+        self.assertEqual(codex_events.scan('{"type":"error","message":""}').failure, "unknown")
         with patch.object(codex_events, "MAX_FRAMES", 2):
             self.assertIn("count limit", codex_events.scan(output).error)
         with patch.object(codex_events, "FRAME_LIMIT", 60):

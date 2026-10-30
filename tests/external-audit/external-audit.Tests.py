@@ -196,13 +196,11 @@ def make_stub(name="grok", reply_text=None, exit_code=0, write_file=None, sleep_
 # fleet's own guard, not the driver's: the driver trusts whatever PATH it is given, the way
 # shutil.which does.
 _STUBBED_CLIS = ("grok", "claude", "codex", "copilot")
-_REAL_CLI_DIRS = {
-    os.path.normcase(os.path.realpath(os.path.dirname(w)))
-    for w in (shutil.which(name) for name in _STUBBED_CLIS) if w
-}
+# Every entry that holds one is dropped, not only the first a lookup finds: a second install
+# further down PATH would otherwise stay reachable.
 SAFE_PATH = os.pathsep.join(
     p for p in os.environ.get("PATH", "").split(os.pathsep)
-    if p and os.path.normcase(os.path.realpath(p)) not in _REAL_CLI_DIRS)
+    if p and not any(shutil.which(name, path=p) for name in _STUBBED_CLIS))
 
 for _name in _STUBBED_CLIS:
     check(f"the suite never reaches a real CLI: shutil.which({_name!r}, path=SAFE_PATH) is None",
