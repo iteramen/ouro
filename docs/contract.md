@@ -50,6 +50,35 @@ transition keeps files and refs for manual reconciliation. The binding document 
 configuration precedence, supported runtime versions, the node capability table and the readiness
 checks.
 
+Codex PROBE commands extend the named `:read-only` permission profile, with network disabled
+and only the canonical disposable review copy granted writes; caller temporary storage is not
+a write grant. Command temporary files live inside that copy. Its Git pointer, Git metadata
+and `.claude`, `.codex`, `.agents`, `.aws` paths remain read-only. BUILD command and READ
+capabilities retain their own controls, including managed configuration and Git readiness.
+PROBE requires native Linux or macOS (WSL refuses) and an invocation-private copy without symlinks,
+hard-linked files, nested mounts or special files; admission refuses unsupported topology before
+dispatch and again before each command. Canonical aliases of the root use the same boundary.
+External processes must not mutate that private copy or its invocation-stable configuration inputs
+while it is in use. Before worker dispatch and each command, read-only app-server `config/read`
+(with layers and canonical cwd) and `configRequirements/read` inspect the same executable,
+environment and permission overrides used for launch. Two fresh resolutions must agree on effective
+configuration. The MCP bridge preserves an explicitly declared `CODEX_HOME` verbatim so admission
+inspects the caller's configuration home and still detects aliases. Resolutions compare effective
+values, opaque layer identities/versions and file provenance. The selected profile must exactly match
+the owned-root/protected-root grants, read-only parent and disabled network; merged extra grants,
+aliases, unknown permission fields, requirements, non-file managed layers or drift refuse before mutation.
+Raw configuration and server diagnostics stay private. Protected top-level harness names include
+every ASCII case variant, including names absent at admission. BUILD and READ do not use this admission.
+A linked worktree's common/admin Git state must stay outside the write grant; overlap refuses.
+The opt-in
+`python3 tests/runtime/live.py --probe-boundary` qualification requires the configured default
+Codex reviewer, actual bridge execution, EPERM/EACCES/EROFS for protected writes, unchanged original
+bytes and metadata, and owned-copy mutation/red/restoration/green. New cross-boundary hardlink
+creation alone also accepts EXDEV, with no destination link and unchanged source inode, bytes and
+metadata. Generated before/after fixtures and provider/native receipts survive failures; policy
+refusals are distinct from OS denials.
+Production adoption requires successful qualification on the actual host boundary.
+
 ### Optional issue claims
 
 Developer-owned [coordination settings](binding.md#optional-advisory-board-connection) enable
@@ -284,6 +313,8 @@ The **default working view** is
 Two **modifiers** ride on top of `agent-ready` and never stand alone: `trivial` (§5) and
 `checkpoint` (§3). Scope, area and type labels declared in `[labels]` may ride on any state. An
 issue carries one type label and one or more area labels: a change that spans areas carries each.
+The issue's native GitHub type stands for the type label when the type set names it, and triage
+then adds no type label beside it.
 Labels select no gate: executing it runs every gate whose `paths` the branch's diff touches, and
 every gate without `paths` (`docs/binding.md`).
 
@@ -402,7 +433,18 @@ In PR flows, `ship.validation = "ci"` makes the repository's nonempty, unique
 `gate.run`, `gate.ci` and path selection define that coverage; invoking and committed gate lists
 must agree. The driver pushes a draft PR and requires the declared checks to succeed at its final
 head before review, Ready or merge; missing, skipped, neutral, pending, failed or stale results do
-not count. A new head requires new proof. Local-only checks, including the private-token scan and
+not count. A new head requires new proof. Omitted Actions evidence can be reconciled against
+an authenticated ordinary PR workflow and its latest PR/dispatch invocations. Repository and head
+repository, exact head/ref, unchanged workflow definition at the PR base, GitHub Actions provider,
+literal job name and current run attempt must agree. Actual completed successful jobs supply the
+proof; run summaries do not. An ordinary skipped job can coexist with a successful dispatch job,
+but applicable failures, pending runs and ambiguous identities cannot be overridden by selecting
+an older success. Bounded API inventories and final head/attempt rechecks fail closed; evidence
+records retain workflow, event, run, attempt and job URL for review; a resume recomputes them.
+Unrelated unsupported-event inventory entries neither veto evidence nor supply authority.
+Unique successful ordinary legacy statuses survive reconciliation only with an unchanged head
+and rollup; absent, failed, ambiguous or changed statuses cannot be replaced by Actions success.
+Local-only checks, including the private-token scan and
 CI-skip gates, execute through the portable driver runner; local gates marked `cheap` are
 mandatory regardless of their path selector. An explicit Acceptance command is CI-covered only by
 exact match to a trusted CI-owned `gate.run`; arbitrary commands and `ci` aliases gain no
@@ -597,8 +639,8 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
   than its turn count, since every turn re-reads all the ones before it, so the budget bounds the
   one thing that runs away.
 - **Unmoved findings.** A verification that re-raises an H or M finding a fix must answer (so
-  not an OUTSIDE one, which no fix touches) of the verification before it unchanged (the same
-  file, claim and evidence) is a STOP before the cap: `**Stop:** open
+  not an OUTSIDE one, which is unrelated to the original PR) of the verification before it unchanged
+  (the same file, claim and evidence) is a STOP before the cap: `**Stop:** open
   decision`, naming the finding and the two rounds, since the fix moved nothing of it and a
   third round would re-raise it again. The first review is no verification: its finding counts
   once a verification re-raises it, so one fix round is always spent on it.
@@ -610,11 +652,11 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
   `needs-ruling`, and a new run verify that commit as any fix round, a finding at it being the
   cap again. Iterations are bounded because fixes can introduce further defects; only a
   verification that finds nothing establishes completion. A round is
-  one fix and the verification of that fix's commit, and the count is of what a fix introduced:
-  a change takes one full review, and what a later pass finds in lines no fix touched is filed
-  as a follow-up, except a finding that the change does not deliver the issue's Deliverable as
-  the trusted comments amend it, which opens a fix round at any pass; one raised again after an
-  approver's ruling needs a new ruling, as any finding at a later head does.
+  one fix and the verification of that fix's commit. A change takes one full review. A blocking
+  defect introduced by the original PR remains blocking outside the latest fix hunk (IN-PR);
+  only unrelated external findings are OUTSIDE follow-ups. A finding that the change does not
+  deliver the issue's Deliverable as trusted comments amend it opens a fix round at any pass;
+  one raised again after an approver's ruling needs a new ruling, as any finding at a later head does.
   A finding from a reviewer on the pull request that arrives after the REVIEW node has verified
   the change gets **one fix round of its own**, outside the five, its fix commit verified as
   the REVIEW node verifies any. A further valid finding from such a reviewer after that

@@ -16,7 +16,7 @@ steps through once per head change (an UNKNOWN that settles at one head is not e
 once (a commit on master), as a conflicting head means it did. `_head_lag` is a list of booleans, one per `pr view` that
 asks for `headRefOid` (the last repeats): true serves `STALE_HEAD` there in place of the branch tip, as GitHub does for a while after a push.
 Table keys beginning `_` seed that state: `_viewer`, `_issue_<N>`, `_pr`, `_comments_<N>`, `_mergeable`, `_head_lag`, and for the
-GraphQL model `_edits` (the issue body's edit history, pages keyed by cursor, "" for the first),
+GraphQL model an `_issue_<N>`'s `issueType` (`{"name": ...}`, its native type, null when absent), `_edits` (the issue body's edit history, pages keyed by cursor, "" for the first),
 `_prs` (what a pull request search answers), `_threads` (the pull request's review threads), `_copilot_bot` (the bot id Copilot answers to),
 `_copilot_polls` (reads before its review shows) and `_copilot_never`; `_stale_list` makes the run list read a re-run attempt
 as success whatever it concluded, `_checks_extra` adds check rows to `pr checks --json`, and a `budget` plan entry is an attempt
@@ -206,9 +206,9 @@ n = args[2] if len(args) > 2 else ""
 if sig == "api user --jq .login":
     out(viewer)
 if verb == "issue view" and f"_issue_{n}" in table:
-    out(issue(n))
+    out({k: v for k, v in issue(n).items() if k != "issueType"})  # gh's --json has no issueType: only GraphQL reads it
 if verb == "issue list" and "--label" in args:
-    out([v for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))
+    out([{k: x for k, x in v.items() if k != "issueType"} for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))
          if flag("--label") in [l["name"] for l in v["labels"]] and v.get("state", "OPEN") == "OPEN"])
 if verb == "issue list" and "--search" in args:
     out([{k: v[k] for k in ("number", "title", "state")} for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))])
@@ -340,6 +340,8 @@ if sig.startswith("api graphql"):
     def data(obj):
         out({"data": obj})
 
+    if "issueType" in q:
+        data({"repository": {"issue": {"issueType": issue(var.get("n", "1")).get("issueType")}}})
     if "userContentEdits" in q:
         page = table.get("_edits", {"": {"nodes": [], "hasNextPage": False, "endCursor": None}})[var.get("c", "")]
         data({"repository": {"issue": {"userContentEdits": {"nodes": page["nodes"], "pageInfo": {

@@ -66,6 +66,14 @@ class ValidationTests(unittest.TestCase):
                     receipt.assert_not_called()
                     lease.assert_not_called()
 
+    def test_requests_name_the_command_and_the_cause(self):
+        granted = {"cmd": "python3 granted.py", "reason": "sandbox"}
+        for name, value, cause in (("ungranted", [{"cmd": "python3 other.py", "reason": "sandbox"}], "not granted: `python3 other.py`"),
+                                   ("duplicate", [granted, granted], "duplicate validation command: `python3 granted.py`")):
+            with self.subTest(name), self.assertRaises(sh.DriverError) as raised:
+                validation.requests(value, ["python3 granted.py"])
+            self.assertIn(cause, str(raised.exception))
+
     @unittest.skipUnless(os.name == "posix", "kernel platform detection")
     def test_platform_facts_ignore_environment_and_fail_closed(self):
         kernel = types.SimpleNamespace(sysname="Linux", release="6.1", version="native")

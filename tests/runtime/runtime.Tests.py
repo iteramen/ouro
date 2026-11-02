@@ -19,6 +19,7 @@ sys.path.insert(0, str(BASE / "bin"))
 from ouro import developer, node, sh
 from ouro.runtime import READ, builder, codex, diagnostics, git_capabilities, process, schema
 from ouro.runtime.tools import Bridge, sandbox_argv
+from probe_boundary_tests import ProbeBoundaryTests
 from coordination_tests import CoordinationTests
 from git_capability_tests import GitCapabilityTests
 
@@ -278,6 +279,69 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(answer, {"finding": "synthetic evidence"})
                 self.assertEqual(usage["tool_calls"], calls)
                 self.assertFalse((self.root / "rejected.txt").exists())
+
+    def test_read_errors_do_not_become_manual_configuration_edits(self):
+        import io
+        from ouro import run
+        from ouro.runtime import tools as bridge_tools
+        from types import SimpleNamespace
+        evidence = self.root / "bridge.jsonl"
+        policy = self.root / "policy.json"
+        policy.write_text(json.dumps({**self.policy, "edit": True, "evidence": str(evidence)}))
+        runner = object.__new__(run.Run)
+        runner.tree = SimpleNamespace(path=self.root)
+        runner.manual_paths = lambda: []
+        cases = [
+            ("read", {"path": ".codex/missing"}, False),
+            ("read", {"path": "ordinary-missing"}, False),
+            ("read", {"path": ".claude/inaccessible"}, True),
+            ("list", {"pattern": ".codex/*"}, True),
+            ("search", {"pattern": "x", "glob": ".codex/*"}, True),
+            ("write", {"path": "./.codex/../.codex/config", "content": "exact content"}, False),
+            ("edit", {"path": str(self.root / ".claude/config"), "old": "before", "new": "after"}, False),
+            ("delete", {"path": ".agents/config"}, False),
+            ("run", {"command": "unapproved"}, False),
+        ]
+        original = bridge_tools.Bridge.call
+        for operation, args, inaccessible in cases:
+            with self.subTest(operation=operation, args=args):
+                evidence.unlink(missing_ok=True)
+                requests = [{"id": 1, "method": "tools/call",
+                             "params": {"name": operation, "arguments": args}},
+                            {"id": 2, "method": "tools/call",
+                             "params": {"name": "list", "arguments": {}}}]
+                def call(bridge, name, arguments):
+                    if inaccessible and arguments == args:
+                        raise PermissionError("inaccessible fixture")
+                    return original(bridge, name, arguments)
+                with patch.object(bridge_tools.Bridge, "call", call), patch.object(
+                        sys, "stdin", io.StringIO("\n".join(map(json.dumps, requests)))), patch.object(
+                        sys, "stdout", io.StringIO()):
+                    bridge_tools.serve(policy)
+                observed = [json.loads(line) for line in evidence.read_text().splitlines()]
+                self.assertTrue(observed[0]["error"])
+                def fake(argv, **kwargs):
+                    target = pathlib.Path(argv[argv.index("--output-last-message") + 1])
+                    target.write_text(json.dumps(sample(schema.SCHEMAS["BUILD"])))
+                    target.with_name("tools.jsonl").write_text(evidence.read_text())
+                    return sh.R(0, '{"type":"thread.started","thread_id":"t"}\n{"type":"turn.completed"}', "", argv)
+                with patch.object(process, "run", side_effect=fake), patch.object(
+                        sh, "which", side_effect=lambda name: name), patch.object(
+                        codex, "git_readiness"), patch.object(codex, "WINDOWS", False):
+                    answer, _, usage, _ = codex.execute(
+                        "BUILD", "p", "default", builder([]), self.root, 1, None, {}, developer.Settings("codex"))
+                self.assertEqual(usage["tool_calls"], observed)
+                steps = runner.manual_steps(answer)
+                if operation in ("write", "edit", "delete"):
+                    self.assertEqual(len(steps), 1)
+                    self.assertEqual(steps[0]["path"], { "write": ".codex/config",
+                                     "edit": ".claude/config", "delete": ".agents/config"}[operation])
+                    expected = ("exact content" if operation == "write" else
+                                json.dumps({"old": "before", "new": "after"}) if operation == "edit" else
+                                "Delete this file.")
+                    self.assertEqual(steps[0]["edit"], expected)
+                else:
+                    self.assertEqual(steps, [])
 
     def test_tool_infrastructure_failure_cannot_become_owner_stop(self):
         import io

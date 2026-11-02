@@ -95,6 +95,7 @@
   <nav class="toc">
     <a href="#layers">Layers</a>
     <a href="#run">The run</a>
+    <a href="#progress">Live progress</a>
     <a href="#triage">Triage</a>
     <a href="#nodes">The nodes</a>
     <a href="#protocol">Where each protocol fact lives</a>
@@ -267,6 +268,29 @@
   </table>
   </div>
 
+  <h2 id="progress">Live progress</h2>
+  <p>While <code>python3 bin/ouro run</code> is going, it keeps one JSON file at <code>&lt;git-common-dir&gt;/ouro-run/&lt;issue&gt;.json</code>. The file is replaced at each logged step and left in place when the process exits; the next run of that issue replaces it, and another issue is another file. Two parts of one issue share the file, and the last write wins. The driver never reads the file. A failed write is one line on stderr, once, and the run's exit, log and tracker writes stay as they were. <code>--dry-run</code> writes no such file. Code: <code>bin/ouro/progress.py</code>, attached from <code>Run</code> in <code>bin/ouro/run.py</code>. <code>bin/ouro-run-status.py</code> prints one line from the newest file, or nothing when none can be read.</p>
+  <p><code>steps</code> is 11, the live tags through follow-up. A later tag is recorded as step 11, node <code>close</code>. <code>lane</code> stays <code>pr</code> until the direct lane is entered, and returns to <code>pr</code> when that lane falls back. <code>reviewer</code> is the runtime backend for a REVIEW node round, the external reader's CLI name, or <code>copilot</code>. <code>gates.total</code> is the count selected for the pass; <code>done</code> and <code>failed</code> advance as each gate's result is logged. Stamps are UTC, to the second. <code>outcome</code> is <code>running</code> until exit, then <code>ok</code>, <code>waiting</code>, <code>stopped</code>, <code>refused</code>, <code>error</code> or <code>interrupted</code>.</p>
+  <pre><code>{
+  "version": 1,
+  "issue": 142,
+  "part": null,
+  "lane": "pr",
+  "step": 7,
+  "steps": 11,
+  "node": "REVIEW",
+  "review_round": 2,
+  "reviewer": "codex",
+  "gates": {"done": 9, "total": 9, "failed": 0},
+  "pr": 318,
+  "started": "2026-10-31T14:00:00Z",
+  "updated": "2026-10-31T14:14:00Z",
+  "pid": 1,
+  "exit": null,
+  "outcome": "running"
+}</code></pre>
+  <p>Read by anything that can parse that file. The status script renders the same object as <code>ouro &#35;142 ▕██████░░░░▏ 7/11 REVIEW r2 (codex) · gates 9/9 · PR &#35;318 · 14m</code>. A finished run, any <code>outcome</code> but <code>running</code> or a <code>running</code> file whose <code>pid</code> is dead (read as <code>interrupted</code>), renders as a summary such as <code>ouro &#35;142 done ✓ · PR &#35;318 · 14m</code>, <code>ouro &#35;142 stopped ✗ at gates · 14m</code> or <code>ouro &#35;142 waiting ⏸ at REVIEW · 14m</code> for 5 minutes after <code>updated</code>, then as nothing. A mod uses the JSON; a <code>statusLine</code> command can be <code>python3 bin/ouro-run-status.py</code>.</p>
+
   <h2 id="triage">Triage</h2>
   <p><code>python3 bin/ouro triage N</code> asks the TRIAGE node for a verdict, with the issue, its comments, the anchor gate's answer and contract sections in the brief. Before publishing a <code>PROMOTE</code> or <code>CHECKPOINT</code>, the driver checks the proposed body, labels and exact planned <code>**Triage**</code> comment through the shared shape gate. Mechanical refusal names the gate finding in one <code>NEEDS-RULING</code> verdict, returns exit 3 and never adds <code>agent-ready</code>. On an admitted promotion the missing <code>Size:</code>, <code>Flow:</code> and <code>Doc impact on close:</code> lines are written, the labels move before the official verdict comment is posted (a missing area or type label the node names joins the verdict's move). Five verdicts: <code>PROMOTE</code>, <code>NEEDS-RULING</code>, <code>CHECKPOINT</code>, <code>SPLIT</code> for an L, <code>STALE</code>. The body is read again before writes; the separate GitHub updates can still race. A Deliverable clause naming a file the repository no longer has is stale, not a question: the issue is graded by the clauses that remain and the comment says the clause is not delivered. Code: <code>triage</code> and <code>shape_findings</code> in <code>bin/ouro/triage.py</code>, <code>bin/ouro/prompts/triage.md</code>.</p>
 
@@ -330,6 +354,7 @@
       <tr><td><code>bin/ouro/sh.py</code></td><td><code>Env</code>: the binding, the main checkout, the slug and default branch, the git and gh wrappers, the anchor-gate call; <code>run()</code> for driver commands; contained runtime subprocesses live under <code>runtime/</code>; the dry-run seam; <code>DriverError</code>, <code>Refused</code>, <code>Stopped</code>.</td></tr>
       <tr><td><code>bin/ouro/runtime/process.py</code></td><td>Standard-library owned subprocess core, also copied byte-identically for flat direct checks. The driver and validator retain their existing import aliases. Caller admission is explicit; ordinary harness execution does not grant caller or worker authority.</td></tr>
       <tr><td><code>bin/ouro/run.py</code></td><td><code>Run</code>: the sequence above, the direct lane, the review routes, the merge decision and the follow-up step; the pure helpers beside it: <code>may_merge</code>, <code>derive_flow</code>, <code>derive_size</code>, <code>parse_parts</code>, <code>review_records</code>, <code>render_body</code>, <code>read_record</code>, <code>review_line</code>.</td></tr>
+      <tr><td><code>bin/ouro/progress.py</code></td><td><code>Progress</code>: the observe-only file under the git common directory, one per issue. <code>bin/ouro-run-status.py</code> prints one status line from the newest of those files.</td></tr>
       <tr><td><code>bin/ouro/acceptance.py</code></td><td>Acceptance-section parsing, explicit command declarations and approved-command checks; trusted-comment selection and workflow stops remain in <code>Run</code>.</td></tr>
       <tr><td><code>bin/ouro/triage.py</code></td><td><code>triage()</code>: the label and anchor pre-checks, the TRIAGE node, the verdict comment, the label moves, the body lines, the shape gate's re-check.</td></tr>
       <tr><td><code>bin/ouro/node.py</code></td><td><code>run_node()</code>: shared dispatch, schemas, timeouts, roles, stub mode and usage ledger. <code>developer.py</code> resolves developer-owned configuration. <code>runtime/</code> contains Claude/Codex transports, capability declarations, strict schemas, the constrained file bridge and subprocess containment.</td></tr>

@@ -62,6 +62,14 @@ def attempt(name, backend, model):
         ATTEMPTS.append(row)
 
 
+def file_proof(session, model, proof):
+    """Bind classified preflight file-proof facts to the returned attempt of this session and model."""
+    key = (identifier(session), identifier(model))
+    row = next((r for r in reversed(ATTEMPTS) if key[0] and (r["session"], r["model"]) == key), None)
+    if row is not None:
+        row["file_proof"] = proof
+
+
 def table():
     if not ATTEMPTS:
         return ""
@@ -72,4 +80,12 @@ def table():
             "| " + " | ".join(keys) + " |", "|" + "---|" * len(keys)]
     rows.extend("| " + " | ".join("unknown" if row[k] is None else str(row[k]) for k in keys) + " |"
                 for row in ATTEMPTS)
+    proofs = [row for row in ATTEMPTS if row.get("file_proof")]
+    if proofs:
+        keys = ("proof", "content_match", "content", "read_observed", "read_path", "read_failed",
+                "stop_present", "tools", "cli", "runtime")
+        rows += ["", "Preflight file proofs (classes and booleans; no path or answer text):",
+                 "| model | session | " + " | ".join(keys) + " |", "|" + "---|" * (len(keys) + 2)]
+        rows.extend(f"| {row['model']} | {row['session']} | " + " | ".join(str(row["file_proof"][k]) for k in keys) + " |"
+                    for row in proofs)
     return "\n".join(rows)

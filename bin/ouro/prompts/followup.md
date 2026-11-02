@@ -15,6 +15,7 @@ any line that starts with one of those keys from a body you return.
 `labels` names the issue's area and type labels, from the sets below; the driver keeps those, drops
 any other name, and gives an issue that names no area the run's own area labels (a `Cleanup:`
 ledger issue takes the ledger's labels instead).
+Before naming an area label or asking which one applies, read the binding file's comments around `[labels].area`, where a repository may say what each area covers, and follow them.
 
 Answer with one JSON object and nothing after it:
 {"issues": [{"title": "", "body": "", "labels": [""]}]}

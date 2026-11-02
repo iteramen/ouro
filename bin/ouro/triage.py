@@ -97,10 +97,28 @@ def label_problem(labels, sets):
     for kind, rule in (("area", "at least one"), ("type", "exactly one")):
         declared = [str(x) for x in sets.get(kind) or [] if str(x)]
         low = {x.lower() for x in declared}
-        on = [str(l) for l in labels if str(l).lower() in low]
+        on = list({str(l).lower(): str(l) for l in labels if str(l).lower() in low}.values())  # a native type beside its label counts once
         if declared and (not on or (rule == "exactly one" and len(on) != 1)):
             return f"{len(on)} {kind} label(s) ({', '.join(on) or 'none'}); the binding requires {rule} of: {', '.join(declared)}"
     return None
+
+
+ISSUE_TYPE_QUERY = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){issueType{name}}}}"
+
+
+def issue_type(env, n):
+    """The issue's native GitHub type (an organization's issue types), or None; `gh issue view` does not expose it.
+    A read that fails says so and leaves the labels to count, as the shape gate does."""
+    owner, repo = env.slug.split("/", 1)
+    r = env.gh("api", "graphql", "-f", f"query={ISSUE_TYPE_QUERY}", "-f", f"o={owner}", "-f", f"r={repo}", "-F", f"n={n}", check=False)
+    try:
+        issue = json.loads(r.out)["data"]["repository"]["issue"] if r.code == 0 else None
+    except (ValueError, KeyError, TypeError):
+        issue = None
+    if r.code != 0 or not isinstance(issue, dict):
+        say(f"issue type unreadable (gh exit {r.code}): the type labels alone count")
+        return None
+    return (issue.get("issueType") or {}).get("name")
 
 
 def file_list(files, cap=3000):
@@ -202,12 +220,16 @@ def triage(env, n, dry):
     body = i.get("body") or ""
     comments = "\n\n".join(f"[{(c.get('author') or {}).get('login')}] {c.get('body')}" for c in i.get("comments", [])) or "(none)"
     sets = {k: env.lookup(f"labels.{k}", []) for k in ("scope", "area", "type")}
+    native = issue_type(env, n) if sets.get("type") else None  # counts as the type label when the type set names it
+    if native:
+        i["issueType"] = {"name": native}  # the shape preflight reads it from the issue it is handed
     files = [f for f in env.git("ls-files", "-z").out.split("\0") if f]
     behind = behind_note(env)  # fetches origin: the ancestry checks below and the anchor gate read the fetched ref
     anchors = env.dead_anchors(body, f"origin/{env.default}", need_one=True)
     prompt = briefs.render("triage", number=n, title=i["title"], body=body, comments=comments,
                            prs=referencing_prs(env, n), behind=behind,
-                           labels=json.dumps({**sets, "state": list(STATE_LABELS)}), issue_labels=", ".join(labels) or "(none)", trusted=", ".join(sorted(env.trusted())),
+                           grants=", ".join(f"`{cmd}`" for cmd in acceptance_commands(body)) or "none, the body grants no command",
+                           labels=json.dumps({**sets, "state": list(STATE_LABELS)}), issue_labels=", ".join(labels + ([f"{native} (its issue type)"] if native else [])) or "(none)", trusted=", ".join(sorted(env.trusted())),
                            authority="\n".join(f"- {p}" for p in env.lookup("authority.local", [])) or "(none declared)",
                            anchors="\n".join(f"- {a}" for a in anchors) or "No finding: every anchor line resolves.",
                            files=file_list(files), contract=briefs.contract_sections(env, (3, 4, 8)))
@@ -241,12 +263,12 @@ def triage(env, n, dry):
                            "as the first line, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
     new_body = with_lines(body, size, flow, str(ans.get("doc_impact") or "").strip()) if verdict in ("PROMOTE", "CHECKPOINT") else body
     declared = {str(x).lower(): str(x) for k in ("area", "type") for x in sets.get(k) or []}
-    types, have = {str(x).lower() for x in sets.get("type") or []}, {str(l).lower() for l in labels}
+    types, have = {str(x).lower() for x in sets.get("type") or []}, {str(l).lower() for l in labels + ([native] if native else [])}
     named = []  # a label the node names that the issue lacks, in the binding's spelling; one type at most, none where the issue has one
     for l in dict.fromkeys(str(x).lower() for x in ans.get("labels") or []):
         if l in declared and l not in have and not (l in types and (have & types or any(n.lower() in types for n in named))):
             named.append(declared[l])
-    problem = label_problem(labels + named, sets) if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else None
+    problem = label_problem(labels + named + ([native] if native else []), sets) if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else None
     dead = [a for a in anchors if a != sh.NO_ANCHOR] if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else []
     if dead and (moved := restamped(env, body, dead)) != body and not env.dead_anchors(moved, f"origin/{env.default}"):
         dead = []  # the run re-points these lines at the file their fragments moved to, as it reads them

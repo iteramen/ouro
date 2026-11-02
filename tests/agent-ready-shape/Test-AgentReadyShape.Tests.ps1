@@ -67,6 +67,15 @@ $twoTypes = Run ('[{"number":23,"title":"v","body":"' + $cleanBody + '","labels"
 Assert-Match   'labels: 2 type label\(s\) - the binding requires exactly one of: bug, feature' $twoTypes 'two type labels are a finding'
 Assert-NoMatch 'area label' $twoTypes 'one area label is not a finding'
 
+# --- the native issue type counts as the type label, once beside a label of its name --------
+function Typed([int]$N, [string]$Labels, [string]$Type) {
+    Run ('[{"number":' + $N + ',"title":"t","body":"' + $cleanBody + '","labels":[{"name":"agent-ready"},{"name":"app"}' + $Labels + '],"comments":[' + $triage + ']' + $(if ($Type) { ',"issueType":{"name":"' + $Type + '"}' }) + '}]')
+}
+Assert-Match "#24: OK" (Typed 24 '' 'Bug') 'a native type named in the type set stands for the type label'
+Assert-Match "#25: OK" (Typed 25 ',{"name":"bug"}' 'Bug') 'a native type beside the label of its name counts once'
+Assert-Match 'labels: 0 type label\(s\)' (Typed 26 '' 'Task') 'a native type outside the type set is no type'
+Assert-Match 'labels: 2 type label\(s\)' (Typed 27 ',{"name":"feature"}' 'Bug') 'a native type and a different type label are two types'
+
 # --- a malformed size is a finding that names no split: only an exact L is a SPLIT ----------
 $dotted = Run ('[{"number":18,"title":"q","body":"`bin/Test-AgentReadyShape.ps1`\n\nSize: M.\n\nDoc impact on close: none","labels":[{"name":"agent-ready"},{"name":"app"},{"name":"bug"}],"comments":[' + $triage + ']}]')
 Assert-Match   'size: `Size: M\.` - only S or M ride on agent-ready \(L is a SPLIT verdict\)\r?\n' $dotted 'a trailing period is a size finding, worded as before'

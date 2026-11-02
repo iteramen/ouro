@@ -26,7 +26,7 @@ def sev(f):
 
 
 def outside(f):
-    """A verification finding in lines no fix touched: a follow-up, never a fix round (contract section 7)."""
+    """An unrelated external finding, not a defect introduced by the original PR (contract section 7)."""
     return isinstance(f, dict) and str(f.get("scope", "")).strip().upper() == "OUTSIDE"
 
 
@@ -150,8 +150,8 @@ def review_line(records, reviewer_on):
     for r in records:
         for f in r["findings"]:
             key = (sev(f), str(f.get("file")), str(f.get("line")), " ".join(str(f.get("claim") or "").split()))
-            # counted once, in the round that first reported it; a verification's OUTSIDE finding is a follow-up, not a
-            # finding of the change, and a later round's restatement of it is the same finding
+            # Count once in the first round reporting it. OUTSIDE is unrelated to the original PR;
+            # IN-PR still counts even outside the latest fix. STANDS is an earlier finding.
             if sev(f) in counts and key not in seen:
                 seen.add(key)
                 if not ((stands(f) or outside(f)) and r.get("round", 1) > 1):
@@ -164,6 +164,7 @@ def review_line(records, reviewer_on):
 def review_comment(rnd, ans, sha):
     findings = ans.get("findings") or []
     verdict = "FINDINGS" if needs_fix({"round": rnd, "findings": findings}) else "CLEAN"
+    ans = {**ans, "verdict": verdict}  # one decision for the heading, machine record and progression
     lines = [f"**Review** round {rnd}: {verdict} @ {sha}", "", f"{len(findings)} finding(s).", ""]
     for f in findings:
         lines.append(f"- {sev(f) or '?'} {f.get('file', '')}:{f.get('line', '')} {f.get('claim', '')} ({f.get('evidence', '')})")
@@ -218,7 +219,8 @@ ERROR_MARK = re.compile(r"\b(error|failed|failure|fatal|panic|traceback|exceptio
 def failure_extract(log, cap=200, tail=60):
     """What a fix round reads of a red log: pytest's FAILURES and ERRORS sections with the FAILED and ERROR lines and the
     result line, or else every line an error marker names, with two lines of context, then the log's tail. Over `cap`
-    lines it cuts from the middle; a fixed tail misses a failure that a long SKIPPED list follows."""
+    lines it cuts from the middle; a fixed tail misses a failure that a long SKIPPED list follows. A line that starts with
+    `FAIL:`, a fixture suite's verdict, is added back after the cut, so the cut never drops it."""
     lines = log.strip().splitlines()
     text = [LOG_PREFIX.sub("", l) for l in lines]
     keep, inside, pytest = [], False, False
@@ -232,6 +234,7 @@ def failure_extract(log, cap=200, tail=60):
         keep = sorted({j for i, t in enumerate(text) if ERROR_MARK.search(t) for j in range(max(0, i - 2), i + 3) if j < len(lines)})
     if len(keep) > cap:
         keep = keep[:cap // 2] + keep[-(cap // 2):]
+    keep = sorted(set(keep) | {i for i, t in enumerate(text) if t.startswith("FAIL:")})
     if not pytest:
         keep = sorted(set(keep) | set(range(max(0, len(lines) - tail), len(lines))))
     out, last = [], -1

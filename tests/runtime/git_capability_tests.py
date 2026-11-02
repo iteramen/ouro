@@ -235,6 +235,61 @@ class GitCapabilityTests(unittest.TestCase):
         self.assertTrue(alias.samefile(physical))
         return repo, git, alias, physical
 
+    def test_owned_scratch_uses_proved_physical_temporary_parent(self):
+        from ouro.runtime.git_probe import ProbeParent
+        repo, git, alias, physical = self.parent_alias_fixture("temporary-parent")
+        (physical / "T").mkdir()
+        temporary = alias / "T"  # macOS-style alias in an intermediate prefix.
+        with self.assertRaisesRegex(sh.DriverError, "task-private TMPDIR") as refusal:
+            ProbeParent(temporary)
+        self.assertIn(str(alias), str(refusal.exception))
+        for parent in (temporary, physical / "T"):
+            with self.subTest(parent=parent), patch.object(sh.tempfile, "gettempdir", return_value=str(parent)):
+                env = sh.Env(repo, None, {"repo": {"slug": "fixture/repo", "default_branch": "master"}},
+                             False, runtime=developer.Settings("codex"))
+                try:
+                    self.assertEqual(env.scratch.parent, physical / "T")
+                    pinned = ProbeParent(env.scratch)
+                    alias.unlink()
+                    alias.symlink_to(repo, target_is_directory=True)
+                    pinned.check()  # Owned scratch no longer traverses the default alias.
+                    alias.unlink()
+                    alias.symlink_to(physical, target_is_directory=True)
+                    saved = env.scratch.with_name(env.scratch.name + "-saved")
+                    env.scratch.rename(saved)
+                    env.scratch.mkdir()
+                    try:
+                        with self.assertRaisesRegex(sh.DriverError, "parent identity changed"):
+                            pinned.check()
+                    finally:
+                        env.scratch.rmdir()
+                        saved.rename(env.scratch)
+                finally:
+                    env.close()
+
+    def test_owned_scratch_refuses_temporary_parent_replaced_during_allocation(self):
+        parent = self.root / "temporary"
+        parent.mkdir()
+        saved = self.root / "original-temporary"
+        allocate = sh.tempfile.mkdtemp
+        def replace_parent(**kwargs):
+            result = allocate(**kwargs)
+            parent.rename(saved)
+            parent.mkdir()
+            return result
+        try:
+            with patch.object(sh.tempfile, "gettempdir", return_value=str(parent)), \
+                    patch.object(sh.tempfile, "mkdtemp", side_effect=replace_parent):
+                with self.assertRaisesRegex(sh.DriverError, "parent identity changed"):
+                    sh.Env(self.root, None, {"repo": {"slug": "fixture/repo", "default_branch": "master"}},
+                           False, runtime=developer.Settings("codex"))
+            self.assertEqual(list(parent.iterdir()), [])
+            self.assertEqual(len(list(saved.iterdir())), 1)  # Preserve unproved scratch.
+        finally:
+            if saved.exists():
+                parent.rmdir()
+                saved.rename(parent)
+
     def test_parent_alias_support_does_not_admit_chains_or_intermediate_aliases(self):
         for mode in ("chain", "intermediate"):
             with self.subTest(mode=mode):

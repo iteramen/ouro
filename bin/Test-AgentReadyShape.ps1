@@ -28,7 +28,11 @@
                     (a binding that declares no type set gets no type finding, for instance), and a
                     vendored copy without ouro-binding.py beside it, or a repo with no
                     .claude/ouro.toml, skips both with an INFO line. The sets must be
-                    disjoint; `ouro-binding.py check` enforces that.
+                    disjoint; `ouro-binding.py check` enforces that. The issue's native
+                    GitHub type (an organization's issue types) counts as its type label when
+                    its name is in the type set, and once beside a label of the same name; it is
+                    read through GraphQL, since `gh issue view` does not expose it, and a
+                    repository or server that cannot answer leaves the labels alone to count.
 
     Every text check is case-sensitive: the gate exists to catch hand-promotions, and a
     hand-written `size: m` or `**triage**` is exactly what it must not wave through.
@@ -50,8 +54,8 @@
 .PARAMETER Demote
     With -Issue only: swap agent-ready -> needs-triage and comment the findings.
 .PARAMETER IssuesJson
-    JSON array [{number,title,body,labels:[{name}],comments:[{author:{login},body}]}] to check (for
-    tests). Default: gh issue list / gh issue view.
+    JSON array [{number,title,body,labels:[{name}],comments:[{author:{login},body}],issueType:{name}}]
+    to check (for tests; issueType optional). Default: gh issue list / gh issue view.
 .PARAMETER Approvers
     The trusted comment authors besides the job token's bot (for tests). Default:
     [owner].ruling_approvers from the binding. Passing it applies the author check even where
@@ -121,6 +125,26 @@ function Get-BindingLabelSet {
     return @("$out" | ConvertFrom-Json)
 }
 
+# Each issue's native GitHub type by number: `gh issue view` and `list` do not expose it. A
+# repository without organization issue types answers none; a failed read warns and leaves labels.
+function Get-IssueTypes {
+    param([string]$Slug, [int]$Number)
+    $owner, $name = $Slug -split '/', 2
+    $query = if ($Number) { 'query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){number issueType{name}}}}' }
+             else { 'query($o:String!,$r:String!){repository(owner:$o,name:$r){issues(first:100,states:OPEN,labels:["agent-ready"]){nodes{number issueType{name}}}}}' }
+    $out = gh api graphql -f "query=$query" -f "o=$owner" -f "r=$name" @(if ($Number) { '-F', "n=$Number" }) 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "::warning::shape gate: issue types unreadable (gh exit $LASTEXITCODE): the type labels alone count"
+        return @{}
+    }
+    $repository = ("$out" | ConvertFrom-Json).data.repository
+    $types = @{}
+    foreach ($node in @(if ($Number) { $repository.issue } else { $repository.issues.nodes })) {
+        if ($node -and $node.issueType) { $types[[int]$node.number] = "$($node.issueType.name)" }
+    }
+    $types
+}
+
 Push-Location -LiteralPath $RepoRoot
 try {
     # Whose **Triage** comment counts needs the binding's approvers: with none to read (no binding,
@@ -167,6 +191,8 @@ try {
             Write-Host "::warning::shape gate: the agent-ready list filled its --limit 100 page: an issue past it goes unchecked"
         }
     }
+
+    $nativeTypes = if (-not $IssuesJson -and $TypeLabels -and $TypeLabels.Count -and $issues.Count) { Get-IssueTypes $repo.Slug $Issue } else { @{} }
 
     Write-Host "agent-ready issues to shape-check: $($issues.Count)"
     $totalFindings = 0
@@ -241,9 +267,12 @@ try {
         }
 
         # A change spanning areas carries each area label, for triage and coordination; a type is one classification.
-        foreach ($set in @(@{ Name = 'area'; Set = $AreaLabels; Exact = $false }, @{ Name = 'type'; Set = $TypeLabels; Exact = $true })) {
+        # The native issue type counts as a type label, once beside a label of its name (both compare without case).
+        $native = if ($i.PSObject.Properties['issueType'] -and $i.issueType) { "$($i.issueType.name)" } else { $nativeTypes[[int]$i.number] }
+        foreach ($set in @(@{ Name = 'area'; Set = $AreaLabels; Exact = $false; On = $names },
+                           @{ Name = 'type'; Set = $TypeLabels; Exact = $true; On = @($names) + @($native | Where-Object { $_ }) })) {
             if (-not $set.Set -or $set.Set.Count -eq 0) { continue }
-            $on = @($names | Where-Object { $set.Set -contains $_ })
+            $on = @($set.On | Where-Object { $set.Set -contains $_ } | Sort-Object -Unique)
             if ($on.Count -eq 0 -or ($set.Exact -and $on.Count -ne 1)) {
                 $rule = if ($set.Exact) { 'exactly one' } else { 'at least one' }
                 $findings += "labels: $($on.Count) $($set.Name) label(s) - the binding requires $rule of: $($set.Set -join ', ')"

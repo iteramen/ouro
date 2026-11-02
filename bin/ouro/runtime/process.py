@@ -260,7 +260,13 @@ def group_running(pgid, env=None):
 
 
 @cancellation()
-def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output_limit=None, stderr_limit=None):
+def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output_limit=None, stderr_limit=None,
+        exchange=None):
+    if exchange is not None:
+        if os.name == "nt":
+            raise DriverError("read-only RPC transport requires a native POSIX boundary")
+        if prompt is not None or observe is not None:
+            raise DriverError("RPC exchange cannot share prompt or diagnostic observers")
     output_limit = LIMIT if output_limit is None else output_limit
     stderr_limit = LIMIT if stderr_limit is None else stderr_limit
     environment = child_env(env)
@@ -280,7 +286,7 @@ def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output
             # Implicit Windows batch launchers lose file-backed stdin. A pipe
             # preserves it; nonblocking writes below keep backpressure bounded.
             p = subprocess.Popen(argv, cwd=cwd, env=environment,
-                                 stdin=subprocess.PIPE if os.name == "nt" else source,
+                                 stdin=subprocess.PIPE if os.name == "nt" or exchange is not None else source,
                                  stdout=out, stderr=err, bufsize=0,
                                  start_new_session=os.name != "nt",
                                  creationflags=0x00000004 if os.name == "nt" else 0)  # CREATE_SUSPENDED
@@ -318,6 +324,10 @@ def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output
                     ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
                     if ntdll.NtResumeProcess(int(p._handle)) != 0:
                         raise DriverError("runtime process could not resume")
+                if exchange is not None:
+                    os.set_blocking(p.stdin.fileno(), False)
+                    pending = memoryview(b"")
+                    offset = 0
                 start = time.monotonic()
                 while p.poll() is None:
                     if os.name != "nt":
@@ -328,10 +338,27 @@ def run(argv, cwd=None, prompt=None, timeout=600, env=None, observe=None, output
                     if time.monotonic() - start >= timeout:
                         raise DriverError(f"runtime timed out after {timeout}s")
                     bound()
-                    if os.name == "nt" and not p.stdin.closed:
+                    if exchange is not None:
+                        received = os.pread(out.fileno(), output_limit, offset)
+                        offset += len(received)
+                        outgoing = exchange(received)
+                        if outgoing is None:
+                            break  # The owned server is closed by the same bounded cleanup below.
+                        pending = memoryview(bytes(pending) + outgoing)
+                        if len(pending) > output_limit:
+                            raise DriverError("runtime RPC input limit exceeded")
+                        if pending:
+                            try:
+                                pending = pending[os.write(p.stdin.fileno(), pending[:65536]):]
+                            except BlockingIOError:
+                                pass
+                    elif os.name == "nt" and not p.stdin.closed:
                         pending = feed(p.stdin, pending)
                     time.sleep(0.03)
                 bound()
+                if exchange is not None:
+                    # Configuration payloads and stderr never become outward diagnostics.
+                    return R(p.returncode, "", "", argv)
                 out.seek(0)
                 err.seek(0)
                 return R(p.returncode, out.read(output_limit).decode("utf-8", "replace"),

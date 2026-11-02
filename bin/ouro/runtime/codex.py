@@ -1,6 +1,8 @@
 """Codex transport with an isolated file bridge and no model-visible shell tool."""
+import hashlib
 import json
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -78,7 +80,6 @@ def preflight(settings, *, capabilities=None):
     except sh.DriverError as ex:
         raise sh.DriverError(f"preflight codex: {ex}; install Codex CLI 0.163.0+ on this host") from ex
     v = sh.run([*binary, "--version"], timeout=30, env=worker_env(settings))
-    import re
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", v.out)
     if v.code != 0 or not match or tuple(map(int, match.groups())) < MIN_VERSION:
         raise sh.DriverError("preflight codex: CLI 0.163.0+ required; update Codex")
@@ -127,18 +128,51 @@ def preflight(settings, *, capabilities=None):
         ready = Path(root) / "readiness.txt"
         ready.write_text("ouro-ready", encoding="utf-8")
         selected = {settings.model(role, "") for role in ("builder", "builder_trivial", "reviewer")}
+        identity = {"cli": match.group(0), "runtime": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
         proofs = []
         for model in sorted(selected):
             answer, session, usage, cost = execute(
                 "CHECKPOINT", "Read readiness.txt. Return its exact content as finding, with stop null.",
                 model, READ, root, 180, None, {}, settings)
-            read = any(c.get("tool") == "read" and not c.get("error")
-                       and (Path(root) / (c.get("path") or "")).resolve() == ready.resolve()
-                       for c in usage.get("tool_calls", []))
-            if answer.get("finding") != "ouro-ready" or not read:
-                raise sh.DriverError(f"preflight codex model {model}: file capability probe failed")
+            proof = {**file_proof(answer, usage.get("tool_calls", []), root, ready), **identity}
+            diagnostics.file_proof(session, model, proof)
+            if proof["proof"] != "accepted":
+                raise sh.DriverError(f"preflight codex model {model}: file capability probe failed: {proof['proof']} "
+                                     f"(content {proof['content']}, read path {proof['read_path']}); "
+                                     "see the attempt diagnostics, then rerun the same command to retry")
             proofs.append((session, usage, cost))
         return proofs
+
+
+def file_proof(answer, calls, root, ready):
+    """Classify the generated read proof in fixed classes and booleans; never a path or answer text.
+    Accepted only on the exact content and a successful read whose resolved path is the generated file."""
+    finding = answer.get("finding")
+    content = ("exact" if finding == "ouro-ready" else "absent" if not finding else
+               "numbered" if re.fullmatch(r"\s*1:\s*ouro-ready\s*", str(finding)) else
+               "whitespace" if str(finding).strip() == "ouro-ready" else "other")
+    done = [c for c in calls if not c.get("error")]
+    paths = {read_path(c.get("path"), root, ready) for c in done if c.get("tool") == "read"}
+    path = next((p for p in ("exact", "alias", "mismatch") if p in paths), "absent")
+    failed = any(c.get("tool") == "read" and c.get("error") for c in calls)
+    proof = ("failed_read" if path == "absent" and failed else "missing_read" if path == "absent" else
+             "wrong_read" if path != "exact" else "content" if content != "exact" else "accepted")
+    return {"proof": proof, "content_match": content == "exact", "content": content,
+            "read_observed": path == "exact", "read_path": path, "read_failed": failed,
+            "stop_present": answer.get("stop") is not None,
+            "tools": "+".join(sorted({n for c in done if (n := diagnostics.identifier(c.get("tool")))})) or "none"}
+
+
+def read_path(value, root, ready):
+    """An alias (hard link, or a case variant the filesystem serves as the same file) names the file
+    another way; it is classified, never admitted."""
+    path = (Path(root) / (value or "")).resolve()
+    if path == ready.resolve():
+        return "exact"
+    try:
+        return "alias" if os.path.samefile(path, ready) else "mismatch"
+    except OSError:
+        return "mismatch"
 
 
 def execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, settings):
@@ -152,9 +186,15 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
     if WINDOWS and tools != READ:
         raise sh.DriverError(f"codex {name}: native Windows supports file-only capabilities; "
                              "command, probe and edit workers require an established disabled-network boundary")
+    if tools.probe:
+        from .tools import probe_root
+        probe_root(cwd)
     context = bootstrap(name, tools)
     if tools.edit or tools.probe or any(c.startswith("git ") for c in tools.commands):
-        git_readiness(cwd, env=worker_env(settings))
+        if tools.probe:
+            git_readiness(cwd, env=worker_env(settings), probe=True)
+        else:
+            git_readiness(cwd, env=worker_env(settings))
     with tempfile.TemporaryDirectory(prefix="ouro-codex-") as directory:
         scratch = Path(directory)
         policy = {"root": str(Path(cwd).resolve()), "edit": tools.edit, "commands": list(tools.commands),
@@ -164,6 +204,10 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
         bridge = {"ouro": {"command": sh.which("python3"),
                   "args": [str(Path(__file__).with_name("tools.py")), str(scratch / "policy.json")],
                   "required": True, "tool_timeout_sec": 660, "default_tools_approval_mode": "approve"}}
+        # MCP's default environment omits CODEX_HOME. Preserve the caller's exact
+        # configuration context, including aliases that PROBE admission must refuse.
+        if "CODEX_HOME" in os.environ:
+            bridge["ouro"]["env"] = {"CODEX_HOME": os.environ["CODEX_HOME"]}
         # Resolve .cmd/.ps1 Python launchers in the same way as every driver subprocess.
         bridge["ouro"]["command"], *bridge["ouro"]["args"] = [*sh.argv_for("python3"), *bridge["ouro"]["args"]]
         argv = [*sh.argv_for("codex"), "-a", "never", "exec", "--ignore-user-config", "--ignore-rules",
@@ -218,9 +262,15 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
             raise sh.DriverError(f"codex {name}: tool infrastructure failed: {faults[0].get('error') or 'runtime unavailable'}")
         if not any(not call.get("error") for call in usage["tool_calls"]):
             raise sh.DriverError(f"codex {name}: file bridge was not usable; check MCP tool admission")
-        denied_paths = [e["path"] for e in usage["tool_calls"] if e.get("error") and e.get("path")]
-        if name == "BUILD" and denied_paths:
-            answer["_denied"] = [{"tool_input": {"file_path": path}} for path in denied_paths]
+        # Failed mutations remain conservative barriers, including ambiguous denials.
+        # Read and command failures are observations, never configuration proposals.
+        if name == "BUILD":
+            answer["_denied"] = [
+                {"tool_name": e["tool"], "tool_input": {**(e.get("tool_input") or {}),
+                                                       "file_path": e["path"]}}
+                for e in usage["tool_calls"]
+                if e.get("error") and e.get("path") and e.get("tool") in ("write", "edit", "delete")
+            ]
         return answer, session, usage, None
 
 

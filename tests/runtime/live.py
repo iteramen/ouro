@@ -67,4 +67,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--probe-boundary", action="store_true",
+                        help="qualify the default Codex PROBE boundary; retain public fixtures and evidence")
+    if parser.parse_args().probe_boundary:
+        from probe_boundary import qualify
+        qualify()
+    else:
+        main()

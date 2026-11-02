@@ -127,6 +127,14 @@ binding and onboarding installer.
    { "statusLine": { "type": "command", "command": "python3 \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/ouro/bin/ouro-version.py\"" } }
    ```
 
+   A run in progress has its own line: `bin/ouro-run-status.py` beside `ouro-version.py`,
+   run from the repository the run is bound to. It reads `<git-common-dir>/ouro-run/<issue>.json`
+   (the Live progress section of [docs/architecture.html](docs/architecture.html))
+   and prints nothing when none can be read, so a `statusLine` command can run both
+   scripts. A finished run shows a one-line summary, such as `ouro #<issue> done ✓`, for
+   5 minutes after the file's last update, then nothing. The file is observational: the driver never reads it, and a failed write
+   does not change the run.
+
 **Update.** In a session: `/plugin marketplace update ouro`, `/plugin update ouro`,
 `/reload-plugins`. Outside one: `claude plugin marketplace update ouro`, then
 `claude plugin update ouro@ouro`; it applies after a restart. Consumers pin by tag;

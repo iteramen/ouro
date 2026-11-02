@@ -75,6 +75,23 @@ Definitions, all UTC:
  * Refusal precision: over resolved decision stops (open decision, dead anchor, gate uncovered;
    resolved means a later attempt exists or the issue closed); one re-promoted with a body that,
    trimmed, equals the body at the removal was unnecessary.
+ * Review record: a pull-request comment by the bot or an approver whose first line is exactly
+   `**Review** round k: CLEAN|FINDINGS @ <sha>`; its last ```json fence gives `findings` and
+   `reader`. One per (round, sha), in order of round; an approver's `**Ruling**` rules the newest
+   record before it. A pull request's records go to the build attempt of an issue its `Fixes` or
+   `Part k/n of` lines name whose window holds its first record, landed or not. Reader: the
+   record's `reader.cli`, else `review node`.
+ * Finding fate, counted per round, with no pairing of a re-report to a finding: a round's blocking
+   findings are its H and M findings, less a verification's OUTSIDE ones, which are counted apart as
+   follow-ups. Raised: the blocking count less the previous round's re-raised (a ruled previous
+   round, or none, carries nothing). Ruled away: a ruled record's blocking count. Re-raised, for an
+   unruled record with a later round: the next round's H and M STANDS, at most its blocking count;
+   fixed: the rest. Open: an unruled last record's blocking count. So fixed, ruled away and open sum
+   to raised per pull request, not per reader (a carry books under the next round's reader), and
+   re-raised counts the rounds a finding survived. Unchanged stop: the last unruled verification's
+   blocking entries that the one before it carries with the same file, claim and evidence, at any
+   line, when the two are consecutive (the driver's rule). Reviewer precision: fixed over fixed plus
+   ruled away.
 
 Quality table, after the outcome tables, one row per ISO week and an `all` row (report-only):
  * Review line: the first line of a landed PR's body, outside fenced blocks (a line opening with
@@ -125,6 +142,8 @@ RUNS_JQ = "{total: .total_count, runs: .workflow_runs}"
 RUNS_CAP = 1000
 BOT = "github-actions"  # the job token's login as GraphQL spells it, without `[bot]`
 STAMP = re.compile(r"@ ([0-9a-fA-F]{7,40})(?![0-9A-Za-z])")
+REVIEW_MARK = re.compile(r"\*\*Review\*\* round ([0-9]+): (CLEAN|FINDINGS) @ ([0-9a-f]{40})")
+JSON_FENCE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
 
 
 class ReadError(Exception):
@@ -528,6 +547,66 @@ def stop_reason(issue, end, approvers):
     return "unclassified"
 
 
+def review_records(comments, approvers):
+    """A PR's review records in order of round, each with its time, reader and findings."""
+    seen, out, last = {}, [], None
+    for t, who, body in comments:
+        body = body.replace("\r\n", "\n")
+        m = REVIEW_MARK.fullmatch(body.split("\n", 1)[0]) if trusted(who, approvers) else None
+        if m:
+            fences = JSON_FENCE.findall(body)
+            try:
+                ans = json.loads(fences[-1]) if fences else {}
+            except ValueError:
+                ans = {}
+            ans = ans if isinstance(ans, dict) else {}
+            key = (int(m.group(1)), m.group(3))
+            if key not in seen:
+                seen[key] = {"round": key[0], "time": t, "reader": ans.get("reader"), "ruled": False,
+                             "findings": [f for f in ans.get("findings") or [] if isinstance(f, dict)]}
+                out.append(seen[key])
+            last = seen[key]
+        elif last and who and who.casefold() in {a.casefold() for a in approvers} and first_line(body).startswith("**Ruling**"):
+            last["ruled"] = True
+    return sorted(out, key=lambda r: r["round"])
+
+
+def sev(f):
+    return str(f.get("severity", "")).strip().upper()[:1]
+
+
+def scope(f):
+    return str(f.get("scope", "")).strip().upper()
+
+
+def review_fates(records):
+    """[(reader, fate, count)], counted per round: fate is `raised`, `fixed`, `re-raised`, `ruled away`,
+    `open`, `outside`, or `stopped` (the last verification's entries that ended in the unchanged-finding stop)."""
+    reader = lambda r: r["reader"]["cli"] if isinstance(r["reader"], dict) and r["reader"].get("cli") else "review node"
+    hm = lambda r: [f for f in r["findings"] if sev(f) in ("H", "M")]
+    blocking = lambda r: [f for f in hm(r) if r["round"] == 1 or scope(f) != "OUTSIDE"]
+    out, carried = [], 0
+    for i, r in enumerate(records):
+        nxt = next((x for x in records[i + 1:] if x["round"] > r["round"]), None)
+        n, who = len(blocking(r)), reader(r)
+        out += [(who, "outside", len(hm(r)) - n), (who, "raised", n - carried)]
+        if r["ruled"]:
+            out.append((who, "ruled away", n))
+            carried = 0
+        elif nxt:
+            carried = min(sum(scope(g) == "STANDS" for g in hm(nxt)), n)
+            out += [(who, "re-raised", carried), (who, "fixed", n - carried)]
+        else:
+            out.append((who, "open", n))
+            carried = 0
+    verifs = [r for r in records if r["round"] > 1 and not r["ruled"]]
+    if len(verifs) >= 2 and verifs[-1]["round"] == verifs[-2]["round"] + 1:
+        key = lambda f: (f.get("file"), f.get("claim"), f.get("evidence"))
+        before = {key(f) for f in blocking(verifs[-2])}
+        out.append((reader(verifs[-1]), "stopped", sum(key(f) in before for f in blocking(verifs[-1]))))
+    return out
+
+
 def analyze(issue_nodes, pr_nodes, commits, approvers, now, since):
     """(attempts promoted at or after since, each classified; the count of anchors skipped)."""
     issues = {n["number"]: prep_issue(n) for n in issue_nodes}
@@ -544,7 +623,16 @@ def analyze(issue_nodes, pr_nodes, commits, approvers, now, since):
             if a["start"] >= since:
                 classify(a, issue, lands, parts, now, approvers, comments_of_pr, commits, bugs, blamer)
                 out.append(a)
-    return sorted(out, key=lambda a: (a["start"], a["issue"])), blamer.skipped
+    out.sort(key=lambda a: (a["start"], a["issue"]))
+    for p in pr_nodes:
+        records = review_records(comments_of_pr[p["number"]], approvers)
+        body = p.get("body") or ""
+        named = {int(x) for x in FIXES.findall(body)} | {int(n) for _, _, n in PART.findall(body)}
+        t = min((r["time"] for r in records), default=None)
+        a = t and next((a for a in out if a["issue"] in named and a["start"] <= t < a["limit"]), None)
+        if a:
+            a.setdefault("findings", []).extend(review_fates(records))
+    return out, blamer.skipped
 
 
 def pct(n, d):
@@ -625,6 +713,20 @@ def render(slug, attempts, skipped, now, since):
                 "| Cohort | Commits | Clean | Reversed | Assisted |", "|---|---|---|---|---|"]
         for label, f in figs:
             out.append(f"| {label} | {f['commits']} | {f['commit_clean']} | {f['commit_reversed']} | {f['commit_assisted']} |")
+        out += ["", "Reviewer findings, H and M, counted per round, OUTSIDE apart, per reader; fixed, ruled away and open "
+                "sum to raised per pull request, not per reader row; re-raised counts "
+                "the rounds a finding survived, from the next round's STANDS; precision is fixed over fixed plus ruled away:", "",
+                "| Cohort | Reader | Raised | Fixed | Re-raised (unchanged stop) | Ruled away | Open | Outside | Precision |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        for label, g in groups:
+            fates = [x for a in g for x in a.get("findings", [])]
+            for reader in sorted({x[0] for x in fates if x[2]}):
+                c = collections.Counter()
+                for who, fate, n in fates:
+                    if who == reader:
+                        c[fate] += n
+                out.append(f"| {label} | {reader} | {c['raised']} | {c['fixed']} | {c['re-raised']} ({c['stopped']}) "
+                           f"| {c['ruled away']} | {c['open']} | {c['outside']} | {pct(c['fixed'], c['fixed'] + c['ruled away'])} |")
         return out + [""]
 
     lines += section("Build cohorts", [a for a in attempts if not a["checkpoint"]], False)

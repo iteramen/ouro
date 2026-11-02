@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import briefs, execution, node, sh, validation, worktrees
+from . import briefs, execution, node, progress, sh, validation, worktrees
 from .acceptance import (acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, declared_source,
                          empty_list)
 from .coordination import Claim
@@ -242,6 +242,13 @@ class Run:
             rel = self.protected_path((d.get("tool_input") or {}).get("file_path")) if isinstance(d, dict) else None
             if rel and rel not in denied:
                 denied.append(rel)
+                inp = d.get("tool_input") or {}
+                proposed = inp.get("content") if d.get("tool_name") == "write" else (
+                    json.dumps({"old": inp["old"], "new": inp["new"]}, ensure_ascii=False)
+                    if d.get("tool_name") == "edit" and "old" in inp and "new" in inp else
+                    "Delete this file." if d.get("tool_name") == "delete" else "")
+                if proposed is not None and rel not in [s["path"] for s in steps]:
+                    steps.append({"path": rel, "edit": proposed})
         if denied:
             say(f"  denied configuration paths: {', '.join(denied)}: manual steps")
         for p in self.manual_paths() + denied:
@@ -290,6 +297,12 @@ class Run:
         say(f"stopped: {reason}")
         raise Stopped(code)
 
+    def _note(self, **fields):
+        """A progress-file fact. Absent on an in-process caller that did not attach one, and never raises."""
+        note = getattr(self, "progress", None)
+        if note is not None:
+            note.revise(**fields)
+
     # ---- transitions
     def go(self):
         e = self.env
@@ -300,6 +313,7 @@ class Run:
             if parts and all(done for _, done, _ in parts):
                 self.part_arg = parts[-1][0]
         self.plan_part()
+        self._note(part=getattr(self, "k", None))
         if self.options.adopt_pr:
             self.adopt(self.options.adopt_pr)
         say(f"#{self.n} {self.title}")
@@ -379,6 +393,7 @@ class Run:
                     return self.direct()
                 say(f"[2a] direct: not taken, {why}; the run continues as express from a worktree")
                 self.flow = "express"
+                self._note(lane="pr")
             self.require_acceptance()
             if not self.build_commands()[1] and not self.ci_commands(selected=False):
                 self.stop_issue("gate uncovered", empty_list(self.body), 3)
@@ -675,6 +690,8 @@ class Run:
     # ---- the drive loop (transitions 4-9)
     def drive(self, pr):
         e = self.env
+        if pr:
+            self._note(pr=pr["number"])
         if not e.pr_checks():
             self.add_note(f"No workflow at origin/{e.default} names pull_request, so the pull request's checks cannot run the gates: every selected gate ran here, and the run skipped the checks step.")
         if self.commits_past_base():
@@ -991,6 +1008,8 @@ class Run:
         if new != self.flow:
             self.add_note(f"Flow tightened from {self.flow} to {new} by the diff's paths.")
             self.flow = new
+            if new != "direct":
+                self._note(lane="pr")
         if self.size == "S":
             numstat = self.tree.git("diff", "--numstat", "--no-renames", "-z", f"origin/{e.default}...HEAD").out
             lines = sum(int(a) + int(d) for a, d, _ in (x.split("\t", 2) for x in numstat.split("\0") if x) if a.isdigit() and d.isdigit())
@@ -1124,6 +1143,7 @@ class Run:
 
     def portable_gates(self, head, chosen, skipped, *, ci, tree):
         """Run existing driver-owned gates, including the local part of a direct PR."""
+        self._note(gates_total=len(chosen))
         # Binding-selected local checks use the existing portable driver runner.
         # They confer no caller-validation receipt or worker admission authority.
         rec_gates = []
@@ -1164,6 +1184,7 @@ class Run:
         candidates require explicit caller consent and the invoking allowlist;
         observing a worker command never widens caller permissions.
         """
+        self._note(gates_total=len(chosen))
         self.execution_results, self.gate_log, self.skipped = [], [], skipped
         caller = {r["cmd"]: r for r in self.caller_execution_results
                   if r["sha"] == head and type(r["exit"]) is int and r["exit"] == 0}
@@ -1371,11 +1392,13 @@ class Run:
             return (f"This verifies a fix against the findings it answers. Its diff `{since}..{head}` cannot be shown whole, "
                     f"so leave `scope` empty on every finding. The findings it answers:\n\n{prior}")
         if ruled:
-            return (f"A fix `{since}..{head}` follows. A finding in a line this diff changed is IN-FIX and one in any other "
-                    f"line is OUTSIDE. Its diff:\n\n```diff\n{r.out}\n```")
+            return (f"A fix `{since}..{head}` follows. New findings introduced by the original PR are IN-FIX when this "
+                    f"diff changed their lines, otherwise IN-PR. OUTSIDE means unrelated to the original PR. "
+                    f"Its diff:\n\n```diff\n{r.out}\n```")
         return (f"This verifies a fix against the findings it answers. The fix is `{since}..{head}`. A finding below that "
-                f"still stands is STANDS wherever its lines are; a new finding is IN-FIX in a line this diff changed and "
-                f"OUTSIDE in any other. Its diff:\n\n```diff\n{r.out}\n```\n\nThe findings it answers:\n\n{prior}")
+                f"still stands is STANDS wherever its lines are; a new defect introduced by the original PR is IN-FIX "
+                f"in a line this diff changed and IN-PR elsewhere. OUTSIDE means unrelated to the original PR, "
+                f"not merely outside this fix. Use the whole PR diff to establish attribution. Its diff:\n\n```diff\n{r.out}\n```\n\nThe findings it answers:\n\n{prior}")
 
     def node_review(self, pr, head, records, rnd):
         e = self.env
@@ -1910,6 +1933,7 @@ class Run:
 
     def direct(self):
         e = self.env
+        self._note(lane="direct")
         say("[2a] direct: every path sits inside [ship].direct")
         ahead = e.git("rev-parse", "HEAD").out.strip() != e.git("rev-parse", f"origin/{e.default}").out.strip()
         overlap = caller_source_writable(e.main)
@@ -2202,6 +2226,7 @@ class Run:
             except (ValueError, TypeError):
                 raise DriverError("the direct publisher returned malformed current-head check results") from None
             self.gate_log, self.skipped = rows, []  # Ordinary direct results, never caller receipts.
+            self._note(gates_total=len(rows))
             for row in rows:
                 say(f"[5] gate `{row['cmd']}`: exit {row['exit']}")
         if p.code != 0 and not out["pushed"]:
@@ -2380,6 +2405,7 @@ class Run:
         self.ensure_worktree()
         execution.retain(self.tree, self.execution_grants)
         self.flow = "express"
+        self._note(lane="pr")
         self.rederive()
         return self.drive(None)
 
@@ -2399,6 +2425,7 @@ class Run:
         else:
             say(f"[4] BUILD: would run node BUILD ({self.build_model()}) in the worktree, then git add -A and git commit -F <message>")
         chosen = [r for r, g in self.bound_gates() if self.runs_here(r, g, self.flow)]
+        self._note(gates_total=len(chosen))
         say("[5] gates: " + ("; ".join(chosen) if chosen else "none selected for the class beyond the pull request's checks") + " (a gate with paths runs only when the diff touches them)")
         say(f"[6] push: {sh.cmdline(script('Sync-Branch.ps1'))} then {sh.cmdline(script('Push-Branch.ps1'))}; "
             f"would open a draft pull request" + (" at convergence" if self.flow == "express" else " at the first push"))
@@ -2420,19 +2447,34 @@ class Run:
 
 def main(env, n, part, options):
     run = Run(env, n, part, options)
+    run.progress = progress.Progress(env, n, part)
+    code, outcome = None, "interrupted"
+    sh.after_say(run.progress.observe)
     try:
-        code = run.go()
-        if code == 0:
-            run.claim.update("waiting; resume reads GitHub/git")
-            env._worktrees_settled = True
-        return code
-    except Stopped as ex:
-        if not run.claim.terminal:
-            run.claim.update("waiting" if ex.args[0] == 0 else "stopped", close=ex.args[0] != 0)
-        return ex.args[0]
-    except Refused:
-        run.claim.update("refused", close=not run.in_lane)
-        raise
-    except BaseException:
-        run.claim.update("interrupted; outcome unknown, resume required")
-        raise
+        try:
+            code = run.go()
+            if code == 0:
+                run.claim.update("waiting; resume reads GitHub/git")
+                env._worktrees_settled = True
+                outcome = "ok"
+            else:
+                outcome = "stopped"
+            return code
+        except Stopped as ex:
+            code = ex.args[0]
+            outcome = "waiting" if code == 0 else "stopped"
+            if not run.claim.terminal:
+                run.claim.update("waiting" if code == 0 else "stopped", close=code != 0)
+            return code
+        except Refused:
+            code, outcome = 2, "refused"
+            run.claim.update("refused", close=not run.in_lane)
+            raise
+        except BaseException as ex:
+            if isinstance(ex, DriverError):
+                code, outcome = 1, "error"
+            run.claim.update("interrupted; outcome unknown, resume required")
+            raise
+    finally:
+        sh.after_say(None)
+        run.progress.finish(code, outcome)

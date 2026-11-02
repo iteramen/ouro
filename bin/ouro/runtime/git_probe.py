@@ -31,7 +31,8 @@ class ProbeParent:
         info = path.lstat()
         if (not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
                 or getattr(info, "st_reparse_tag", 0)):
-            raise sh.DriverError("unproved probe parent directory")
+            raise sh.DriverError(f"unproved probe parent directory: {path}; "
+                                 "use a task-private TMPDIR with plain physical directory prefixes")
         return info
 
     def _directories(self, path):

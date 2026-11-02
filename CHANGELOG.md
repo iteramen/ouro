@@ -20,6 +20,68 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.9.3] - 2026-11-02
+
+**Net lines:** +1743 across docs, bin and tests, because the Codex PROBE boundary needs its write
+confinement and fail-closed alias checks, and the reviewer section and the preflight file-proof
+classification carry their test rows.
+
+
+- The TRIAGE brief carries the commands the driver reads as the body's grants, or says it grants
+  none, and tells the node that a command off that list is not granted and that an earlier
+  comment's `Acceptance command:` field stops counting once its verdict posts. A
+  `validation_pending` entry the driver refuses now names its command and the cause: not granted,
+  or duplicate.
+
+- The TRIAGE and FOLLOWUP briefs tell the node to read the binding file's comments around
+  `[labels].area`, where a repository may say what each area covers, before it names an area
+  label or asks which one applies.
+
+- `loop-outcomes.py` reports the H and M review findings, per build cohort and per reader,
+  counted per round with no pairing of a re-report to a finding: raised, fixed, re-raised (a
+  round's findings the next round lists STANDS, and how many entries ended in the
+  unchanged-finding stop), ruled away or open, with OUTSIDE follow-ups apart and a reviewer
+  precision of fixed over fixed plus ruled away. Fixed, ruled away and open sum to raised per pull
+  request, not per reader row. It reads the review records' JSON on every pull request, landed or
+  not. Report-only.
+
+- Codex PROBE commands use a read-only parent with writes confined to the canonical disposable
+  copy, including command temporary storage. Unsupported alias topologies fail closed; an opt-in
+  default-provider qualification retains generated public boundary evidence on failure.
+
+- `bin/ouro-run-status.py` renders a finished run (any outcome but `running`, or a `running`
+  file whose process is gone) as a one-line summary with a finished marker, `done ✓`,
+  `waiting ⏸` or `<outcome> ✗ at <node>`, for 5 minutes after the file's last update, then
+  prints nothing. A frozen progress bar and the `(stale)` suffix no longer show.
+
+## [v1.9.2] - 2026-11-01
+
+**Net lines:** +1337 across docs, bin and tests, because two owner-requested features carry
++735: +662 for the observe-only run progress file and its status-line reader, +73 for the native
+issue type; +422 for CI validation reconciling exact-head Actions jobs the rollup omits, whose
+admission checks are each covered by refusal rows; and +180 across three Codex and review bug
+fixes, each with the rows that fail without it.
+
+- CI validation also admits a required job that the pull request's check rollup omits, when an
+  authenticated GitHub Actions run of the same unchanged workflow at the exact head (the PR's own
+  run or a `workflow_dispatch` run) completed it successfully. A failing, pending or ambiguous row
+  still waits, and the wait names the uncovered checks.
+
+- Codex bridge read failures remain tool observations without creating manual configuration
+  edits. Failed configuration mutations retain their paths and proposed changes for the manual barrier.
+
+- A run keeps an observe-only progress file at `<git-common-dir>/ouro-run/<issue>.json`,
+  replaced at each logged step and left in place at exit. A failed write is one stderr
+  line and changes no exit, log or tracker write. The plugin's `bin/ouro-run-status.py`
+  prints one status line from the newest file, or nothing. `--dry-run` writes no such file.
+
+- An issue's native GitHub type (an organization's issue types) counts as its type label when
+  `[labels].type` names it, compared without case. The shape gate and triage's preflight read it
+  through GraphQL and count it once beside a label of the same name, and triage no longer adds a
+  type label to an issue whose type already supplies one. Where the type cannot be read (a
+  repository without organization issue types, or a server without the field), the labels alone
+  count, as before, and a failed read says so.
+
 ## [v1.9.1] - 2026-10-30
 
 **Net lines:** +838 across skills, docs, hooks, bin and tests, because this release is bug fixes

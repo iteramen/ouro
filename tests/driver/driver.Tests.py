@@ -325,6 +325,7 @@ BUILD = {"subject": "fix(app): sum the items", "body": "Sum the items in compute
          "residue": [], "door": "two-way: a revert undoes it", "blast_radius": "the total, for callers",
          "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 0\n"}}
 CLEAN = {"verdict": "CLEAN", "findings": [], "false_record_sentences": 0, "files_read": ["src/app.py"]}
+AREA_COMMENTS = "read the binding file's comments around `[labels].area`, where a repository may say what each area covers, and follow them."
 
 
 def finding(sev="H", claim="the total drops the last item"):
@@ -481,6 +482,93 @@ def sec_pure():
     check("files for --body-file are UTF-8 bytes with LF endings", f.read_bytes() == b"\xc3\xa9\nx\n")
     r = shmod.run([sys.executable, "-c", "import sys; sys.stdout.buffer.write('é'.encode('utf-8'))"])
     check("child output is decoded as UTF-8, whatever the locale's code page", r.out == "é")
+    progress_rows()
+
+
+def progress_rows():
+    """The observe-only file: one write per change, and a failed write changes nothing."""
+    import contextlib
+    import io
+    from ouro import progress as prog
+
+    common = TMP / "progress-unit"
+    common.mkdir()
+
+    def env_for(backend):
+        return types.SimpleNamespace(
+            git=lambda *a, check=True: types.SimpleNamespace(code=0, out=str(common) + "\n"),
+            runtime=types.SimpleNamespace(backend=backend))
+
+    def load(n):
+        return json.loads((common / "ouro-run" / f"{n}.json").read_text(encoding="utf-8"))
+
+    seen = prog.Progress(env_for("codex"), 142, None)
+    seen.observe("[4] BUILD node (opus)")
+    seen.revise(gates_total=2)
+    seen.observe("[5] gate `python3 a.py`: exit 0")
+    seen.observe("[5] gate `python3 b.py`: exit 3")
+    seen.observe("[7] REVIEW node round 2 (opus, sized)")
+    data = load(142)
+    check("a logged step, the gate tally and the review round land in that issue's file",
+          data["version"] == 1 and data["issue"] == 142 and data["part"] is None and data["lane"] == "pr"
+          and data["step"] == 7 and data["steps"] == 11 and data["node"] == "REVIEW"
+          and data["review_round"] == 2 and data["reviewer"] == "codex"
+          and data["gates"] == {"done": 2, "total": 2, "failed": 1}
+          and data["outcome"] == "running" and data["exit"] is None and data["pid"] == os.getpid()
+          and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", data["started"]) is not None)
+    same = prog.Progress(env_for("claude"), 144, None)
+    same.observe("[7] REVIEW node round 2 (opus, sized)")
+    check("the same review line names whichever runtime backend is running", load(144)["reviewer"] == "claude")
+    other = prog.Progress(env_for("claude"), 143, 2)
+    other.revise(part=2)
+    other.observe("[2a] direct: every path sits inside the direct globs")
+    check("another issue is another file, and a part is a field of it",
+          load(143)["issue"] == 143 and load(143)["part"] == 2 and load(143)["lane"] == "direct"
+          and load(143)["step"] == 2 and load(143)["node"] == "direct" and load(142)["issue"] == 142)
+    other.observe("[2a] direct: the commit moves to a worktree and the run continues as express")
+    check("a direct fallback returns the lane to the pull-request path", load(143)["lane"] == "pr")
+    seen.observe("[5] gate `python3 a.py`: exact-head validation receipt, evidence log")
+    check("a validation receipt counts as a gate finished, not a failure", load(142)["gates"]["done"] == 3 and load(142)["gates"]["failed"] == 1)
+    seen.observe("[6] draft pull request #318")
+    seen.observe("[12] close: the dry plan's last tag")
+    seen.observe("the local head is ahead of origin")
+    check("the dry plan's close tag is step 11, and a line with no step leaves it there",
+          load(142)["step"] == 11 and load(142)["node"] == "close" and load(142)["pr"] == 318)
+    landed = prog.Progress(env_for("claude"), 145, None)
+    landed.observe("done: #1 landed")
+    landed.observe("stopped: open decision")
+    check("a landed line closes the step and is not read as a pull request",
+          load(145)["step"] == 11 and load(145)["node"] == "close" and load(145)["pr"] is None and load(145)["outcome"] == "stopped")
+    seen.finish(0, "ok")
+    check("finish records the exit the run returned", load(142)["exit"] == 0 and load(142)["outcome"] == "ok")
+    names = sorted(p.name for p in (common / "ouro-run").iterdir())
+    check("only the issue files remain; a replaced write leaves no temporary",
+          names == ["142.json", "143.json", "144.json", "145.json"])
+    blocked = prog.Progress(env_for("codex"), 142, None)
+    parent = common / "blocked-parent"
+    parent.write_text("x", encoding="utf-8")
+    blocked.path = parent / "142.json"
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        blocked.observe("[3] worktree: exists")
+        blocked.observe("[4] BUILD node (opus)")
+    check("a progress write that cannot create its directory does not raise, and is logged once",
+          err.getvalue().count("ouro: progress:") == 1 and "Traceback" not in err.getvalue() and load(143)["issue"] == 143)
+    buf = io.StringIO()
+
+    def boom(_msg):
+        raise RuntimeError("hook")
+
+    shmod.after_say(boom)
+    try:
+        with contextlib.redirect_stdout(buf):
+            shmod.say("[1] bind: still printed")
+    finally:
+        shmod.after_say(None)
+    check("a progress hook that raises still leaves the log line", "[1] bind: still printed" in buf.getvalue())
+    ran = subprocess.run([sys.executable, str(BIN / "ouro-run-status.py"), "--selftest"],
+                         capture_output=True, text=True, timeout=60)
+    check("the status script's selftest passes", ran.returncode == 0 and ran.stdout.strip() == "selftest ok" and ran.stderr == "")
 
 
 def sec_labels():
@@ -819,6 +907,7 @@ def sec_dry_run():
     check("it makes no branch and no worktree", c.branches() == ["master"] and not (c.main / ".claude" / "worktrees").exists())
     check("it makes no node call", c.prompts("BUILD") == [] and c.prompts("REVIEW") == [])
     check("the shape check ran without -Demote", not any("issue edit" in s for s in c.sigs()))
+    check("it writes no progress file", not (c.main / ".git" / "ouro-run").exists() and "ouro: progress" not in out + err)
 
 
 def sec_worktree_cleanup():
@@ -865,6 +954,25 @@ def sec_happy():
     c = happy_case("happy")
     code, out, err = c.ouro("run", "1")
     check("a stop-at-pr run ends at the PR: exit 0", code == 0)
+    progress = json.loads((c.main / ".git" / "ouro-run" / "1.json").read_text(encoding="utf-8"))
+    check("the run's progress file records the review, the gate and the pull request",
+          progress["exit"] == 0 and progress["outcome"] == "ok" and progress["step"] == 9 and progress["node"] == "merge"
+          and progress["lane"] == "pr" and progress["review_round"] == 1 and progress["reviewer"] == "claude"
+          and progress["pr"] == 7 and progress["gates"] == {"done": 1, "total": 1, "failed": 0} and progress["steps"] == 11)
+    c2 = happy_case("happy-blocked")
+    (c2.main / ".git" / "ouro-run").write_text("blocked", encoding="utf-8")
+    code2, out2, err2 = c2.ouro("run", "1")
+
+    def norm(case, text):  # stamps, commit shas and validation attempt directories differ between two runs
+        text = re.sub(r"(?m)^\d\d:\d\d:\d\d ", "", text).replace(str(case.root), "ROOT")
+        return re.sub(r"attempt-\w+", "ATTEMPT", re.sub(r"\b[0-9a-f]{16,40}\b", "SHA", text))
+
+    def writes(case):  # each run has its own scratch directory
+        return [re.sub(r"ouro-run-\w+", "SCRATCH", s) for s in case.wrote()]
+
+    check("a progress write that cannot create its directory leaves the run's exit, log and tracker writes",
+          code2 == code and norm(c2, out2) == norm(c, out) and writes(c2) == writes(c) and writes(c)
+          and "ouro: progress" not in out2 and err2.count("ouro: progress") == 1 and "Traceback" not in err2)
     check("the BUILD answer's subject is the commit", git(c.origin, "log", "-1", "--format=%s", "refs/heads/gates/1-fix-the-total") == "fix(app): sum the items")
     branch_head = git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total")
     check("the branch is `<area>/<N>-<slug>` from the default branch, pushed", git(c.origin, "rev-list", "--count", "master..gates/1-fix-the-total") == "1")
@@ -1390,6 +1498,33 @@ def sec_fix_round_scope():
     check("after the fix the record names both selected gates as the checks' and calls neither skipped",
           "- Gates the pull request's checks run: `python3 gates/src_gate.py`, `python3 gates/doc_gate.py`" in body and "touches none of its paths" not in body)
 
+    cp = happy_case("insidepr", policy="trivial-merge", table={"_issue_1": issue(
+        labels=("agent-ready", "trivial", "gates", "bug"), body=ISSUE_BODY.replace("Flow: standard", "Flow: full"))})
+    cp.node("BUILD", {**BUILD, "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 0\n\ndef helper():\n    return 0\n"}}, 1)
+    cp.node("BUILD", {**BUILD, "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n\ndef helper():\n    return 0\n"}}, 2)
+    cp.node("BUILD", {**BUILD, "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n\ndef helper():\n    return 1\n"}}, 3)
+    cp.node("REVIEW", {**CLEAN, "verdict": "FINDINGS", "findings": [finding("H")]}, 1)
+    cp.node("REVIEW", {**CLEAN, "verdict": "FINDINGS", "findings": [
+        {**finding("M", "the PR introduced a broken helper"), "line": 5, "scope": "IN-PR"}]}, 2)
+    cp.node("REVIEW", CLEAN, 3)
+    code, out, err = cp.ouro("run", "1", "--validate")
+    check("a blocking original-PR defect outside the latest fix gets another fix before landing",
+          code == 0 and "done: #1 landed" in out and len(cp.prompts("BUILD")) == 3)
+    reviews = [c["body"] for c in cp.pr_comments() if c["body"].startswith("**Review**")]
+    check("verification heading and machine verdict retain the in-PR blocker",
+          any("round 2: FINDINGS" in b and '"verdict": "FINDINGS"' in b and '"scope": "IN-PR"' in b for b in reviews))
+    check("zero-finding verification remains CLEAN",
+          any("round 3: CLEAN" in b and '"verdict": "CLEAN"' in b for b in reviews))
+    check("the review line counts the in-PR defect and both fixes",
+          "Review: rounds:2 findings:H1/M1/L0" in cp.pr()["body"])
+    brief = open(cp.nodes / "REVIEW.2.prompt.txt", encoding="utf-8").read()
+    check("verification distinguishes original-PR attribution from the latest fix",
+          "IN-PR elsewhere" in brief and "OUTSIDE means unrelated to the original PR" in brief)
+    external = recmod.review_comment(2, {**CLEAN, "verdict": "FINDINGS", "findings": [
+        {**finding("M"), "scope": "OUTSIDE"}]}, "a" * 40)
+    check("unrelated external follow-ups use the same CLEAN heading and machine verdict",
+          "round 2: CLEAN" in external and '"verdict": "CLEAN"' in external)
+
     c2 = happy_case("outsidefix", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     c2.node("BUILD", BUILD, 1)
     c2.node("BUILD", {**BUILD, "subject": "fix(app): handle the last item", "residue": ["filed as #12", "do the thing"],
@@ -1530,6 +1665,7 @@ def sec_fix_round_scope():
     check("a follow-up keeps the node's area and type labels in the binding's spelling and drops a state or unknown name; one naming no area inherits the run's",
           code == 0 and len(creates) == 2 and creates[0].endswith("--label needs-triage --label gates --label bug") and creates[1].endswith("--label needs-triage --label gates"))
     check("the FOLLOWUP brief carries the binding's label sets", '"area": ["gates"]' in open(cg.nodes / cg.prompts("FOLLOWUP")[0], encoding="utf-8").read())
+    check("the FOLLOWUP brief says to read the binding's comments on each area", AREA_COMMENTS in open(cg.nodes / cg.prompts("FOLLOWUP")[0], encoding="utf-8").read())
     ca = happy_case("followupassignees", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     ca.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
     ca.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- a line\n", "labels": ["Gates"]}]})
@@ -1863,6 +1999,9 @@ def sec_check_flake():
           and x[-1] == "late 299" and len(x) == 67)
     x = recmod.failure_extract("\n".join(f"error {i}" for i in range(1000)), cap=20, tail=5).splitlines()
     check("over the cap the extract cuts from the middle: the first and the last failure stay", x[0] == "error 0" and "error 999" in x and len(x) <= 27)
+    suite = [f"error a{i}" for i in range(300)] + [f"quiet {i}" for i in range(50)] + ["FAIL: the shard total row"] + [f"quiet {i}" for i in range(50)]
+    x = recmod.failure_extract("\n".join(suite + [f"error b{i}" for i in range(300)] + [f"late {i}" for i in range(100)])).splitlines()
+    check("a suite's FAIL: line amid unmarked lines survives the cut over the cap", "FAIL: the shard total row" in x)
     cs = happy_case("decideskip", table={"_issue_1": issue(), "_checks_extra": [{"name": "optional", "bucket": "skipping"}]})
     code, out, err = cs.ouro("run", "1")
     check("control: a skipped check is no obstacle: Ready for merge is posted", code == 0 and any(b["body"].startswith("**Ready for merge**") for b in cs.pr_comments()))
@@ -2060,7 +2199,7 @@ def sec_direct():
     c = Case("direct", table={"_issue_1": issue(body=body)})
     code, out, err = c.ouro("run", "1", "--dry-run")
     check("a Flow: direct issue inside the globs takes the direct transition (dry run)", code == 0 and "[2a] direct" in out and "Push-Direct.ps1" in out)
-    check("the dry run writes nothing", c.wrote() == [] and c.prompts("BUILD") == [])
+    check("the dry run writes nothing", c.wrote() == [] and c.prompts("BUILD") == [] and not (c.main / ".git" / "ouro-run").exists())
     body2 = body.replace("`docs/note.md`", "`src/app.py`")
     c2 = Case("directoutside", table={"_issue_1": issue(body=body2)})
     code, out, err = c2.ouro("run", "1", "--dry-run")
@@ -2088,6 +2227,8 @@ def sec_direct():
     except shmod.DriverError:
         inline_supported = False
     marker = actual.main / '.git/direct-notice-ran'
+    lane = json.loads((actual.main / ".git" / "ouro-run" / "1.json").read_text(encoding="utf-8"))["lane"]
+    check("the progress file records the lane the run ended in", lane == ("direct" if inline_supported else "pr"))
     if inline_supported:
         head = git(actual.main, 'rev-parse', 'HEAD')
         check("direct treats a CI notice as no local proof and really checks its mandatory cheap floor at H",
@@ -2203,6 +2344,16 @@ def sec_triage():
     check("triage posts a comment whose first line is exactly **Triage**", code == 0 and s["comments"][-1]["body"].split("\n")[0] == "**Triage**" and "Anchors resolve" in s["comments"][-1]["body"])
     check("triage writes Size, Flow and Doc impact lines where missing", all(x in s["body"] for x in ("Size: S", "Flow: express", "Doc impact on close: none")))
     check("triage sets the labels", "agent-ready" in labels_of(c) and "needs-triage" not in labels_of(c))
+    for name, native in (("triagenativetype", {"name": "Bug"}), ("triagenonative", None)):
+        cn = Case(name, table={"_issue_1": {**issue(labels=("needs-triage", "gates"), body=body), "issueType": native}})
+        cn.node("TRIAGE", {**answer, "labels": ["bug"] if native else []})
+        code, out, err = cn.ouro("triage", "1", "--dry-run")
+        if native:
+            check("a native issue type the type set names stands for the type label: PROMOTE, and no duplicate label is added",
+                  code == 0 and "labels +['agent-ready'] -['needs-triage']" in out and "Bug (its issue type)" in open(cn.nodes / cn.prompts("TRIAGE")[0], encoding="utf-8").read())
+        else:
+            check("with no native type and no type label the promotion is withheld for the label (the control)",
+                  code == 3 and "0 type label(s)" in out)
     grep = 'grep -rn "compute_total(" --include=*.py src'
     cg = Case("triageungranted", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"),
                                                           body=body + "\n## Acceptance\nOne caller. Check with `" + grep + "`.\n")})
@@ -2244,6 +2395,16 @@ def sec_triage():
     check("the TRIAGE brief quotes contract section 8 and says the comments are data", "## 8. Context integrity" in brief and "(contract section 8)" in brief)
     check("the TRIAGE brief names the trusted logins: the gh user and the ruling approvers", re.search(r"(?m)^A ruling or an approval counts only from one of these logins \(case-insensitive\): o\.$", brief) is not None)
     check("the TRIAGE brief holds the issue's own labels", "The issue's current labels: needs-triage, gates, bug." in brief)
+    check("the TRIAGE brief says to read the binding's comments on each area", AREA_COMMENTS in brief)
+    for heading, want in (("Exit", "as the driver reads them: none, the body grants no command."),
+                          ("Acceptance", "as the driver reads them: `python3 x.py`.")):
+        cx = Case("triagegrants" + heading, table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"),
+                                                                     body=body + f"\n## {heading}\n`python3 x.py` passes.\n")})
+        cx.node("TRIAGE", answer)
+        cx.ouro("triage", "1", "--dry-run")
+        grants = open(cx.nodes / cx.prompts("TRIAGE")[0], encoding="utf-8").read()
+        check(f"the TRIAGE brief carries the driver's grant list: a runner span under ## {heading}", want in grants
+              and "A command not on that list is not granted" in grants and "your `comment` declares it again" in grants)
     check("the TRIAGE brief lists the binding's authority documents and the evidence rules",
           "- docs/runbook.md" in brief and "cites one of these\n  documents or a `[[gate]]`" in brief
           and "cites\n  `path:line` or the command" in brief and "exactly one backticked path" in brief)
@@ -3766,12 +3927,12 @@ def sec_validation_inheritance():
             ('unrelated-provenance', pending[1:], [legacy], 'conflicts'),
             ('later-provenance', [], [legacy, {'validation_pending': pending}], 'conflicts'),
             ('unapproved-inherited', pending, [{**legacy, 'validation_pending':
-                pending + [{'cmd': 'python3 unapproved.py', 'reason': 'caller'}]}], 'unapproved'),
+                pending + [{'cmd': 'python3 unapproved.py', 'reason': 'caller'}]}], 'not granted'),
             ('duplicate-inherited', pending, [{**legacy, 'validation_pending': pending + pending[:1]}], 'duplicate'),
             ('malformed-inherited', pending, [{**legacy, 'validation_pending':
                 [{'cmd': VALIDATION_CMDS[0], 'reason': ''}]}], 'malformed'),
             ('invalid-ancestor', [], [{'validation_pending':
-                [{'cmd': 'python3 unapproved.py', 'reason': 'caller'}]}, legacy], 'unapproved')):
+                [{'cmd': 'python3 unapproved.py', 'reason': 'caller'}]}, legacy], 'not granted')):
         c = validation_case('record-' + name, answer={'validation_pending': initial or pending})
         validation_run(c)
         wt = validation_wt(c)
@@ -4100,7 +4261,7 @@ def sec_validation_handoff():
         'validation_pending': [{'cmd': 'python3 gates/unapproved.py', 'reason': 'sandbox'}]})
     code, out, err = validation_run(c, '--validate')
     check('BUILD cannot authorize execution by editing its branch binding',
-          code == 1 and 'unapproved' in err and git(validation_wt(c), 'rev-list', '--count', 'HEAD') == '1' and not validation_logs(c))
+          code == 1 and 'not granted' in err and git(validation_wt(c), 'rev-list', '--count', 'HEAD') == '1' and not validation_logs(c))
     c = validation_case('decision', answer={'stop': {'reason': 'open decision', 'question': 'retained model domain refusal'}, 'validation_pending': 'malformed'})
     code, out, err = validation_run(c, '--validate')
     check('a genuine decision wins even over malformed handoff; no command executes',
@@ -4147,7 +4308,7 @@ def sec_validation_handoff():
     # subprocess canary; no production helper is monkeypatched by the fixture.
     mutations = {
         'barrier': ('bin/ouro/run.py', '            if pending:\n', '            if False and pending:\n'),
-        'allowlist': ('bin/ouro/validation.py', 'if cmd not in allowed or identity in seen:', 'if identity in seen:'),
+        'allowlist': ('bin/ouro/validation.py', 'if cmd not in allowed:', 'if False:'),
         'head': ('bin/ouro/validation.py', '        head = tree.head()\n',
                  '        head = tree.git("rev-list", "--reverse", f"origin/{tree.env.default}..HEAD").out.split()[0]\n'),
         'failure': ('bin/ouro/validation.py', 'return 124 if limited else code', 'return 124 if limited else 0'),
@@ -4345,6 +4506,232 @@ def sec_ci_validation():
     response = {"headRefOid": head, "statusCheckRollup": [success]}
     env.gh_json = lambda *args: response
     try:
+        # Exercise the actual caller's proof clearing/command coverage through an
+        # inert API seam. Unknown endpoints refuse; nothing dispatches a run.
+        original_gh = env.gh
+        slug = env.slug
+        workflow = ".github/workflows/ci.yml"
+        def clone(value):
+            return json.loads(json.dumps(value))
+        def action_run(rid, event):
+            return {"id": rid, "run_attempt": 1, "run_number": rid, "workflow_id": 9,
+                    "path": workflow, "event": event, "status": "completed",
+                    "repository": {"id": 42, "full_name": slug}, "head_repository": {"id": 42, "full_name": slug},
+                    "head_sha": head, "head_branch": "feature/ci-api", "pull_requests": [{"number": 7}]}
+        def action_job(rid, conclusion):
+            return {"id": rid * 10, "run_id": rid, "run_attempt": 1, "head_sha": head,
+                    "name": "ci", "status": "completed", "conclusion": conclusion,
+                    "html_url": f"https://github.com/{slug}/actions/runs/{rid}/job/{rid * 10}",
+                    "check_run_url": f"https://api.github.com/repos/{slug}/check-runs/{rid * 10}"}
+        def action_check(job):
+            return {"app": {"id": 15368, "slug": "github-actions", "owner": {"login": "github"}},
+                    "head_sha": head, "name": "ci", "details_url": job["html_url"],
+                    "status": job["status"], "conclusion": job["conclusion"]}
+        ordinary, dispatch = action_run(1, "pull_request"), action_run(2, "workflow_dispatch")
+        skipped, passed = action_job(1, "skipped"), action_job(2, "success")
+        pull = {"head": {"sha": head, "ref": "feature/ci-api", "repo": {"id": 42, "full_name": slug}},
+                "base": {"sha": "b" * 40, "repo": {"id": 42, "full_name": slug}}}
+        baseline = {
+            "pulls/7": pull, "actions/runs/1": ordinary, "actions/runs/2": dispatch,
+            "actions/workflows/9": {"id": 9, "path": workflow, "state": "active"},
+            "contents/" + workflow + "?ref=" + "b" * 40: {"type": "file", "sha": "trusted"},
+            "contents/" + workflow + "?ref=" + head: {"type": "file", "sha": "trusted"},
+            f"actions/workflows/9/runs?head_sha={head}&branch=feature%2Fci-api&per_page=100&page=1":
+                {"total_count": 2, "workflow_runs": [ordinary, dispatch]},
+            "actions/runs/1/attempts/1/jobs?per_page=100&page=1": {"total_count": 1, "jobs": [skipped]},
+            "actions/runs/2/attempts/1/jobs?per_page=100&page=1": {"total_count": 1, "jobs": [passed]},
+            "check-runs/10": action_check(skipped), "check-runs/20": action_check(passed),
+        }
+        response = {"headRefOid": head, "statusCheckRollup":
+                    [{**success, "conclusion": "SKIPPED", "detailsUrl": skipped["html_url"]}]}
+        table = clone(baseline)
+        calls = {}
+        race = None
+        def inert_api(*args, **kwargs):
+            check("Actions seam is read-only", args[0] == "api" and len(args) == 2 and not kwargs.get("input"))
+            prefix = "repos/" + slug + "/"
+            key = args[1][len(prefix):] if args[1].startswith(prefix) else ""
+            calls[key] = calls.get(key, 0) + 1
+            value = clone(table.get(key))
+            if race == "head" and key == "pulls/7" and calls[key] > 1:
+                value["head"]["sha"] = "f" * 40
+            if race == "attempt" and key == "actions/runs/2" and calls[key] > 1:
+                value["run_attempt"] = 2
+            return types.SimpleNamespace(code=0 if value is not None else 1, out=json.dumps(value))
+        env.gh = inert_api
+        try:
+            check("omitted trusted dispatch plus ordinary skipped row advances actual CI caller",
+                  r.check_ci({"number": 7}, head) and r.ci_execution_head == head
+                  and windows not in r.missing_execution()
+                  and any(x.get("run_id") == 2 and x.get("attempt") == 1 for x in r.ci_execution_checks))
+            ordinary_rows = clone(response["statusCheckRollup"])
+            for event in ("workflow_dispatch", "push"):
+                table, calls = clone(baseline), {}
+                other = action_run(3, event)
+                table["actions/runs/3"] = other
+                if event == "push":
+                    inventory = table[f"actions/workflows/9/runs?head_sha={head}&branch=feature%2Fci-api&per_page=100&page=1"]
+                    inventory["workflow_runs"].append(other)
+                    inventory["total_count"] += 1
+                response["statusCheckRollup"] = ordinary_rows + [
+                    {**success, "name": "other-job",
+                     "detailsUrl": f"https://github.com/{slug}/actions/runs/3/job/30"}]
+                check(event + " unrelated rollup row does not veto authenticated omitted job",
+                      r.check_ci({"number": 7}, head) and r.ci_execution_head == head
+                      and any(x.get("run_id") == 2 for x in r.ci_execution_checks))
+            table, calls = clone(baseline), {}
+            response["statusCheckRollup"] = ordinary_rows + [
+                {**success, "detailsUrl": passed["html_url"]}]
+            check("required dispatch rollup row coexists with ordinary skipped anchor",
+                  r.check_ci({"number": 7}, head))
+            table["check-runs/20"]["app"] = {"slug": "foreign"}
+            check("visible required dispatch still requires trusted provider",
+                  not r.check_ci({"number": 7}, head) and r.ci_execution_head is None)
+            response["statusCheckRollup"] = [
+                {**success, "conclusion": "SKIPPED", "detailsUrl": passed["html_url"]}]
+            table, calls = clone(baseline), {}
+            check("dispatch rollup alone cannot establish ordinary PR authority",
+                  not r.check_ci({"number": 7}, head))
+            response["statusCheckRollup"] = ordinary_rows
+            table, calls = clone(baseline), {}
+            check("restored ordinary anchor and omitted dispatch advance caller",
+                  r.check_ci({"number": 7}, head))
+            original_lookup = env.lookup
+            env.lookup = lambda key: ["ci", "legacy"] if key == "ship.validation_checks" else original_lookup(key)
+            legacy = {"__typename": "StatusContext", "context": "legacy", "state": "SUCCESS",
+                      "targetUrl": "https://legacy.example/check"}
+            try:
+                table, calls = clone(baseline), {}
+                response["statusCheckRollup"] = [success, legacy]
+                check("ordinary mixed Actions and legacy status succeeds", r.check_ci({"number": 7}, head))
+                response["statusCheckRollup"] = ordinary_rows + [legacy]
+                check("reconciled Actions preserves ordinary successful legacy evidence",
+                      r.check_ci({"number": 7}, head)
+                      and any(x["name"] == "legacy" for x in r.ci_execution_checks))
+                for label, legacy_rows in (
+                        ("absent", []), ("failed", [{**legacy, "state": "FAILURE"}]),
+                        ("pending", [{**legacy, "state": "PENDING"}]),
+                        ("ambiguous", [legacy, legacy])):
+                    table, calls = clone(baseline), {}
+                    response["statusCheckRollup"] = ordinary_rows + legacy_rows
+                    check(label + " legacy cannot be erased by Actions success",
+                          not r.check_ci({"number": 7}, head))
+                response["statusCheckRollup"] = ordinary_rows + [legacy]
+                for changed in (
+                        {**response, "headRefOid": "f" * 40},
+                        {**response, "statusCheckRollup": ordinary_rows},
+                        {**response, "statusCheckRollup": ordinary_rows + [{**legacy, "state": "FAILURE"}]},
+                        {**response, "statusCheckRollup": ordinary_rows + [{**legacy, "targetUrl": "changed"}]}):
+                    observations = iter([clone(response), clone(changed)])
+                    env.gh_json = lambda *args: next(observations)
+                    table, calls = clone(baseline), {}
+                    check("changed legacy snapshot or head refuses reconciliation",
+                          not r.check_ci({"number": 7}, head))
+            finally:
+                env.lookup = original_lookup
+                env.gh_json = lambda *args: response
+                response["statusCheckRollup"] = ordinary_rows
+            bad = [
+                ("wrong SHA", "actions/runs/2", "head_sha", "f" * 40),
+                ("wrong ref", "actions/runs/2", "head_branch", "other"),
+                ("wrong repository", "actions/runs/2", "repository", {"full_name": "foreign/repo"}),
+                ("fork", "actions/runs/2", "head_repository", {"full_name": "foreign/repo"}),
+                ("wrong workflow", "actions/runs/2", "workflow_id", 8),
+                ("wrong path", "actions/runs/2", "path", ".github/workflows/other.yml"),
+                ("untrusted event", "actions/runs/2", "event", "pull_request_target"),
+                ("stale attempt", "actions/runs/2", "run_attempt", 2),
+                ("pending latest run", "actions/runs/2", "status", "in_progress"),
+                ("foreign provider", "check-runs/20", "app", {"slug": "foreign"}),
+                ("workflow substitution", "contents/" + workflow + "?ref=" + head, "sha", "changed"),
+            ]
+            for label, key, field, value in bad:
+                table, calls = clone(baseline), {}
+                table[key][field] = value
+                check(label + " cannot retain prior caller proof",
+                      not r.check_ci({"number": 7}, head) and r.ci_execution_head is None
+                      and windows in r.missing_execution())
+            for conclusion in ("failure", "skipped", "neutral", "cancelled", "timed_out", None):
+                table, calls = clone(baseline), {}
+                key = "actions/runs/2/attempts/1/jobs?per_page=100&page=1"
+                table[key]["jobs"][0]["conclusion"] = conclusion
+                table["check-runs/20"]["conclusion"] = conclusion
+                check(str(conclusion) + " job never authorizes CI", not r.check_ci({"number": 7}, head))
+            table, calls = clone(baseline), {}
+            key = "actions/runs/2/attempts/1/jobs?per_page=100&page=1"
+            table[key]["jobs"] *= 2
+            table[key]["total_count"] = 2
+            check("duplicate literal names are ambiguous", not r.check_ci({"number": 7}, head))
+            table, calls = clone(baseline), {}
+            table["actions/runs/1/attempts/1/jobs?per_page=100&page=1"]["jobs"][0]["conclusion"] = "failure"
+            table["check-runs/10"]["conclusion"] = "failure"
+            response["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+            check("ordinary failure conflicts with dispatch success", not r.check_ci({"number": 7}, head))
+            response["statusCheckRollup"][0]["conclusion"] = "SKIPPED"
+            for race in ("head", "attempt"):
+                table, calls = clone(baseline), {}
+                check(race + " race waits", not r.check_ci({"number": 7}, head))
+            race = None
+            for key in ("pulls/7", "check-runs/20"):
+                table, calls = clone(baseline), {}
+                del table[key]
+                check("unavailable API waits", not r.check_ci({"number": 7}, head))
+            table, calls = clone(baseline), {}
+            table["actions/runs/2/attempts/1/jobs?per_page=100&page=1"] = {"total_count": 0, "jobs": []}
+            import contextlib, io
+            said = io.StringIO()
+            with contextlib.redirect_stdout(said):
+                unproven = r.check_ci({"number": 7}, head)
+            check("run success without the required job is unproven, and the wait names it",
+                  not unproven and "required checks have no authenticated success: 'ci'" in said.getvalue())
+            table, calls = clone(baseline), {}
+            table["actions/runs/2/attempts/1/jobs?per_page=100&page=1"] = {"jobs": "malformed"}
+            check("malformed page waits", not r.check_ci({"number": 7}, head))
+            table, calls = clone(baseline), {}
+            key = f"actions/workflows/9/runs?head_sha={head}&branch=feature%2Fci-api&per_page=100&page=1"
+            # A truncated inventory must not allow selecting its convenient success.
+            table[key]["total_count"] = 3
+            check("incomplete pagination waits", not r.check_ci({"number": 7}, head))
+            for status, conclusion in (("in_progress", None), ("completed", "failure")):
+                table, calls = clone(baseline), {}
+                latest = action_run(3, "workflow_dispatch")
+                latest["status"] = status
+                table["actions/runs/3"] = latest
+                failed_job = action_job(3, conclusion)
+                failed_job["status"] = status
+                table["actions/runs/3/attempts/1/jobs?per_page=100&page=1"] = {
+                    "total_count": 1, "jobs": [failed_job]}
+                table["check-runs/30"] = action_check(failed_job)
+                inventory_key = f"actions/workflows/9/runs?head_sha={head}&branch=feature%2Fci-api&per_page=100&page=1"
+                table[inventory_key]["workflow_runs"].append(latest)
+                table[inventory_key]["total_count"] = 3
+                check("newer " + status + " run supersedes old dispatch success",
+                      not r.check_ci({"number": 7}, head))
+            for status, conclusion in (("in_progress", None), ("completed", "failure")):
+                table, calls = clone(baseline), {}
+                table["actions/runs/2"]["run_attempt"] = 2
+                inventory_key = f"actions/workflows/9/runs?head_sha={head}&branch=feature%2Fci-api&per_page=100&page=1"
+                table[inventory_key]["workflow_runs"][1]["run_attempt"] = 2
+                job = action_job(2, conclusion)
+                job.update(run_attempt=2, status=status)
+                table["actions/runs/2/attempts/2/jobs?per_page=100&page=1"] = {"total_count": 1, "jobs": [job]}
+                table["check-runs/20"] = action_check(job)
+                check("current newer attempt cannot reuse attempt-one success",
+                      not r.check_ci({"number": 7}, head))
+            table, calls = clone(baseline), {}
+            jobs_key = "actions/runs/2/attempts/1/jobs?per_page=100&page=1"
+            table[jobs_key] = {"total_count": 101, "jobs": [passed] +
+                              [{"id": i, "name": "unrelated"} for i in range(99)]}
+            table["actions/runs/2/attempts/1/jobs?per_page=100&page=2"] = {
+                "total_count": 101, "jobs": [{"id": 999, "name": "unrelated"}]}
+            check("complete paginated jobs retain actual required-job evidence",
+                  r.check_ci({"number": 7}, head)
+                  and calls.get("actions/runs/2/attempts/1/jobs?per_page=100&page=2") == 2)
+            table, calls = clone(baseline), {}
+            check("restored causal control advances without BUILD",
+                  r.check_ci({"number": 7}, head) and windows not in r.missing_execution())
+        finally:
+            env.gh = original_gh
+        response = {"headRefOid": head, "statusCheckRollup": [success]}
         negative = {
             "missing": [], "wrong-name": [{**success, "name": "unrelated-green"}],
             "pending": [{**success, "status": "IN_PROGRESS", "conclusion": None}],

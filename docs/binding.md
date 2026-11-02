@@ -16,6 +16,17 @@ repo with none, `bin/Test-AgentReadyShape.ps1` and `bin/Get-RollingIssue.ps1` (a
 post through it) skip the read with an INFO line, and those and `bin/Test-AgentReadyAnchors.ps1`
 address the repository `origin` names in place of `[repo].slug`.
 
+## Driver temporary directories
+
+Driver-owned scratch resolves the system temporary parent to its physical directory and
+proves its directory prefixes before allocation. This supports macOS temporary paths whose
+default spelling traverses the system's `/var` alias. Configured worktree parents still
+refuse intermediate aliases; parent identity, alias retarget and bounded teardown checks apply.
+An `unproved probe parent directory` refusal names the offending directory. For a task-scoped
+remedy, create a private temporary directory under plain physical prefixes and set `TMPDIR`
+to its canonical absolute path for the coordinator invocation only. Do not change shared
+host settings or weaken the probe guards.
+
 ## Schema (v1)
 
 `Vendor-Ouro.ps1` keeps the consumer's binding and copies the flat fixture suites except
@@ -39,7 +50,7 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `repo.release_notes` | regexes | `["(^\|/)CHANGELOG\\.md$"]`, a `CHANGELOG.md` basename | the release-note paths, such as per-change fragment files or a localised twin: the driver leaves a changed path one matches out of the S shape's file count (contract §4), not its line count, and the REVIEW brief names those paths as the release-note entries to verify; each is searched in the repo-relative path with Python's `re`, case-sensitively, so `check` refuses exactly what the driver cannot compile; `[]` means none |
 | `labels.scope` | label names | `[]` | scope or effort labels that may ride on any state |
 | `labels.area` | label names | `[]` | the area labels triage, branch names and coordination read; they select no gate; the shape gate requires at least one on every agent-ready issue, an empty or undeclared set skipping that check |
-| `labels.type` | label names | `[]` | the type labels; the shape gate requires exactly one on every agent-ready issue, an empty or undeclared set skipping that check; disjoint from `area` |
+| `labels.type` | label names | `[]` | the type labels; the shape gate requires exactly one on every agent-ready issue, an empty or undeclared set skipping that check; the issue's native GitHub type counts as one when its name is in the set (case-insensitive), and once beside a label of the same name; disjoint from `area` |
 | `gate.run` | a command line | required per entry | the verify command, run from the repository root; `<ouro>` in it is the plugin root |
 | `gate.ci` | a pwsh command line | `run` | what CI runs in place of `run`; one that only prints a skip makes the driver run `run` locally in every class |
 | `gate.paths` | git pathspecs | none | the gate runs only when the diff changes one of them; without them it runs on every change |
@@ -194,7 +205,17 @@ Local-only gates still run on the coordinator. Inherited caller handoffs without
 coverage require native Linux and `--validate`. No binding or obligation is changed automatically.
 Resume `run N` with its original `--part` and `--pr` flags, where used. The prepared source is
 kept; successful exact-head checks precede independent review, Ready and merge. Missing, skipped,
-pending, failed or stale-head checks remain unproven. `validation_checks` has no effect in local
+pending, failed or stale-head checks remain unproven. When the rollup omits an Actions success,
+the driver can reconcile actual jobs from the latest ordinary PR and explicitly dispatched runs
+of an authenticated PR workflow. The PR head repository must equal the bound repository; the
+workflow identity and path must agree and its definition must match the PR base. Only literal,
+completed successful GitHub Actions jobs at the current head, branch and run attempt count.
+An ordinary PR job that was skipped supplies no success, but can coexist with a successful
+dispatch job. Conflicts, duplicate names, changed attempts, incomplete API inventories and
+required rows from untrusted events remain pending with an explanation. Unrelated unsupported-event
+inventory entries supply no authority and do not veto trusted evidence. Unique successful legacy
+status rows retain ordinary authority only while the head and rollup remain unchanged.
+No workflow is dispatched by the driver. `validation_checks` has no effect in local
 mode. Update older Ouro pins before adding these keys, since older readers reject unknown keys.
 
 ### Model tiers
@@ -318,7 +339,13 @@ file-read proof; full readiness also checks OS sandbox startup, the Git reads ab
 capability proof, all before tracker writes or branch creation. Each distinct selected model gets
 a small file-only call on generated readiness data, reported as PREFLIGHT usage. TRIAGE takes the
 file-only (READ) preflight; delivery runs and `inspect --check` take full readiness. A READ result
-never admits commands, probes or edits. Process and guard failures are driver errors even when a
+never admits commands, probes or edits. Each file proof is classified on its attempt's diagnostics
+row, printed after triage, run and `inspect --check` with the CLI version and the runtime file's SHA-256: the proof
+(`accepted`, `content`, `missing_read`, `failed_read`, `wrong_read`), the content class, whether
+the expected read and a stop were seen, the read path's class (`exact`, `alias`, `mismatch`,
+`absent`) and the successful bridge operations, never a path or answer text. Only the exact content
+from a read of the generated file's resolved path passes; an alias stays refused. A failed preflight
+writes nothing and is never retried: diagnose from that row, then rerun the same command. Process and guard failures are driver errors even when a
 model returns an owner-stop answer. Root AGENTS.md and CLAUDE.md plus .claude/rules text are
 supplied explicitly; path-scoped rules keep their declared scope. Instructions exceeding 128 KiB
 are refused.

@@ -149,7 +149,8 @@ Verify one fix commit: `{fix sha}`, in the same worktree. This is not a second r
   or low, a nit being low), path:line, trigger, wrong outcome, or path:line, the rule and the
   hunk, for a STANDARDS entry.
 - Mark each finding STANDS (listed above and still standing), IN-FIX (new, in lines this commit
-  changed) or OUTSIDE (new, in lines it did not).
+  changed), IN-PR (introduced by the original PR outside this fix), or OUTSIDE (unrelated external defect).
+  An IN-PR H/M finding still blocks. Attribute against the whole PR, not just the latest fix hunk.
 Read-only, as before.
 
 {the PR body}

@@ -52,8 +52,10 @@ def requests(value, allowed, gates=(), *, inherited=()):
         cmd = item["cmd"]
         argv, env = command(cmd)
         identity = (tuple(argv), tuple(sorted(env.items())))
-        if cmd not in allowed or identity in seen:
-            raise sh.DriverError("unapproved or duplicate validation command")
+        if cmd not in allowed:
+            raise sh.DriverError(f"validation command not granted: `{cmd}`")
+        if identity in seen:
+            raise sh.DriverError(f"duplicate validation command: `{cmd}`")
         if cmd not in inherited and any(isinstance(g, dict) and g.get("cmd") == cmd for g in gates):
             raise sh.DriverError("validation command conflicts with gates_run")
         seen.add(identity)

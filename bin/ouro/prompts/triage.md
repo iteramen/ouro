@@ -22,6 +22,11 @@ guidance, add a whole-line `Acceptance command:` field in `comment`, followed by
 backticks; do not invent commands, duplicate existing issue/binding grants, or grant historical
 or negative examples.
 
+The commands the issue's body grants BUILD, as the driver reads them: <<grants>>.
+A command not on that list is not granted, whatever section of the body holds it. An
+`Acceptance command:` field in an earlier comment, an earlier triage's included, stops counting
+once this verdict posts: to keep it, your `comment` declares it again.
+
 ## The issue (#<<number>>): <<title>>
 
 <<body>>
@@ -43,6 +48,7 @@ for each above; never judge landing by a branch commit the body cites. <<behind>
 <<labels>>
 
 The issue's current labels: <<issue_labels>>. Grade the label state as it is now, and name a missing area or type in `labels` only when it is missing: the driver adds it with the verdict's state labels and drops a name outside the sets.
+Before naming an area label or asking which one applies, read the binding file's comments around `[labels].area`, where a repository may say what each area covers, and follow them.
 
 ## Trusted authors
 

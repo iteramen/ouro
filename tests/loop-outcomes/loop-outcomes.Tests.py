@@ -14,7 +14,7 @@ them, and no bin/loop-outcomes.py) the suite prints one `skip:` line and exits 0
 stdlib only; needs python3 3.12 or later, and pwsh for the one row that runs the shared resolver.
 Its [[gate]] in .claude/ouro.toml: run = "python3 tests/loop-outcomes/loop-outcomes.Tests.py"
 """
-import atexit, contextlib, importlib.util, io, json, os, pathlib, re, shutil, stat, subprocess, sys, tempfile, traceback
+import atexit, collections, contextlib, importlib.util, io, json, os, pathlib, re, shutil, stat, subprocess, sys, tempfile, traceback
 
 sys.dont_write_bytecode = True
 BASE = pathlib.Path(__file__).resolve().parents[2]
@@ -730,6 +730,133 @@ def rate_rows():
     check("the finding rate is findings over attempts less open", cp[:7] == ["3", "0", "1", "1", "0", "0", "1"] and cp[7] == "50% (1/2)")
 
 
+# ---- reviewer findings: H and M findings counted per round ------------------------------------
+
+_rspec = importlib.util.spec_from_file_location("ouro_records", BASE / "bin" / "ouro" / "records.py")
+records = importlib.util.module_from_spec(_rspec)
+_rspec.loader.exec_module(records)
+
+
+def finding(sev, file, claim, scope="", evidence="e", line=1):
+    return {"severity": sev, "file": file, "line": line, "claim": claim, "evidence": evidence, "scope": scope}
+
+
+def rec(rnd, findings, t, author="github-actions", reader=None):
+    """A review record as the driver writes it (records.review_comment), posted at t."""
+    ans = {"findings": findings, **({"reader": reader} if reader else {})}
+    return (t, author, records.review_comment(rnd, ans, "a" * 40))
+
+
+def reviewer_rows():
+    f1, f2, f3 = finding("M", "a.py", "claim one"), finding("M", "b.py", "claim two"), finding("H", "c.py", "claim three")
+    f4, f5, low = finding("M", "d.py", "claim four", "IN-FIX"), finding("M", "e.py", "claim five", "OUTSIDE"), finding("L", "f.py", "minor")
+    stand = lambda f: {**f, "scope": "STANDS"}
+    iss = [promoted(n, body="Size: M") for n in (1, 2, 3, 4, 5)]
+    prs = [
+        pr(21, "Fixes #1", merged=d(14), oid=fake(21), comments=[
+            rec(1, [f1, f2, low], d(11)), rec(2, [stand(f2), f4, f5], d(12)), rec(3, [], d(13))]),
+        pr(22, "Fixes #2", state="OPEN", comments=[
+            rec(1, [f3], d(11)), (d(11, 1), "owner", "**Ruling**\nGo"), rec(2, [], d(12))]),
+        pr(23, "Part 1/2 of #3", state="OPEN", comments=[
+            rec(1, [f1], d(11), reader={"cli": "codex", "session": "s", "round": 1}),
+            rec(2, [stand(f1)], d(12), reader={"cli": "codex", "session": "s", "round": 2}),
+            rec(3, [stand(f1)], d(13), reader={"cli": "codex", "session": "s", "round": 3})]),
+        pr(24, "Fixes #4", state="OPEN", comments=[
+            rec(1, [f1], d(11)), (d(11, 1), "stranger", "**Ruling**\nGo"), rec(2, [f2], d(12), author="stranger")]),
+        pr(25, "no issue named", state="OPEN", comments=[rec(1, [f1], d(11))]),
+        pr(26, "Fixes #5", state="OPEN", comments=[rec(1, [f1], d(9))]),
+    ]
+    res, _ = analyze(iss, prs)
+    fates = {a["issue"]: tally(a) for a in res}
+    check("round 1 raises its two M findings and round 2's one STANDS re-raises one of them: raised 3 with round 2's IN-FIX",
+          (fates[1]["raised"], fates[1]["re-raised"]) == (3, 1))
+    check("round 2 raises only its IN-FIX finding beyond the carried STANDS, and both count fixed when round 3 lists none",
+          fates[1]["fixed"] == 3 and fates[1]["open"] == 0)
+    check("a round-2 OUTSIDE counts apart, and an L finding not at all", fates[1]["outside"] == 1 and sum(fates[1].values()) == 8)
+    check("a ruled record's finding counts ruled away, though a later round exists",
+          (fates[2]["raised"], fates[2]["ruled away"], fates[2]["fixed"]) == (1, 1, 0))
+    check("a finding re-raised unchanged by the last two verifications ended in the unchanged-finding stop, under its reader",
+          (fates[3]["raised"], fates[3]["re-raised"], fates[3]["open"], fates[3]["stopped"]) == (1, 2, 1, 1)
+          and {who for a in res if a["issue"] == 3 for who, _, n in a["findings"] if n} == {"codex"})
+    check("control: the driver's own rule stops on the same records",
+          len(records.unchanged_findings(records.review_records(prs[2]["comments"]["nodes"], {"github-actions"}))) == 1)
+    check("a finding with no later round and no ruling is open: a stranger's Ruling and record count for nothing",
+          (fates[4]["raised"], fates[4]["open"], fates[4]["ruled away"]) == (1, 1, 0))
+    check("records on a PR naming no issue, or posted before the promotion, go to no attempt", fates[5] == {})
+    check("fixed + ruled away + open equals raised for each attempt", all(balanced(c) for c in fates.values()))
+    text = lo.render("o/r", res, 0, lo.utc(NOW), at("2026-09-01"))
+    cells = [[c.strip() for c in x.strip("|").split("|")] for x in text.splitlines() if x.startswith("| ")]
+    rows = {tuple(c[:2]): c[2:] for c in cells if len(c) == 9 and c[1] in ("review node", "codex")}
+    check("the review node's row: raised 5, fixed 3, re-raised 1 (0 stopped), ruled away 1, open 1, outside 1, precision 3/4",
+          rows.get(("2026-W37 M", "review node")) == ["5", "3", "1 (0)", "1", "1", "1", "75% (3/4)"])
+    check("the codex reader has its own row, with no precision over no fixed or ruled finding",
+          rows.get(("all", "codex")) == ["1", "0", "2 (1)", "0", "1", "0", "n/a"])
+    check("the all rows repeat the cohort's figures", rows.get(("all", "review node")) == rows.get(("2026-W37 M", "review node")))
+
+
+def tally(attempt):
+    c = collections.Counter()
+    for _, fate, n in attempt.get("findings", []):
+        if n:
+            c[fate] += n
+    return c
+
+
+def balanced(c):
+    return c["fixed"] + c["ruled away"] + c["open"] == c["raised"]
+
+
+def per_round_rows():
+    f1, f2 = finding("M", "a.py", "claim one", line=10), finding("M", "b.py", "claim two", line=20)
+    reworded = {**f2, "scope": "STANDS", "claim": "claim two, reworded", "line": 24}
+    iss = [promoted(n, body="Size: M") for n in (1, 2, 3, 4, 5, 6)]
+    prs = [
+        pr(41, "Fixes #1", state="OPEN", comments=[rec(1, [f1, f2], d(11)), rec(2, [reworded], d(12))]),
+        pr(42, "Fixes #2", state="OPEN", comments=[rec(1, [f1, f2], d(11)), rec(2, [reworded], d(12)), rec(3, [], d(13))]),
+        pr(43, "Fixes #3", state="OPEN", comments=[rec(1, [f1, f2], d(11)), (d(11, 1), "owner", "**Ruling**\nGo"),
+                                                    rec(2, [reworded], d(12))]),
+        pr(44, "Fixes #4", state="OPEN", comments=[rec(1, [f1], d(11)), rec(2, [reworded, {**reworded, "file": "c.py"}], d(12))]),
+        pr(45, "Fixes #5", state="OPEN", comments=[rec(1, [f1], d(11)), rec(2, [{**f2, "scope": "OUTSIDE"}], d(12))]),
+        pr(46, "Fixes #6", state="OPEN", comments=[rec(1, [f1, f2], d(11)), rec(2, [reworded], d(12)),
+                                                    (d(12, 1), "owner", "**Ruling**\nGo"), rec(3, [reworded], d(13))]),
+    ]
+    res, _ = analyze(iss, prs)
+    fates = {a["issue"]: tally(a) for a in res}
+    pick = lambda c: tuple(c[k] for k in ("raised", "fixed", "re-raised", "ruled away", "open", "outside"))
+    check("a STANDS with a reworded claim and a moved line re-raises one of round 1's two; round 2's finding is open with no round 3",
+          pick(fates[1]) == (2, 1, 1, 0, 1, 0))
+    check("the same, with a round 3 listing no STANDS: round 2's finding counts fixed", pick(fates[2]) == (2, 2, 1, 0, 0, 0))
+    check("a ruled record's blocking findings count ruled away and carry nothing: the next round's STANDS is raised again",
+          pick(fates[3]) == (3, 0, 0, 2, 1, 0))
+    check("a ruled round 2 after an unruled round 1 resets the carry: round 3's STANDS is raised again",
+          pick(fates[6]) == (3, 1, 1, 1, 1, 0))
+    check("more STANDS in the next round than the round's blocking findings clamps re-raised to them",
+          pick(fates[4]) == (2, 0, 1, 0, 2, 0))
+    check("a round-2 OUTSIDE counts apart, neither raised nor open", pick(fates[5]) == (1, 1, 0, 0, 0, 1))
+    check("fixed + ruled away + open equals raised in each of those rows", all(balanced(c) for c in fates.values()))
+
+
+def unchanged_stop_rows():
+    f = finding("M", "a.py", "claim one", line=10)
+    stand = lambda line: {**f, "scope": "STANDS", "line": line}
+    iss = [promoted(n, body="Size: M") for n in (1, 2, 3)]
+    prs = [
+        pr(31, "Fixes #1", state="OPEN", comments=[rec(1, [f], d(11)), rec(2, [stand(10)], d(12)), rec(3, [stand(12)], d(13))]),
+        pr(32, "Fixes #2", state="OPEN", comments=[rec(1, [f], d(11)), rec(2, [stand(10)], d(12)), rec(4, [stand(10)], d(13))]),
+        pr(33, "Fixes #3", state="OPEN", comments=[rec(1, [f], d(11)), rec(2, [stand(10)], d(12)), rec(3, [stand(10)], d(13)),
+                                                    (d(13, 1), "owner", "**Ruling**\nGo")]),
+    ]
+    res, _ = analyze(iss, prs)
+    fates = {a["issue"]: tally(a) for a in res}
+    driver = lambda p: records.unchanged_findings(records.review_records(p["comments"]["nodes"], {"github-actions"}, {"owner"}))
+    check("a re-report whose line moved, with the same file, claim and evidence, still ended in the unchanged-finding stop",
+          (fates[1]["re-raised"], fates[1]["open"], fates[1]["stopped"]) == (2, 1, 1) and len(driver(prs[0])) == 1)
+    check("verifications that are not consecutive end in no stop, as the driver's rule",
+          fates[2]["re-raised"] == 2 and fates[2]["stopped"] == 0 and driver(prs[1]) == [])
+    check("a ruled last verification ends in no stop, as the driver's rule",
+          (fates[3]["re-raised"], fates[3]["ruled away"], fates[3]["stopped"]) == (2, 1, 0) and driver(prs[2]) == [])
+    check("fixed + ruled away + open equals raised for each attempt", all(balanced(c) for c in fates.values()))
+
 
 # ---- the quality table: the Review: line ------------------------------------------------------
 
@@ -1288,7 +1415,7 @@ def vendored_rows():
 for name, fn in (("attempts", attempts_rows), ("size at promotion", size_rows), ("cohorts", cohort_rows), ("landings", landing_rows),
                  ("reverts", revert_rows), ("anchor-attributed bugs", anchor_rows), ("assisted", assisted_rows),
                  ("refusals and parking", refusal_rows), ("precision", precision_rows), ("checkpoints", checkpoint_rows),
-                 ("open, abandoned, provisional", open_rows), ("report", report_rows), ("rates", rate_rows), ("review line", review_rows), ("quality PR rows", quality_pr_rows),
+                 ("open, abandoned, provisional", open_rows), ("report", report_rows), ("rates", rate_rows), ("reviewer findings", reviewer_rows), ("per round", per_round_rows), ("unchanged stop", unchanged_stop_rows), ("review line", review_rows), ("quality PR rows", quality_pr_rows),
                  ("flake rate", flake_rows), ("comment flag and cache", flag_rows),
                  ("gh stand-in", stub_rows), ("runs fetch", runs_fetch_rows), ("resolver", resolver_rows), ("binding", binding_rows), ("usage", usage_rows),
                  ("vendored layout", vendored_rows)):

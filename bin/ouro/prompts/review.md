@@ -13,9 +13,10 @@ If required acceptance cannot be verified with the available capabilities and ge
 evidence does not cover it, answer `stop` with reason `acceptance unrunnable` and a meaningful
 question naming the required command/proof and execution constraint, instead of inventing a code finding or requesting an
 empty fix. Do not reclassify a real code defect as an execution block.
-Verdict is CLEAN only when no finding has severity H or M. When you verify a fix (the block below
+Verdict is CLEAN only when no finding requiring a fix has severity H or M. When you verify a fix (the block below
 names its range), `scope` is `STANDS` for a finding that block lists and that still stands, `IN-FIX` for a
-new finding in lines the fix changed, and `OUTSIDE` for a new finding in lines it did not; an OUTSIDE finding is filed as a follow-up and starts no fix round. On a first
+new finding in lines the fix changed, `IN-PR` for a defect introduced by the original PR outside those lines,
+and `OUTSIDE` only for an unrelated external finding. IN-PR H/M findings still block; OUTSIDE findings are follow-ups. On a first
 review leave it empty.
 A change that does not do what the issue's Deliverable asks, as the comments below amend it, is a
 finding at the severity of what it misses, H when it delivers an option the spec rules out; its

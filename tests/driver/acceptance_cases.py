@@ -71,7 +71,9 @@ print('mutation counterfactual red; source restored')
                 assert name == "REVIEW" and "Mode: sized" in prompt and capabilities.probe
                 assert pathlib.Path(cwd).resolve() != run.tree.path.resolve()
                 policy = {"root": cwd, "edit": capabilities.edit, "commands": list(capabilities.commands), "probe": capabilities.probe}
-                with patch.object(bridge, "sandbox_argv", side_effect=lambda root, argv: argv):
+                # This fixture tests disposable-copy mutation, not native sandbox admission.
+                with patch.object(bridge, "sandbox_argv", side_effect=lambda root, argv, **kwargs: argv), \
+                        patch.object(bridge, "probe_root"), patch.object(bridge, "probe_configuration"):
                     result = bridge.Bridge(policy).call("run", {"command": "python3 probes/mutation.py"})
                 assert result["exit"] == 0 and "mutation counterfactual red; source restored" in result["stdout"], result
                 observed.append(result)

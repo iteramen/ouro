@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from ouro import developer, node, sh
+from ouro.runtime import diagnostics
 
 
 def digest(path):
@@ -59,7 +60,11 @@ def main(argv=None):
             print(json.dumps({"config": str(active), "backend": cfg.backend, "models": cfg.models,
                               "effort": cfg.effort, "source": manifest.get("source"), "owned_files": len(files)}, indent=2))
             if args.check:
-                node.preflight(cfg)
+                try:
+                    node.preflight(cfg)
+                finally:
+                    if table := diagnostics.table():
+                        print(table)
                 print("runtime preflight passed")
             return 0
         if args.command == "uninstall":

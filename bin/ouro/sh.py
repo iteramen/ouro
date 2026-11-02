@@ -32,8 +32,23 @@ class Stopped(Exception):
     """Stopped mid-run: the run exits with the code it carries."""
 
 
+_after_say = None
+
+
+def after_say(hook):
+    """One observer for each log line. A hook that raises is ignored, so the line still stands."""
+    global _after_say
+    _after_say = hook
+
+
 def say(msg=""):
     print(f"{time.strftime('%H:%M:%S', time.gmtime())} {msg}".rstrip(), flush=True)  # UTC, as the tracker's stamps: the log is its own timeline
+    hook = _after_say
+    if hook is not None:
+        try:
+            hook(msg)
+        except Exception:
+            pass
 
 
 _RESOLVED = {}
@@ -177,7 +192,11 @@ class Env:
         self.default = data["repo"]["default_branch"]
         from . import developer
         self.runtime = runtime if runtime is not None else developer.load(developer_config)
-        self.scratch = Path(tempfile.mkdtemp(prefix="ouro-run-"))
+        from .runtime.git_probe import ProbeParent
+        # Only owned scratch uses the physical spelling; configured parents keep their alias proof.
+        temporary_parent = ProbeParent(Path(tempfile.gettempdir()).resolve(strict=True))
+        self.scratch = Path(tempfile.mkdtemp(prefix="ouro-run-", dir=temporary_parent.resolved))
+        temporary_parent.check()
         self._viewer = None
         self._pr_checks = None
 

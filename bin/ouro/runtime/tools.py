@@ -1,11 +1,14 @@
 """Private stdio MCP bridge. Only declared file operations and sandboxed commands exist."""
 import fnmatch
 import functools
+import hashlib
 import importlib.util
+import itertools
 import json
 import os
 import re
 import sys
+import stat
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -14,11 +17,281 @@ from ouro import execution, sh, validation
 from ouro.runtime import process
 
 PROTECTED = {".git", ".claude", ".codex", ".agents", ".aws"}
+# Protect absent names too: commands must not create a mixed-case harness alias.
+PROTECTED_NAMES = frozenset(
+    "".join(chars) for name in PROTECTED
+    for chars in itertools.product(*[(c.lower(), c.upper()) if c.isalpha() else (c,) for c in name]))
 SKIP = {".git", "node_modules", "__pycache__"}
 LIMIT = 1024 * 1024
 
 
-def sandbox_argv(root, argv):
+def probe_root(root):
+    """Fail closed on inode aliases and unproved filesystem topologies before commands."""
+    if sys.platform not in ("linux", "darwin"):
+        raise sh.DriverError("PROBE boundary requires native Linux or macOS")
+    root = Path(root).resolve(strict=True)
+    try:
+        sources = [(sh.PLUGIN / name).resolve() for name in ("bin", "hooks", "skills", "agents")]
+        if (not root.is_dir() or root.is_mount() or root == Path(root.anchor)
+                or any(p.is_relative_to(root) or root.is_relative_to(p) for p in sources)):
+            raise ValueError("PROBE copy overlaps installed runtime or filesystem root")
+        metadata = root / ".git"
+        admin = metadata
+        if metadata.is_file():
+            if metadata.stat().st_size > 4096:
+                raise ValueError("oversized Git pointer")
+            pointer = metadata.read_text(encoding="utf-8").strip()
+            if not pointer.startswith("gitdir: ") or "\n" in pointer or "\x00" in pointer:
+                raise ValueError("unproved Git pointer")
+            admin = (root / pointer[8:]).resolve(strict=True)
+            if admin.is_relative_to(root):
+                raise ValueError("linked Git admin is inside the writable copy")
+        if admin.exists():
+            if not admin.is_dir():
+                raise ValueError("Git admin is not a directory")
+            common = admin
+            pointer = admin / "commondir"
+            if pointer.exists():
+                if not pointer.is_file() or pointer.stat().st_size > 4096:
+                    raise ValueError("unproved common Git pointer")
+                value = pointer.read_text(encoding="utf-8").strip()
+                if not value or "\n" in value or "\x00" in value:
+                    raise ValueError("unproved common Git pointer")
+                common = (admin / value).resolve(strict=True)
+                if not common.is_dir():
+                    raise ValueError("common Git is not a directory")
+            if (root.is_relative_to(common) or (common.is_relative_to(root)
+                    and not common.is_relative_to(metadata))):
+                raise ValueError("common Git overlaps the writable copy")
+        if sys.platform == "linux":
+            process.check_platform()  # Kernel/proc facts refuse WSL and unprovable native boundaries.
+            # is_mount alone misses bind mounts on the same filesystem.
+            for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+                value = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), line.split()[4])
+                if Path(value).is_relative_to(root):
+                    raise ValueError("PROBE copy contains a mount: " + value)
+        for directory, dirs, files in os.walk(root, followlinks=False,
+                                              onerror=lambda ex: (_ for _ in ()).throw(ex)):
+            for name in [*dirs, *files]:
+                path = Path(directory) / name
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
+                    raise ValueError("PROBE copy contains a symlink or hard link: " + str(path))
+                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    raise ValueError("PROBE copy contains a special file: " + str(path))
+                if path.is_mount():
+                    raise ValueError("PROBE copy contains a mount: " + str(path))
+    except (OSError, ValueError) as ex:
+        raise sh.DriverError("PROBE boundary admission refused: " + str(ex)) from ex
+    return root
+
+
+def probe_configuration(root, environment, launch):
+    """Read-only RPC admission; never expose raw configuration or server diagnostics."""
+    options = launch[launch.index("-c"):launch.index("--permission-profile")]
+    executable = launch[:launch.index("sandbox")]
+    messages, buffered, phase = {}, b"", 0
+    admission_stage = "invocation"
+
+    def request(identifier, method, params):
+        return (json.dumps(dict(id=identifier, method=method, params=params)) + "\n").encode()
+
+    def exchange(data):
+        nonlocal buffered, phase
+        buffered += data
+        outgoing = b""
+        if phase == 0:
+            phase = 1
+            outgoing = request(1, "initialize", dict(
+                clientInfo=dict(name="ouro-boundary", version="0"),
+                capabilities=dict(experimentalApi=True)))
+        while b"\n" in buffered:
+            line, buffered = buffered.split(b"\n", 1)
+            reply = json.loads(line)
+            if isinstance(reply, dict) and "id" not in reply:
+                # Installed app-server emits this notification during config/read.
+                # Validate and discard it without retaining private remote identities.
+                params = reply.get("params")
+                if (set(reply) <= {"method", "params", "emittedAtMs"}
+                        and reply.get("method") == "remoteControl/status/changed"
+                        and isinstance(params, dict)
+                        and {"installationId", "serverName", "status"} <= set(params)
+                        and set(params) <= {"installationId", "serverName", "status", "environmentId"}
+                        and all(isinstance(params[k], str) for k in ("installationId", "serverName"))
+                        and params["status"] in ("disabled", "connecting", "connected", "errored")
+                        and (params.get("environmentId") is None or isinstance(params["environmentId"], str))
+                        and ("emittedAtMs" not in reply or type(reply["emittedAtMs"]) is int)):
+                    continue
+                raise ValueError("unsupported RPC notification")
+            if (not isinstance(reply, dict) or set(reply) != {"id", "result"}
+                    or type(reply["id"]) is not int or phase not in (1, 2, 3) or reply["id"] != phase):
+                raise ValueError("unexpected RPC response")
+            messages[phase] = reply["result"]
+            if phase == 1:
+                outgoing += b'{"method":"initialized"}\n'
+                outgoing += request(2, "config/read", dict(includeLayers=True, cwd=str(root)))
+                phase = 2
+            elif phase == 2:
+                outgoing += request(3, "configRequirements/read", {})
+                phase = 3
+            else:
+                phase = 4
+        return None if phase == 4 else outgoing
+
+    try:
+        if (root != root.resolve(strict=True) or not Path(executable[0]).is_absolute()
+                or not isinstance(environment, dict)):
+            raise ValueError("unproved invocation context")
+        executable_identity = []
+        for value in executable:
+            path = Path(value)
+            if path.is_absolute():
+                resolved = path.resolve(strict=True)
+                if resolved.is_relative_to(root):
+                    raise ValueError("runtime is writable by PROBE")
+                info = resolved.stat()
+                executable_identity.append((str(path), str(resolved), info.st_dev, info.st_ino,
+                                            info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+        codex_home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex")
+        if not codex_home.is_absolute() or codex_home.resolve() != codex_home:
+            raise ValueError("CODEX_HOME alias")
+        admission_stage = "read-only-rpc"
+        process.run([*executable, "app-server", "-c", 'default_permissions="ouro"',
+                     *options, "--listen", "stdio://"], cwd=root, env=environment,
+                    timeout=30, output_limit=LIMIT, stderr_limit=LIMIT, exchange=exchange)
+        if phase != 4:
+            raise ValueError("incomplete RPC")
+        admission_stage = "selected-profile"
+        response = messages[2]
+        expected_files = {str(root): "write", **{str(root / p): "read" for p in sorted(PROTECTED_NAMES)}}
+        config = response["config"]
+        if config.get("default_permissions") != "ouro":
+            raise ValueError("selected profile")
+        selected = config["permissions"]["ouro"]
+        if set(selected) != {"description", "extends", "workspace_roots", "filesystem", "network"}:
+            raise ValueError("unknown permission fields")
+        if (selected["description"] is not None or selected["extends"] != ":read-only"
+                or selected["workspace_roots"] is not None):
+            raise ValueError("inherited permission grants")
+        admission_stage = "filesystem"
+        filesystem = dict(selected["filesystem"])
+        if filesystem.pop("glob_scan_max_depth", None) is not None or filesystem != expected_files:
+            raise ValueError("filesystem grants")
+        admission_stage = "network"
+        network = selected["network"]
+        network_fields = {"enabled", "proxy_url", "enable_socks5", "socks_url", "enable_socks5_udp",
+                          "allow_upstream_proxy", "dangerously_allow_non_loopback_proxy",
+                          "dangerously_allow_all_unix_sockets", "mode", "domains", "unix_sockets",
+                          "allow_local_binding", "mitm"}
+        if (set(network) != network_fields or network["enabled"] is not False
+                or any(value is not None for key, value in network.items() if key != "enabled")):
+            raise ValueError("network grants")
+        admission_stage = "requirements"
+        requirements = messages[3]
+        if (set(requirements) != {"requirements", "supportsIndependentSpeedModes"}
+                or requirements["requirements"] is not None
+                or type(requirements["supportsIndependentSpeedModes"]) is not bool):
+            raise ValueError("unproved requirements")
+        admission_stage = "layer-provenance"
+        layers = response["layers"]
+        origins = response["origins"]
+        if not isinstance(layers, list) or not layers or not isinstance(origins, dict):
+            raise ValueError("missing provenance")
+        identities, files = [], {}
+        for layer in layers:
+            if (not {"name", "version", "config"} <= set(layer)
+                    or not set(layer) <= {"name", "version", "disabledReason", "config"}):
+                raise ValueError("unknown layer fields")
+            name, version = layer["name"], layer["version"]
+            if not isinstance(version, str) or not version or not isinstance(layer["config"], dict):
+                raise ValueError("unproved layer version")
+            if layer.get("disabledReason") is not None:
+                raise ValueError("disabled layer")
+            kind = name["type"]
+            fields = {
+                "packagedDefaults": {"type", "file"}, "system": {"type", "file"},
+                "user": {"type", "file", "profile"}, "project": {"type", "dotCodexFolder"},
+                "legacyManagedConfigTomlFromFile": {"type", "file"}, "sessionFlags": {"type"}}
+            if (kind not in fields or not set(name) <= fields[kind]
+                    or not (fields[kind] - ({"profile"} if kind == "user" else set())) <= set(name)
+                    or (kind == "user" and name.get("profile") is not None
+                        and not isinstance(name["profile"], str))):
+                raise ValueError("unprovable managed or unknown layer")
+            if kind == "sessionFlags":
+                if name != {"type": "sessionFlags"}:
+                    raise ValueError("session identity")
+            else:
+                field = "dotCodexFolder" if kind == "project" else "file"
+                source = Path(name[field])
+                if not source.is_absolute() or source.resolve() != source:
+                    raise ValueError("configuration alias")
+                if kind == "user":
+                    home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex")
+                    if not home.is_absolute() or home.resolve() != home or source != home / "config.toml":
+                        raise ValueError("CODEX_HOME provenance")
+                if kind == "project":
+                    if not root.is_relative_to(source.parent):
+                        raise ValueError("project context")
+                    source = source / "config.toml"
+                if source.is_relative_to(root) and source.relative_to(root).parts[0] not in PROTECTED:
+                    raise ValueError("configuration input is writable by PROBE")
+                # Track absent files and parent identities too: creation/replacement is drift.
+                chain = []
+                for path in (source, *source.parents):
+                    try:
+                        info = path.lstat()
+                        if stat.S_ISLNK(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1):
+                            raise ValueError("configuration alias")
+                        if path == source and not stat.S_ISREG(info.st_mode):
+                            raise ValueError("configuration is not a regular file")
+                        chain.append((str(path), info.st_dev, info.st_ino, info.st_mode,
+                                      *((info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                                        if stat.S_ISREG(info.st_mode) else ())))
+                    except FileNotFoundError:
+                        chain.append((str(path), None))
+                digest = None
+                if source.exists():
+                    with source.open("rb") as stream:
+                        data = stream.read(LIMIT + 1)
+                    if len(data) > LIMIT:
+                        raise ValueError("configuration input exceeds admission bound")
+                    digest = hashlib.sha256(data).hexdigest()
+                files[str(source)] = chain, digest
+            identity = dict(name=name, version=version)
+            if identity in identities:
+                raise ValueError("duplicate layer")
+            identities.append(identity)
+        if sum(item["name"] == {"type": "sessionFlags"} for item in identities) != 1:
+            raise ValueError("missing session layer")
+        admission_stage = "permission-origins"
+        for metadata in origins.values():
+            if metadata not in identities:
+                raise ValueError("unproved origin")
+        required = ["default_permissions", "permissions.ouro.extends", "permissions.ouro.network.enabled",
+                    *("permissions.ouro.filesystem." + path for path in expected_files)]
+        if any(origins.get(key, {}).get("name") != {"type": "sessionFlags"} for key in required):
+            raise ValueError("permission origin")
+        # Opaque versions are compared, never interpreted as raw-file hashes.
+        return response, requirements, files, executable, executable_identity, dict(environment)
+    except Exception:
+        # Only a source-defined stage is public. Exception strings, RPC payloads and
+        # configuration paths may contain secrets and must never enter worker evidence.
+        raise sh.DriverError("PROBE effective configuration admission refused: " + admission_stage +
+                             " (unavailable, conflicting, aliased or unprovable configuration)") from None
+
+
+def sandbox_argv(root, argv, *, probe=False):
+    if probe:
+        # Explicit absolute grants do not inherit :workspace's ambient temporary writes.
+        root = Path(root).resolve()
+        filesystem = {str(root): "write", **{str(root / p): "read" for p in sorted(PROTECTED_NAMES)}}
+        sandbox = ["sandbox", "-c", 'permissions.ouro.extends=":read-only"',
+                   "-c", "permissions.ouro.network.enabled=false",
+                   "-c", "permissions.ouro.filesystem={" + ",".join(json.dumps(k) + "=" + json.dumps(v) for k, v in filesystem.items()) + "}",
+                   "--permission-profile", "ouro", "--include-managed-config"]
+        if os.name == "nt":
+            sandbox += ["-C", str(root)]
+        return [*sh.argv_for("codex", *sandbox), *argv]
     sandbox = ["sandbox",
                "-c", 'permissions.ouro.extends=":workspace"', "-c", "permissions.ouro.network.enabled=false",
                "-c", 'permissions.ouro.filesystem={":workspace_roots"={".git"="read",".claude"="read",".codex"="read",".agents"="read",".aws"="read"}}',
@@ -52,13 +325,23 @@ def git_configuration_failure(result):
                for line in result.err.splitlines())
 
 
-def git_readiness(root, env=None):
+def git_readiness(root, env=None, *, probe=False):
     """Refuse before mutation, without changing host configuration or sandbox grants."""
     for args in (["status", "--short", "--untracked-files=all"], ["log", "-3", "--oneline", "--all"], ["diff", "--stat"]):
         label = "git " + " ".join(args)
         try:
-            result = process.run(sandbox_argv(root, sh.argv_for(*git_read_argv(["git", *args]))),
-                                 cwd=root, timeout=30, env=git_environment(env))
+            arguments = sh.argv_for(*git_read_argv(["git", *args]))
+            boundary = sandbox_argv(root, arguments, probe=True) if probe else sandbox_argv(root, arguments)
+            environment = git_environment(env)
+            if probe:
+                environment.update({key: str(Path(root).resolve()) for key in ("TMPDIR", "TMP", "TEMP")})
+                # Keep removal markers: process.run normalizes this environment once more.
+                environment = {**process.child_env(environment),
+                               **{key: None for key, value in environment.items() if value is None}}
+                first = probe_configuration(Path(root).resolve(), environment, boundary)
+                if first != probe_configuration(Path(root).resolve(), environment, boundary):
+                    raise sh.DriverError("PROBE effective configuration changed before readiness")
+            result = process.run(boundary, cwd=root, timeout=30, env=environment)
         except sh.DriverError as ex:
             raise sh.DriverError(f"Git capability readiness: {label}: sandbox/process unavailable: {ex}") from ex
         if git_configuration_failure(result):
@@ -259,9 +542,21 @@ class Bridge:
             if result.code or git_configuration_failure(result):
                 raise sh.DriverError("execution input inventory unavailable")
             return result.out
+        probe = self.policy["probe"]
+        environment = git_environment() if git_query else {}
+        if probe:
+            probe_root(self.root)
+            # The existing owned root also supports read-only inspection without a pre-admission mkdir.
+            environment.update({key: str(self.root) for key in ("TMPDIR", "TMP", "TEMP")})
         before = execution.fingerprint(self.root, inventory) if self.policy["edit"] else None
-        r = process.run(sandbox_argv(self.root, sh.argv_for(argv[0], *argv[1:])),
-                        cwd=self.root, timeout=600, env=git_environment() if git_query else None)
+        arguments = sh.argv_for(argv[0], *argv[1:])
+        command_argv = sandbox_argv(self.root, arguments, probe=True) if probe else sandbox_argv(self.root, arguments)
+        if probe:
+            environment = process.child_env(environment)
+            first = probe_configuration(self.root, environment, command_argv)
+            if first != probe_configuration(self.root, environment, command_argv):
+                raise sh.DriverError("PROBE effective configuration changed before command")
+        r = process.run(command_argv, cwd=self.root, timeout=600, env=environment or None)
         after = execution.fingerprint(self.root, inventory) if before else None
         self.inputs = before if before == after else None
         if git_query and git_configuration_failure(r):
@@ -313,6 +608,7 @@ def serve(policy_path):
             with open(policy["evidence"], "a", encoding="utf-8") as evidence:
                 evidence.write(json.dumps({"tool": params["name"], "path": args.get("path"),
                                            "command": args.get("command"), "error": failure,
+                                           "tool_input": args if failure and params["name"] in ("write", "edit", "delete") else None,
                                            "inputs": getattr(bridge, "inputs", None) if params["name"] == "run" else None,
                                            "infrastructure": infrastructure,
                                            "exit": value.get("exit") if isinstance(value, dict) else None}) + "\n")

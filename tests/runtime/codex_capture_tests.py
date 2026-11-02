@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,32 @@ from ouro.runtime import READ, PROBE, builder, codex, codex_events, diagnostics,
 
 
 class CodexCaptureTests(unittest.TestCase):
+    def test_mcp_preserves_declared_configuration_home_without_forwarding_other_environment(self):
+        for home in (None, str(self.root / "declared-home"), str(self.root / "alias" / ".." / "home")):
+            with self.subTest(home=home):
+                environment = {k: v for k, v in os.environ.items() if k != "CODEX_HOME"}
+                environment["OURO_TEST_UNRELATED_VALUE"] = "must-not-be-forwarded"
+                if home is not None:
+                    environment["CODEX_HOME"] = home
+                def fake(argv, **kwargs):
+                    settings = next(arg for arg in reversed(argv) if arg.startswith("mcp_servers="))
+                    bridge = tomllib.loads(settings)["mcp_servers"]["ouro"]
+                    if home is None:
+                        self.assertNotIn("env", bridge)
+                    else:
+                        self.assertEqual(bridge["env"], {"CODEX_HOME": home})
+                    self.assertNotIn("OURO_TEST_UNRELATED_VALUE", bridge.get("env", {}))
+                    target = pathlib.Path(argv[argv.index("--output-last-message") + 1])
+                    target.write_text(json.dumps(dict(finding="ouro-ready", stop=None)), encoding="utf-8")
+                    (target.parent / "tools.jsonl").write_text(json.dumps(dict(tool="read", path="readiness.txt", error=None)) + "\n")
+                    return sh.R(0, "\n".join(json.dumps(event) for event in (
+                        dict(type="thread.started", thread_id="generated-config-context"),
+                        dict(type="turn.completed"))), "", argv)
+                with patch.dict(os.environ, environment, clear=True), patch.object(codex, "WINDOWS", False), \
+                        patch.object(sh, "argv_for", side_effect=lambda name, *args: [name, *args]), \
+                        patch.object(sh, "which", side_effect=lambda name: name), patch.object(process, "run", side_effect=fake):
+                    codex.execute("CHECKPOINT", "generated", "default", READ, self.root, 5, None, {}, developer.Settings("codex"))
+
     def test_edit_bootstrap_is_additive_and_keeps_repository_text_untrusted(self):
         """Mocked transport contract only; real BUILD usability is opt-in qualification."""
         (self.root / "AGENTS.md").write_text("generated-user-context-marker", encoding="utf-8")

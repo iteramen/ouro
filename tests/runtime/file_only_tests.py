@@ -1,5 +1,8 @@
 """Explicit READ admission must not become a command-worker capability proof."""
+from contextlib import redirect_stderr, redirect_stdout
+import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -71,6 +74,102 @@ class FileOnlyReadinessTests(unittest.TestCase):
                 patch.object(sh, "run", side_effect=self.metadata()), patch.object(Bridge, "tools", return_value=[{"name": "run"}]):
             with self.assertRaisesRegex(sh.DriverError, "file-only capability contract unavailable"):
                 codex.preflight(self.cfg, capabilities=READ)
+
+    def probe(self, answer, calls, setup=None):
+        def model(name, prompt, model, tools, cwd, *args):
+            if setup:
+                setup(Path(cwd))
+            with diagnostics.attempt(name, "codex", model) as row:
+                row["session"] = "fixture-session"
+            return answer, "fixture-session", {"tool_calls": calls}, None
+        with patch.object(sh, "argv_for", side_effect=lambda *args: list(args)), \
+                patch.object(sh, "run", side_effect=self.metadata()), \
+                patch.object(process, "run", side_effect=AssertionError("unexpected command execution")), \
+                patch.object(codex, "execute", side_effect=model):
+            try:
+                codex.preflight(self.cfg, capabilities=READ)
+                return None, diagnostics.ATTEMPTS[-1]
+            except sh.DriverError as ex:
+                return str(ex), diagnostics.ATTEMPTS[-1]
+
+    def test_rejected_file_proof_retains_classes_and_booleans_bound_to_attempt_identity(self):
+        def read(path, error=None):
+            return {"tool": "read", "path": path, "error": error}
+        listing, ok = {"tool": "list", "path": None, "error": None}, {"finding": "ouro-ready"}
+        stop = {"finding": "ouro-ready", "stop": {"reason": "open decision", "question": "private-question"}}
+        def other(cwd):
+            (cwd / "private-dir").mkdir()
+            (cwd / "private-dir/other.txt").write_text("ouro-ready")
+        def link(cwd):
+            os.link(cwd / "readiness.txt", cwd / "private-link.txt")
+        case = {}
+        def variant(cwd):  # a case-sensitive host holds a distinct file under the variant name
+            try:
+                with open(cwd / "READINESS.TXT", "x") as distinct:
+                    distinct.write("something else")
+                case["served"] = None
+            except FileExistsError:  # resolve() may return the on-disk case: the file itself
+                case["served"] = "exact" if (cwd / "READINESS.TXT").resolve() == (cwd / "readiness.txt").resolve() else "alias"
+        for name, answer, calls, setup, expected in (
+                ("pass", ok, [listing, read("readiness.txt")], None,
+                 dict(proof="accepted", content_match=True, read_observed=True, read_path="exact", tools="list+read")),
+                ("pass ./ spelling", ok, [read("./readiness.txt")], None, dict(proof="accepted", read_path="exact", tools="read")),
+                ("line-number echo", {"finding": "1: ouro-ready"}, [listing, read("readiness.txt")], None,
+                 dict(proof="content", content_match=False, content="numbered", read_observed=True, read_path="exact")),
+                ("trailing newline", {"finding": "ouro-ready\n"}, [read("readiness.txt")], None,
+                 dict(proof="content", content="whitespace", read_observed=True)),
+                ("other content", {"finding": "private-answer"}, [read("readiness.txt")], None, dict(proof="content", content="other")),
+                ("no read call", ok, [listing], None,
+                 dict(proof="missing_read", content_match=True, read_observed=False, read_path="absent", read_failed=False, tools="list")),
+                ("failed read", ok, [listing, read("readiness.txt", "private-error")], None,
+                 dict(proof="failed_read", read_observed=False, read_path="absent", read_failed=True, tools="list")),
+                ("another path", ok, [read("private-dir/other.txt")], other, dict(proof="wrong_read", read_path="mismatch")),
+                ("hard-link alias", ok, [read("private-link.txt")], link, dict(proof="wrong_read", read_path="alias", read_observed=False)),
+                ("stop with exact proof", stop, [read("readiness.txt")], None, dict(proof="accepted", stop_present=True)),
+                ("stop without finding", {"stop": stop["stop"]}, [read("readiness.txt")], None,
+                 dict(proof="content", content="absent", stop_present=True))):
+            with self.subTest(name):
+                diagnostics.ATTEMPTS.clear()
+                error, row = self.probe(answer, calls, setup)
+                self.assertEqual({k: row["file_proof"][k] for k in expected}, expected)
+                self.assertEqual((row["session"], row["model"], row["outcome"]), ("fixture-session", "default", "adapter_returned"))
+                self.assertEqual(row["file_proof"]["cli"], "0.164.0")
+                self.assertEqual(row["file_proof"]["runtime"], hashlib.sha256(Path(codex.__file__).read_bytes()).hexdigest())
+                if expected["proof"] == "accepted":
+                    self.assertIsNone(error)
+                else:
+                    self.assertIn(f"file capability probe failed: {expected['proof']}", error)
+                    self.assertIn("rerun the same command", error)
+                retained = json.dumps(row) + diagnostics.table() + (error or "")
+                for raw in ("private", "other.txt", "readiness.txt", "ouro-sandbox-probe-", "1: ouro"):
+                    self.assertNotIn(raw, retained)
+                self.assertIn("Preflight file proofs", diagnostics.table())
+        error, row = self.probe(ok, [read("READINESS.TXT")], variant)
+        if case["served"] == "exact":
+            self.assertIsNone(error)
+        else:
+            self.assertEqual((row["file_proof"]["proof"], row["file_proof"]["read_path"]),
+                             ("wrong_read", case["served"] or "mismatch"))
+
+    def test_inspect_check_prints_the_rejected_file_proof_row(self):
+        def rejected(cfg):
+            with diagnostics.attempt("PREFLIGHT", "codex", "default") as row:
+                row["session"] = "fixture-session"
+            diagnostics.file_proof("fixture-session", "default", {k: "fixture-class" for k in (
+                "proof", "content_match", "content", "read_observed", "read_path", "read_failed",
+                "stop_present", "tools", "cli", "runtime")})
+            raise sh.DriverError("file capability probe failed")
+        spec = importlib.util.spec_from_file_location("file_proof_inspection", Path(node.__file__).parents[1] / "ouro-developer.py")
+        inspector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inspector)
+        config = self.root / ".config/ouro/developer.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text('[runtime]\nbackend="codex"\n')
+        out = io.StringIO()
+        with patch.object(node, "preflight", side_effect=rejected), redirect_stdout(out), redirect_stderr(io.StringIO()):
+            self.assertEqual(inspector.main(["inspect", "--check", "--home", str(self.root)]), 1)
+        self.assertIn("Preflight file proofs", out.getvalue())
+        self.assertIn("| default | fixture-session | fixture-class", out.getvalue())
 
     def test_windows_nonread_preflight_refuses_before_cli_or_probe_work(self):
         for caps in (None, PROBE, builder([]), Capabilities(edit=True),
