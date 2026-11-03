@@ -72,7 +72,8 @@ if tuple(sys.version_info[:2]) < (3, 12):
 # Critiques quote the diff verbatim (arrows, dashes); a cp1252 console must not crash the
 # verdict printout after the round has already been paid for.
 for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"): _stream.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 DEFAULT_LENS = (
     "CORRECTNESS of the change (false negatives and false positives against its stated goal, "
@@ -749,8 +750,11 @@ def main() -> int:
                                 text=True, encoding="utf-8", errors="replace", cwd=cwd, env=child_env, **popen_kwargs)
         def pump():
             for chunk in iter(lambda: proc.stdout.read(256), ""):
-                stdout_chunks.append(chunk); sink.write(chunk); sink.flush()
-        t = threading.Thread(target=pump, daemon=True); t.start()
+                stdout_chunks.append(chunk)
+                sink.write(chunk)
+                sink.flush()
+        t = threading.Thread(target=pump, daemon=True)
+        t.start()
         deadline = time.time() + args.timeout
         stdin_errors: list[BaseException] = []
         feed_thread: threading.Thread | None = None

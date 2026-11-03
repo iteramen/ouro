@@ -4,7 +4,7 @@ import re
 
 from . import briefs, node, sh
 from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, declared_source, empty_list
-from .records import body_line, parse_parts, restamped
+from .records import REPO_POLICY, body_line, parse_parts, restamped, ship_policy
 from .run import Run
 from .sh import DriverError, argv_for, say
 
@@ -28,10 +28,10 @@ def label_moves(verdict, size, labels, named=()):
     elif verdict == "SPLIT":
         add = ["umbrella"]
     else:
-        remove = [l for l in ("agent-ready", "checkpoint") if l in present] if verdict == "STALE" and "checkpoint" in present else []
+        remove = [label for label in ("agent-ready", "checkpoint") if label in present] if verdict == "STALE" and "checkpoint" in present else []
         return [], remove
     add = list(named) + add
-    remove = [l for l in STATE_LABELS if l in present and l not in add]
+    remove = [label for label in STATE_LABELS if label in present and label not in add]
     if verdict == "PROMOTE" and "checkpoint" in present:
         remove.append("checkpoint")
     return [a for a in add if a not in present], remove
@@ -97,7 +97,7 @@ def label_problem(labels, sets):
     for kind, rule in (("area", "at least one"), ("type", "exactly one")):
         declared = [str(x) for x in sets.get(kind) or [] if str(x)]
         low = {x.lower() for x in declared}
-        on = list({str(l).lower(): str(l) for l in labels if str(l).lower() in low}.values())  # a native type beside its label counts once
+        on = list({str(label).lower(): str(label) for label in labels if str(label).lower() in low}.values())  # a native type beside its label counts once
         if declared and (not on or (rule == "exactly one" and len(on) != 1)):
             return f"{len(on)} {kind} label(s) ({', '.join(on) or 'none'}); the binding requires {rule} of: {', '.join(declared)}"
     return None
@@ -189,9 +189,10 @@ def binding_notes(env, body, labels):
     notes = []
     if body_line(body, "Flow") == "direct" and not env.lookup("ship.direct", []):
         notes.append("The body asks `Flow: direct`, and the binding declares no `ship.direct` globs: the run takes the class the diff warrants, not the direct lane.")
-    policy = env.lookup("ship.policy", "")
+    policy, _, whose = ship_policy(env)
     if "trivial" in labels and policy != "trivial-merge":
-        notes.append(f"The issue carries `trivial`, which does not let the driver merge under `ship.policy = \"{policy}\"` (only `trivial-merge` merges on it): "
+        where = f'`ship.policy = "{policy}"`' if whose == REPO_POLICY else f'`policy = "{policy}"` in {whose}'
+        notes.append(f"The issue carries `trivial`, which does not let the driver merge under {where} (only `trivial-merge` merges on it): "
                      "here it picks the trivial builder and nothing more.")
     return notes
 
@@ -202,7 +203,8 @@ def shape_findings(env, issue, body, labels, comment):
                  "comments": [*(issue.get("comments") or []),
                               {"author": {"login": env.viewer()}, "body": comment}]}
     proposed = env.body_file("triage-shape.json", json.dumps([candidate]))
-    q = lambda value: str(value).replace("'", "''")
+    def q(value):
+        return str(value).replace("'", "''")
     wrapper = env.body_file("triage-shape.ps1", f"& '{q((sh.BIN / 'Test-AgentReadyShape.ps1').as_posix())}' "
                            f"-Issue {int(issue['number'])} -IssuesJson ([IO.File]::ReadAllText('{q(proposed)}'))\n")
     result = env.run([sh.which("pwsh"), "-NoProfile", "-File", wrapper], cwd=env.main)
@@ -216,7 +218,7 @@ def shape_findings(env, issue, body, labels, comment):
 def triage(env, n, dry):
     node.preflight(env.runtime, capabilities=node.READ)  # the TRIAGE node runs even in a dry run
     i = env.gh_json("issue", "view", str(n), "--json", "number,title,body,labels,comments,state")
-    labels = [l["name"] for l in i.get("labels", [])]
+    labels = [tag["name"] for tag in i.get("labels", [])]
     body = i.get("body") or ""
     comments = "\n\n".join(f"[{(c.get('author') or {}).get('login')}] {c.get('body')}" for c in i.get("comments", [])) or "(none)"
     sets = {k: env.lookup(f"labels.{k}", []) for k in ("scope", "area", "type")}
@@ -263,11 +265,11 @@ def triage(env, n, dry):
                            "as the first line, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
     new_body = with_lines(body, size, flow, str(ans.get("doc_impact") or "").strip()) if verdict in ("PROMOTE", "CHECKPOINT") else body
     declared = {str(x).lower(): str(x) for k in ("area", "type") for x in sets.get(k) or []}
-    types, have = {str(x).lower() for x in sets.get("type") or []}, {str(l).lower() for l in labels + ([native] if native else [])}
+    types, have = {str(x).lower() for x in sets.get("type") or []}, {str(tag).lower() for tag in labels + ([native] if native else [])}
     named = []  # a label the node names that the issue lacks, in the binding's spelling; one type at most, none where the issue has one
-    for l in dict.fromkeys(str(x).lower() for x in ans.get("labels") or []):
-        if l in declared and l not in have and not (l in types and (have & types or any(n.lower() in types for n in named))):
-            named.append(declared[l])
+    for tag in dict.fromkeys(str(x).lower() for x in ans.get("labels") or []):
+        if tag in declared and tag not in have and not (tag in types and (have & types or any(n.lower() in types for n in named))):
+            named.append(declared[tag])
     problem = label_problem(labels + named + ([native] if native else []), sets) if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else None
     dead = [a for a in anchors if a != sh.NO_ANCHOR] if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else []
     if dead and (moved := restamped(env, body, dead)) != body and not env.dead_anchors(moved, f"origin/{env.default}"):
@@ -338,10 +340,10 @@ def triage(env, n, dry):
                   argv_for("gh", "issue", "edit", str(n), "-R", env.slug, "--body-file", env.body_file("issue-body.md", new_body)))
     if add or remove:
         argv = argv_for("gh", "issue", "edit", str(n), "-R", env.slug)
-        for l in remove:
-            argv += ["--remove-label", l]
-        for l in add:
-            argv += ["--add-label", l]
+        for tag in remove:
+            argv += ["--remove-label", tag]
+        for tag in add:
+            argv += ["--add-label", tag]
         env.write("set the labels", argv)
     env.comment_issue(n, comment)
     return 3 if preflight_failed else 0

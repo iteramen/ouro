@@ -471,7 +471,7 @@ def resume_offline(h):
         env = SimpleNamespace(runtime=SimpleNamespace(coordination=config, backend="codex"),
                               dry=False, main=c.main, default="master", slug="o/n",
                               ob=h.runmod.sh.load_binding_module(),
-                              lookup=lambda *a: "fixture", viewer=lambda: "actor",
+                              lookup=lambda key, *a: None if key == "ship.person" else "fixture", viewer=lambda: "actor",
                               body_file=lambda *a: c.root / "body.md", pr_checks=lambda: True,
                               gh_json=lambda *a: [], trusted=lambda: {"actor", "alice", "bob"},
                               run=h.runmod.sh.run)

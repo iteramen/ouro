@@ -20,6 +20,29 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.10.0] - 2026-11-03
+
+- The binding accepts `[[ship.person]]` entries: a gh `login`, unique without regard to case and
+  refused with surrounding whitespace, which no gh login has, with
+  that developer's own `policy`, `unattended_classes` or both, each under the rules of the `[ship]`
+  key it stands for. The binding check validates them. The merge decision, the dry run's plan and
+  triage's binding notes take the entry of the gh login running the driver over `[ship]`, key by
+  key, still narrowed by the issue; `**Ready for merge**` and `**Landed unattended**` name whose
+  policy applied.
+  **Consumer contract:** `[ship]` held one `policy` and one `unattended_classes` for every
+  developer, and `check` refused `ship.person` as an unknown key; it now admits the entries above.
+  Migration: none; a binding without entries is unchanged.
+
+- A configuration edit the Claude worker was refused becomes a manual step that carries the
+  proposed content or old and new text, as a refused Codex edit already did: the Claude adapter
+  returns its refusals in the shared denial shape.
+
+- The worker backends are one registry, and each adapter exports one interface: preflight,
+  worktree readiness, execution, PROBE confinement and answer validation, each implemented or
+  declared not required, unsupported or unconfined. The developer binding, the installer and the
+  node adapter read it in place of per-backend branches; behaviour, arguments and error text are
+  unchanged.
+
 ## [v1.9.3] - 2026-11-02
 
 **Net lines:** +1743 across docs, bin and tests, because the Codex PROBE boundary needs its write

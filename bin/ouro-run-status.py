@@ -208,6 +208,8 @@ def selftest():
         (dict(data, outcome="stopped", node="gates"), True, "stopped ✗ at gates" + tail),
         (dict(data, outcome="waiting"), True, "waiting ⏸ at REVIEW" + tail),
         (data, False, "interrupted ✗ at REVIEW" + tail),
+        ({k: v for k, v in data.items() if k != "outcome"}, True, "interrupted ✗ at REVIEW" + tail),
+        (dict(data, outcome=7), True, "interrupted ✗ at REVIEW" + tail),
     ]
     for row, live, end in finished:
         assert render(row, now=now + 300, alive=live) == "ouro #" + "142 " + end, row

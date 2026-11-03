@@ -104,9 +104,11 @@ def selftest():
     def reg(*entries):
         return json.dumps({"version": 2, "plugins": {"ouro@ouro": list(entries), "other@x": []}})
 
-    user = lambda v: {"scope": "user", "installPath": "p", "version": v}
+    def user(v):
+        return {"scope": "user", "installPath": "p", "version": v}
     known = '{"ouro": {"installLocation": "<clone>"}}'
-    man = lambda v: json.dumps({"name": "ouro", "version": v})
+    def man(v):
+        return json.dumps({"name": "ouro", "version": v})
 
     cases = [
         ("no registry", dict(), ""),

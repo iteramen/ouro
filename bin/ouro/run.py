@@ -24,7 +24,7 @@ from .records import (
     BUILD_LINE, FIX_CAP, MIN_TIME, ORDER, PENDING_MARK, RELEASE_NOTES, body_line, derive_flow, derive_size,
     drawn_body, failure_extract, filed_follow_ups, is_copilot, may_merge, needs_fix, newest_trusted_triage,
     outside, parse_direct, parse_parts, pending_follow_ups, pending_json, read_record, reader_findings,
-    release_notes, restamped, review_comment, review_line, review_plan, review_records, sev, slugify,
+    release_notes, restamped, review_comment, review_line, review_plan, review_records, sev, ship_policy, slugify,
     tighter, unchanged_findings, when, without_build_lines)
 from .runtime.process import worker_env
 from .runtime.tools import caller_source_writable
@@ -42,7 +42,6 @@ COPILOT_STATE_QUERY = ("query($o:String!,$r:String!,$n:Int!){repository(owner:$o
 THREADS_QUERY = ("query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){pullRequest(number:$n){"
                  "reviewThreads(first:100,after:$c){nodes{id isResolved comments(first:50){totalCount "
                  "nodes{databaseId author{login} body path line}}}pageInfo{hasNextPage endCursor}}}}}")
-REVIEW_DENIED = ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"]
 NO_REPLY = "No reply came from the build for this thread; nothing was changed for it."
 ONE_ROUND = "Copilot's one review round on this pull request is spent; this thread is left for the merger."
 
@@ -373,7 +372,8 @@ class Run:
             return 0
         if coordination:
             e.git("fetch", "origin", check=False)
-        say(f"[1] bind: {e.slug}, default branch {e.default}, policy {e.lookup('ship.policy')}, review {e.lookup('ship.review')}")
+        policy, _, whose = ship_policy(e)
+        say(f"[1] bind: {e.slug}, default branch {e.default}, policy {policy} from {whose}, review {e.lookup('ship.review')}")
         if published and published[2] == "revert":
             self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
             return self.lane_revert_stop(published[0], published[1])
@@ -1184,11 +1184,11 @@ class Run:
         candidates require explicit caller consent and the invoking allowlist;
         observing a worker command never widens caller permissions.
         """
-        self._note(gates_total=len(chosen))
         self.execution_results, self.gate_log, self.skipped = [], [], skipped
         caller = {r["cmd"]: r for r in self.caller_execution_results
                   if r["sha"] == head and type(r["exit"]) is int and r["exit"] == 0}
         selected = list(dict.fromkeys(cmd for cmd, _ in chosen))
+        self._note(gates_total=len(selected))
         automatic = [cmd for cmd in selected if cmd not in caller]
         for command in automatic:
             argv = shlex.split(command)
@@ -1233,6 +1233,7 @@ class Run:
         # or wait for the explicit --validate consent to execute them as caller.
         if missing and all(cmd in allowed for cmd in missing):
             observed = all(cmd in candidates for cmd in missing)
+            self._note(gates_add=len(missing))
             failed = batch(missing, execute_missing=observed and self.options.validate)
             # Existing genuine proof survives loss of worker-candidate metadata.
             # Absent proof without observed candidates still needs a BUILD fix.
@@ -1694,8 +1695,7 @@ class Run:
         n = pr["number"]
         if self.ci_mode() and not self.check_ci(pr, head):
             return 0
-        policy = e.lookup("ship.policy")
-        classes = e.lookup("ship.unattended_classes")
+        policy, classes, whose = ship_policy(e)
         view = e.gh_json("pr", "view", str(n), "--json", "reviewDecision,headRefOid" + ("" if e.pr_checks() else ",mergeable"))
         last = [r for r in records if r["sha"] == head]
         clean = (not self.primary) or (bool(last) and not needs_fix(last[-1]))
@@ -1706,7 +1706,7 @@ class Run:
             raise DriverError(f"#{n} has checks that are not green at {head}: {', '.join(red)}; nothing posted or merged")
         line = review_line(records, bool(self.primary))
         checks = f"{n_green} green" if e.pr_checks() else "none, no workflow names pull_request"
-        facts = f"Head: {head}\nChecks: {checks}\n{line}\nClass: {self.flow}\nPolicy: {policy}"
+        facts = f"Head: {head}\nChecks: {checks}\n{line}\nClass: {self.flow}\nPolicy: {policy}, from {whose}"
         if last and last[-1].get("ruled"):
             facts += f"\nRuled: {last[-1]['ruled']}, round {last[-1]['round']}"
         if view.get("reviewDecision") == "CHANGES_REQUESTED":
@@ -1734,7 +1734,7 @@ class Run:
         sha = self.merge_pr(n, subject, bf, self.tree.path, head)
         if sha is None:
             return self.conflicted(head, 9, "the merge")
-        e.comment_pr(n, f"**Landed unattended** by ouro run at {sha}: checks {n_green} green, {line}, class {self.flow}" + (f"\n{facts.splitlines()[-1]}" if "\nRuled: " in facts else "") + "\n")
+        e.comment_pr(n, f"**Landed unattended** by ouro run at {sha}: checks {n_green} green, {line}, class {self.flow}, policy {policy} from {whose}" + (f"\n{facts.splitlines()[-1]}" if "\nRuled: " in facts else "") + "\n")
         say(f"[9] merged #{n} as {sha}")
         return self.after_merge(self.find_pr())
 
@@ -2433,9 +2433,9 @@ class Run:
             f"{', then Copilot on the pull request' if self.copilot else ''}; mode {MODE.get(self.flow, 'sized')}, up to {FIX_CAP} fix rounds")
         say(f"[8] checks: {sh.cmdline(script('Watch-PullRequestChecks.ps1', '-Pr', '<PR>'))}" if e.pr_checks() else
             f"[8] checks: skipped, no workflow at origin/{e.default} names pull_request: every selected gate runs at [5], and the owner merges")
-        policy = e.lookup("ship.policy")
-        ok = e.pr_checks() and may_merge(policy, e.lookup("ship.unattended_classes"), self.labels, self.flow) and not self.manual_paths()
-        say(f"[9] merge: policy {policy}, class {self.flow}: " + (f"would run {sh.cmdline(script('Merge-PullRequest.ps1', '-Pr', '<PR>', '-Subject', '<subject> (#<PR>)', '-BodyFile', '<file>', '-Linear', 'no'))}"
+        policy, classes, whose = ship_policy(e)
+        ok = e.pr_checks() and may_merge(policy, classes, self.labels, self.flow) and not self.manual_paths()
+        say(f"[9] merge: policy {policy} from {whose}, class {self.flow}: " + (f"would run {sh.cmdline(script('Merge-PullRequest.ps1', '-Pr', '<PR>', '-Subject', '<subject> (#<PR>)', '-BodyFile', '<file>', '-Linear', 'no'))}"
                                                            if ok else "would post **Ready for merge** and exit 0"))
         say(f"[10] after the merge: {sh.cmdline(script('Remove-LandedBranch.ps1', '-Pr', '<PR>'))}; "
             f"{sh.cmdline(script('Test-AgentReadyAnchors.ps1', '-Ref', 'origin/' + e.default))}")

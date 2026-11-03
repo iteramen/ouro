@@ -11,7 +11,7 @@ file  →  triage  →  (rule if needed)  →  run: build, gates, review, checks
                 (checkpoint)  →  findings + a recommendation  →  back to triage
 ```
 
-A person does two things: answers a ruling, and merges what `ship.policy` or a manual step
+A person does two things: answers a ruling, and merges what the ship policy or a manual step
 keeps for a person.
 The lower branch exists because those two jobs are not equally cheap: reviewing a pull request
 is bounded; answering a ruling can mean an open-ended investigation before the question even
@@ -35,8 +35,9 @@ Worker transports live behind the node capability contract. Developer runtime/mo
 separate from repository grants; adding a harness adds a transport and constrained tool mapping,
 not another workflow engine.
 
-Outside the direct lane, who merges a pull request is the binding's `ship.policy`, a manual
-step aside: autonomy is a value a repository sets, and the driver's unattended merge is logged
+Outside the direct lane, who merges a pull request is the binding's `ship.policy`, or the
+running login's `ship.person` entry, a manual step aside: autonomy is a value the repository's
+reviewed binding sets, and the driver's unattended merge is logged
 on the pull request. The driver's own watch, merge at the head SHA and branch removal need no
 branch protection; protection is a guard against hand pushes, not the merge gate.
 Repo-agnostic means a multi-project repository and a one-project private repository both bind,

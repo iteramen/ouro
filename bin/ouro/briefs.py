@@ -2,7 +2,6 @@
 import re
 from pathlib import Path
 
-from . import sh
 
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 

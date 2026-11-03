@@ -32,6 +32,7 @@ from execution_tests import ExecutionTests
 from execution_lifecycle_tests import GateExecutionTests
 from timed_command_tests import TimedCommandTests
 from worktree_tests import WorktreeCleanupTests
+from backend_tests import BackendInterfaceTests
 from owned_children import reap_fixture_children
 
 

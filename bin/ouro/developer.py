@@ -6,9 +6,9 @@ from pathlib import Path
 
 from .sh import DriverError
 from .coordination import Coordination
+from .runtime.backends import BACKENDS, names
 
 ROLES = ("builder", "builder_trivial", "reviewer")
-CLAUDE_MODELS = ("opus", "sonnet", "haiku", "fable")
 
 
 def default_path():
@@ -24,7 +24,7 @@ class Settings:
     assignees: list = field(default_factory=list)
 
     def model(self, role, legacy):
-        return self.models.get(role, legacy if self.backend == "claude" else "default")
+        return self.models.get(role, BACKENDS[self.backend].default_model(legacy))
 
 
 def load(path=None):
@@ -43,21 +43,13 @@ def load(path=None):
         if set(runtime) - {"backend", "models", "effort"}:
             raise ValueError("unknown runtime key")
         backend = runtime.get("backend", "claude")
-        if backend not in ("claude", "codex"):
-            raise ValueError("runtime.backend must be claude or codex")
+        if backend not in BACKENDS:
+            raise ValueError(f"runtime.backend must be {names()}")
         models = runtime.get("models", {})
         if not isinstance(models, dict) or set(models) - set(ROLES):
             raise ValueError("unknown runtime.models role")
-        for role, value in models.items():
-            if not isinstance(value, str) or not value.strip() or value != value.strip():
-                raise ValueError(f"runtime.models.{role} must be a non-empty model")
-            if backend == "claude" and value not in CLAUDE_MODELS:
-                raise ValueError(f"runtime.models.{role}: Claude requires a supported alias")
-            if backend == "codex" and value in CLAUDE_MODELS:
-                raise ValueError(f"runtime.models.{role}: Claude aliases cannot select Codex models")
         effort = runtime.get("effort")
-        if effort is not None and (backend != "codex" or effort not in ("low", "medium", "high", "xhigh", "max")):
-            raise ValueError("runtime.effort requires Codex and low, medium, high, xhigh or max")
+        BACKENDS[backend].validate_runtime(models, effort)
         followup = data.get("followup", {})
         assignees = followup.get("assignees", []) if isinstance(followup, dict) else None
         if not isinstance(followup, dict) or set(followup) - {"assignees"} or not isinstance(assignees, list)                 or not all(isinstance(a, str) and a.strip() and a == a.strip() for a in assignees):

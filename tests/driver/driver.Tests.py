@@ -74,7 +74,7 @@ atexit.register(_remove_tmp)
 failures = 0
 WORKFLOW_EXECUTOR_MODEL = False
 MODELED_WORKFLOW_SECTIONS = frozenset({
-    "sec_happy", "sec_branch_prefix", "sec_parts", "sec_trivial_merge", "sec_findings_fix",
+    "sec_happy", "sec_branch_prefix", "sec_parts", "sec_trivial_merge", "sec_ship_person", "sec_findings_fix",
     "sec_catch_up", "sec_build_stop", "sec_brief", "sec_setup", "sec_builder_default",
     "sec_developer_runtime", "sec_unchanged_finding", "sec_review_cap", "sec_conflict",
     "sec_gate_red", "sec_checks_running", "sec_head_lag",
@@ -526,9 +526,12 @@ def progress_rows():
           load(143)["issue"] == 143 and load(143)["part"] == 2 and load(143)["lane"] == "direct"
           and load(143)["step"] == 2 and load(143)["node"] == "direct" and load(142)["issue"] == 142)
     other.observe("[2a] direct: the commit moves to a worktree and the run continues as express")
-    check("a direct fallback returns the lane to the pull-request path", load(143)["lane"] == "pr")
+    check("a direct fallback returns the lane to the pull-request path, and the node with it", load(143)["lane"] == "pr" and load(143)["node"] == "verify")
+    seen.revise(gates_add=1)
     seen.observe("[5] gate `python3 a.py`: exact-head validation receipt, evidence log")
     check("a validation receipt counts as a gate finished, not a failure", load(142)["gates"]["done"] == 3 and load(142)["gates"]["failed"] == 1)
+    check("a command the pass adds after its selected gates widens the total, so the tally never reads past it",
+          load(142)["gates"]["total"] == 3)
     seen.observe("[6] draft pull request #318")
     seen.observe("[12] close: the dry plan's last tag")
     seen.observe("the local head is ahead of origin")
@@ -1057,6 +1060,53 @@ def sec_trivial_merge():
     code, out, err = c2.ouro("run", "1")
     check("trivial-merge without the label stops at Ready for merge", code == 0 and not any(s.startswith("pr merge") for s in c2.sigs())
           and any(b["body"].startswith("**Ready for merge**") for b in c2.pr_comments()))
+
+
+def sec_ship_person():
+    """The viewer's [[ship.person]] entry stands for [ship].policy and unattended_classes, key by key; the issue still narrows it."""
+    def env_of(ship, viewer="alice"):
+        def who():
+            if viewer is None:
+                raise AssertionError("the viewer was asked for")
+            return viewer
+        return types.SimpleNamespace(lookup=lambda key, default=None: ship.get(key.removeprefix("ship."), default), viewer=who)
+    people = [{"login": "Alice", "unattended_classes": ["full"]}, {"login": "bob", "policy": "trivial-merge"}]
+    check("an entry's key wins, and a key it leaves out keeps the repository's",
+          recmod.ship_policy(env_of({"policy": "merge-on-green", "unattended_classes": ["express"], "person": people}))
+          == ("merge-on-green", ["full"], "alice's [[ship.person]] entry")
+          and recmod.ship_policy(env_of({"policy": "stop-at-pr", "person": people}, "bob")) == ("trivial-merge", None, "bob's [[ship.person]] entry"))
+    check("a viewer with no entry, and a binding with none, read [ship] (the latter without asking who the viewer is)",
+          recmod.ship_policy(env_of({"policy": "stop-at-pr", "person": people}, "carol")) == ("stop-at-pr", None, "the repository's [ship]")
+          and recmod.ship_policy(env_of({"policy": "stop-at-pr"}, None)) == ("stop-at-pr", None, "the repository's [ship]"))
+    notes = triagemod.binding_notes(env_of({"policy": "merge-on-green", "person": [{"login": "Dana", "policy": "stop-at-pr"}]}, "dana"), "", ["trivial"])
+    check("triage's trivial note names the viewer's entry, not [ship], as the policy that holds the label back",
+          len(notes) == 1 and '`policy = "stop-at-pr"` in dana\'s [[ship.person]] entry' in notes[0] and "ship.policy =" not in notes[0])
+    entry = BINDING.format(policy="stop-at-pr", review="adversarial-review") + '[[ship.person]]\nlogin = "O"\npolicy = "{p}"\n'
+    c = happy_case("personmerges", binding=entry.replace("{p}", "merge-on-green"))
+    code, out, err = c.ouro("run", "1", "--dry-run")
+    check("the dry run's plan names the viewer's entry and would merge", code == 0 and "[9] merge: policy merge-on-green from o's [[ship.person]] entry, class standard: would run" in out)
+    code, out, err = c.ouro("run", "1")
+    landed = [b["body"] for b in c.pr_comments() if b["body"].startswith("**Landed unattended**")]
+    check("a viewer whose entry says merge-on-green merges where the repository's stop-at-pr would stop, and the comment names the entry",
+          code == 0 and "done: #1 landed" in out and len(landed) == 1 and "policy merge-on-green from o's [[ship.person]] entry" in landed[0])
+    c = happy_case("personother", binding=entry.replace("{p}", "merge-on-green"), table={"_viewer": "alice"})
+    code, out, err = c.ouro("run", "1")
+    ready = [b["body"] for b in c.pr_comments() if b["body"].startswith("**Ready for merge**")]
+    check("a viewer without an entry gets the repository's policy, and Ready for merge says whose",
+          code == 0 and not any(s.startswith("pr merge") for s in c.sigs()) and len(ready) == 1
+          and re.search(r"(?m)^Policy: stop-at-pr, from the repository's \[ship\]$", ready[0]))
+    c = happy_case("persontrivial", binding=entry.replace("{p}", "trivial-merge"))
+    code, out, err = c.ouro("run", "1")
+    ready = [b["body"] for b in c.pr_comments() if b["body"].startswith("**Ready for merge**")]
+    check("an entry's trivial-merge on an issue without `trivial` still stops: the issue's reading wins",
+          code == 0 and not any(s.startswith("pr merge") for s in c.sigs()) and len(ready) == 1
+          and re.search(r"(?m)^Policy: trivial-merge, from o's \[\[ship\.person\]\] entry$", ready[0]))
+    cfg = TMP / "ship-developer.toml"
+    cfg.write_text('[runtime]\nbackend = "claude"\n[ship]\npolicy = "merge-on-green"\n', encoding="utf-8")
+    c = happy_case("persondeveloper")
+    code, out, err = c.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(cfg)})
+    check("a developer.toml cannot set the policy: its [ship] table is refused before any tracker write",
+          code == 1 and "only [runtime], [coordination] and [followup] are allowed" in err and c.wrote() == [] and not any(s.startswith("pr merge") for s in c.sigs()))
 
 
 def sec_findings_fix():
@@ -4860,7 +4910,7 @@ def sec_ci_validation():
 # Heaviest first, by the slower CI leg's section time: the pool starts sections in this order.
 SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("run: full class gates by paths", sec_full_paths),
             ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
-            ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
+            ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: a developer's [[ship.person]] entry", sec_ship_person), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
             ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
             ("run: node garbage", sec_node_garbage), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
 INDEX = os.environ.get("OURO_TEST_INDEX")

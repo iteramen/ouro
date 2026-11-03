@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ouro import developer, node, sh
 from ouro.runtime import diagnostics
+from ouro.runtime.backends import BACKENDS
 
 
 def digest(path):
@@ -28,9 +29,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command", choices=("install", "inspect", "uninstall"))
     ap.add_argument("--home", type=Path, help="alternate developer home, useful for isolated setup")
-    ap.add_argument("--backend", choices=("claude", "codex"), default="codex")
+    ap.add_argument("--backend", choices=tuple(BACKENDS), default="codex")
     ap.add_argument("--model", help="set all worker roles in a newly created developer binding")
-    ap.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"))
+    ap.add_argument("--effort", choices=tuple(dict.fromkeys(e for b in BACKENDS.values() for e in b.efforts)))
     ap.add_argument("--check", action="store_true", help="also run the selected runtime's preflight")
     args = ap.parse_args(argv)
     home = (args.home or Path.home()).resolve()

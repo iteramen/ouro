@@ -200,59 +200,43 @@ code, out, err = run(repo, "--base", "master", env=stub_env)
 check("no plugin.json: exit 0, the reason printed, claude not called", code == 0
       and "on-invoke tokens: not read, .claude-plugin/plugin.json names no plugin (" in out and not argv_file.exists())
 
-print("a release head is measured from the newest v* tag; a positive net needs the new version's decision line")
+print("a version bump is not measured: no net-lines decision is asked for")
 rel = TMP / "release"
 rel.mkdir()
 git(rel, "init", "-q", "-b", "master")
-
-
-def manifest(v):
-    return json.dumps({"name": "p", "version": v})
-
-
-def changelog(unreleased, released=""):
-    """The layout a release commit leaves: a fresh [UNRELEASED] above the new version's section, the old one below."""
-    return (f"# Changelog\n\n## [UNRELEASED]\n{unreleased}\n" + (f"## [v1.0.1] - 2026-01-02\n{released}\n" if released else "")
-            + "## [1.0.0] - 2026-01-01\n\n**Net lines:** +9 across bin, because an old release's line is not this one's\n")
-
-
-commit(rel, "tagged", {".claude-plugin/plugin.json": manifest("1.0.0"), "bin/x.py": "a\n", "docs/d.md": "one\ntwo\n", "CHANGELOG.md": changelog("")})
+commit(rel, "tagged", {".claude-plugin/plugin.json": json.dumps({"name": "p", "version": "1.0.0"}), "bin/x.py": "a\n",
+                       "CHANGELOG.md": "# Changelog\n\n## [UNRELEASED]\n"})
 git(rel, "tag", "v1.0.0")
-commit(rel, "master grows bin after the tag", {"bin/x.py": "a\nb\nc\n"})
 git(rel, "checkout", "-q", "-b", "release")
-commit(rel, "bump, the line left under the fresh UNRELEASED", {".claude-plugin/plugin.json": manifest("1.0.1"), "bin/y.py": "d\ne\n", "docs/d.md": "one\n",
-                                                           "CHANGELOG.md": changelog("\n**Net lines:** +3 across bin, docs, because a stale line\n", "\n- a change\n")})
+commit(rel, "bump and grow", {".claude-plugin/plugin.json": json.dumps({"name": "p", "version": "1.0.1"}), "bin/y.py": "d\ne\nf\n",
+                              "CHANGELOG.md": "# Changelog\n\n## [UNRELEASED]\n\n## [v1.0.1] - 2026-01-02\n\n- a change\n"})
 code, out, err = run(rel, "--base", "master")
-check("version bumped, net positive since the tag, no line under the new version: exit 1, the paths and counts, the form of the line",
-      code == 1 and "release v1.0.0 -> HEAD, net lines: skills +0, docs -1, hooks +0, bin +4, tests +0; overall +3\n" in out
-      and "under `## [v1.0.1]` in CHANGELOG.md" in out and "`**Net lines:** +N across <paths>, because <reason>`" in out and err == "")
-commit(rel, "the line, wrapped", {"CHANGELOG.md": changelog("", "\n**Net lines:** +3 across bin, docs,\nbecause the fixture says so\n")})
-code, out, err = run(rel, "--base", "master")
-check("with the line under the new version's heading, wrapped: exit 0, the line printed joined beside the figure",
-      code == 0 and "overall +3\n  accepted: **Net lines:** +3 across bin, docs, because the fixture says so\n" in out)
-commit(rel, "a line with no reason", {"CHANGELOG.md": changelog("", "\n**Net lines:** +3 across bin, docs\n")})
-code, out, err = run(rel, "--base", "master")
-check("a line without its `, because <reason>` is no decision: exit 1", code == 1 and "accepted" not in out)
-commit(rel, "a line with the wrong sign", {"CHANGELOG.md": changelog("", "\n**Net lines:** -3 across bin, docs, because the sign is wrong\n")})
-code, out, err = run(rel, "--base", "master")
-check("a line whose N is not positive is no decision for a positive net: exit 1", code == 1 and "accepted" not in out)
-git(rel, "checkout", "-q", "-b", "zero", "master")
-commit(rel, "bump with a net of zero", {".claude-plugin/plugin.json": manifest("1.0.1"), "bin/x.py": "a\n"})
-code, out, err = run(rel, "--base", "master")
-check("version bumped with a net of zero: exit 0, no line needed", code == 0 and "bin +0, tests +0; overall +0\n" in out and "accepted" not in out)
-git(rel, "checkout", "-q", "-b", "shrink", "master")
-commit(rel, "bump and shrink", {".claude-plugin/plugin.json": manifest("1.0.1"), "bin/x.py": ""})
-code, out, err = run(rel, "--base", "master")
-check("version bumped with a negative net: exit 0 and no line needed", code == 0 and "bin -1, tests +0; overall -1\n" in out and "accepted" not in out)
-git(rel, "checkout", "-q", "-b", "plain", "master")
-commit(rel, "grows, no bump", {"bin/z.py": "f\ng\nh\n"})
-code, out, err = run(rel, "--base", "master")
-check("no version bump: not measured, exit 0", code == 0 and "net lines" not in out)
-git(rel, "checkout", "-q", "-b", "untagged", "master")
-git(rel, "tag", "-d", "v1.0.0")
-commit(rel, "bump with no tag to measure from", {".claude-plugin/plugin.json": manifest("1.0.1")})
-code, out, err = run(rel, "--base", "master")
-check("a release head with no v* tag reachable from the base: exit 2, the reason on stderr", code == 2 and "describe" in err)
+check("version bumped with a positive net and no decision line: exit 0, no net-lines figure",
+      code == 0 and "net lines" not in out and err == "")
+
+print("each skill and agent stays within its on-invoke budget")
+bud = TMP / "budget"
+bud.mkdir()
+git(bud, "init", "-q", "-b", "master")
+commit(bud, "base", {"skills/a/SKILL.md": "x" * 40, "agents/v.md": "y" * 8,
+                     "release/skill-budget.json": json.dumps({"a": 10, "v": 2, "gone": 5})})
+code, out, err = run(bud, "--base", "master")
+check("within budget: exit 0, each estimate beside its budget, a stale budget named",
+      code == 0 and "  a: ~10 of 10\n" in out and "  v: ~2 of 2\n" in out and "  gone: no such skill or agent; drop its budget\n" in out)
+git(bud, "checkout", "-q", "-b", "grow")
+commit(bud, "grow", {"skills/a/SKILL.md": "x" * 41})
+code, out, err = run(bud, "--base", "master")
+check("one byte over: exit 1, the component, its estimate and its budget named",
+      code == 1 and "  a: ~11 over its budget of 10" in out)
+commit(bud, "raise", {"release/skill-budget.json": json.dumps({"a": 11, "v": 2})})
+code, out, err = run(bud, "--base", "master")
+check("the budget raised in the same change: exit 0", code == 0 and "  a: ~11 of 11\n" in out)
+commit(bud, "new skill", {"skills/b/SKILL.md": "z"})
+code, out, err = run(bud, "--base", "master")
+check("a skill with no budget: exit 1, told to add one", code == 1 and "  b: ~1, no budget: add one" in out)
+check("this repository carries a budget for each of its skills and agents",
+      (BASE / "release" / "skill-budget.json").is_file() and set(json.loads((BASE / "release" / "skill-budget.json").read_text()))
+      == {p.parent.name for p in (BASE / "skills").glob("*/SKILL.md")} | {p.stem for p in (BASE / "agents").glob("*.md")})
 
 print(f"skill-growth suite: {failures} failure(s)" if failures else "skill-growth suite: every row ok")
 sys.exit(1 if failures else 0)

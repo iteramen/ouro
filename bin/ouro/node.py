@@ -8,11 +8,11 @@ else <dir>/<name>.json, and leaves <dir>/<name>.<k>.call.json holding the cwd, t
 import json
 import os
 import re
-from contextlib import nullcontext
 from pathlib import Path
 
 from . import developer, sh
 from .runtime import Capabilities, READ, PROBE, builder, diagnostics
+from .runtime.backends import BACKENDS, NOT_REQUIRED, UNSUPPORTED
 
 USAGE = []  # one row per node call: {node, session, input, output, cache_read, cache_creation, cost}
 _CALLS = {}
@@ -104,10 +104,6 @@ def _stub(name, prompt, cwd, directory, tools, denied, model):
     return json.dumps(ans), "stub", ""
 
 
-def _tail(text, lines=8):
-    return "\n".join(str(text).strip().splitlines()[-lines:])[-800:]
-
-
 def model(env, role, default):
     legacy = env.lookup("models." + role, default)
     return getattr(env, "runtime", developer.Settings()).model(role, legacy)
@@ -115,9 +111,9 @@ def model(env, role, default):
 
 def worktree_readiness(settings, main, target, branch, base, *, scratch=None):
     """Backend proof before worktree creation, catch-up or repository setup."""
-    if not os.environ.get("OURO_NODE_STUB") and settings.backend == "codex":
-        from .runtime import git_capabilities
-        git_capabilities.worktree_readiness(settings, main, target, branch, base, scratch=scratch)
+    ready = BACKENDS[settings.backend].interface.worktree_readiness
+    if not os.environ.get("OURO_NODE_STUB") and ready != NOT_REQUIRED:
+        ready(settings, main, target, branch, base, scratch=scratch)
 
 
 
@@ -127,29 +123,15 @@ def preflight(settings=None, *, capabilities=None):
     if os.environ.get("OURO_NODE_STUB"):
         return
     cfg = settings or developer.load()
-    if cfg.backend == "codex":
-        from .runtime import codex
-        for session, usage, cost in codex.preflight(cfg, capabilities=capabilities):
-            _record("PREFLIGHT", session, usage, cost)
-    else:
-        from .runtime import claude
-        claude.preflight(cfg)
+    for session, usage, cost in BACKENDS[cfg.backend].interface.preflight(cfg, capabilities):
+        _record("PREFLIGHT", session, usage, cost)
 
 
 def _real(name, prompt, model, tools, cwd, timeout, denied, settings=None):
     cfg = settings or developer.Settings()
-    if cfg.backend == "codex":
-        from .runtime import codex as adapter
-    else:
-        from .runtime import claude as adapter
-    # Codex also records direct preflight attempts through this same ledger.
-    with (nullcontext() if cfg.backend == "codex" else diagnostics.attempt(name, cfg.backend, model)) as diagnostic:
-        answer, session, usage, cost = adapter.execute(name, prompt, model, tools, cwd, timeout, denied, SCHEMAS[name], cfg)
-        if diagnostic is not None:
-            diagnostic["session"] = diagnostics.identifier(session)
-            for target, source in (("input", "input_tokens"), ("output", "output_tokens"),
-                                   ("cache_read", "cache_read_input_tokens"), ("cache_creation", "cache_creation_input_tokens")):
-                diagnostic[target] = diagnostics.count((usage or {}).get(source))
+    with diagnostics.attempt(name, cfg.backend, model) as diagnostic:
+        answer, session, usage, cost = BACKENDS[cfg.backend].interface.execute(
+            name, prompt, model, tools, cwd, timeout, denied, SCHEMAS[name], cfg, diagnostic)
     _record(name, session, usage, cost)
     return json.dumps(answer) if isinstance(answer, dict) else str(answer), session, ""
 
@@ -171,12 +153,12 @@ def run_node(name, prompt, model, allowed_tools, cwd, timeout, denied=None, runt
             question = stop.get("question") if isinstance(stop, dict) else stop
             if not isinstance(question, str) or not question.strip():
                 raise sh.DriverError(f"node {name}: infrastructure or malformed stop with no question")
-        if ans is not None and runtime and runtime.backend == "codex":
-            from .runtime.schema import validate_answer
-            validate_answer(name, ans)
+        check = BACKENDS[runtime.backend].interface.validate_answer if runtime else UNSUPPORTED
+        if ans is not None and check != UNSUPPORTED:
+            check(name, ans)
         if ans is not None:
             return ans
-        diag = diag or f"the answer held no JSON object: {_tail(text, 4)!r}"
+        diag = diag or f"the answer held no JSON object: {sh.tail(text, 4)!r}"
     raise sh.DriverError(f"node {name} returned no parseable JSON twice (session {session or 'unknown'}): {diag}")
 
 

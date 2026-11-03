@@ -56,8 +56,9 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `gate.paths` | git pathspecs | none | the gate runs only when the diff changes one of them; without them it runs on every change |
 | `gate.cheap` | `true`, `false` | `false` | the gate needs no toolchain and runs in seconds: the BUILD node is granted it on every build, whatever the checks run, so an issue with no acceptance command still gets a command (contract §4) |
 | `gate.direct_code_check` | `true`, `false` | `false` | an explicit meaningful direct code check; requires nonempty `paths`, and need not be cheap |
-| `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the effective policy is the stricter of the repository's and the issue's |
+| `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the effective policy is the stricter of the running login's (its `ship.person` entry, else this key) and the issue's |
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
+| `ship.person` | `[[ship.person]]` entries: `login`, with `policy`, `unattended_classes` or both | none | one developer's own `ship.policy` and `ship.unattended_classes`, keyed by the gh login without regard to case; a key the entry leaves out is the repository's; the review of the pull request that changes the binding is the grant; `check` validates each entry; the driver's merge decision, its dry run and triage's notes read the entry of the gh login running them |
 | `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe: Choosing `ship.review` below |
 | `ship.validation` | `local`, `ci` | `local` | final-input validation authority for PR flows; inline direct checks remain local |
 | `ship.validation_checks` | exact GitHub check names | none; required under `ci` | nonempty unique names declaring aggregate CI coverage of selected nonlocal gates |
@@ -257,8 +258,9 @@ reviewer = "default"
 The runtime table admits only `runtime.backend`, `runtime.effort` and the three `runtime.models` roles.
 The optional `coordination` and `followup` tables below are the only other developer tables.
 Developer settings never merge into repository shipping policy, review requirements, gates,
-approvers or the external reader selection. For Claude, developer role overrides precede the
-repository's model aliases and the usual role defaults. For Codex, roles use explicit
+approvers or the external reader selection; a developer's own ship policy is a `[[ship.person]]`
+entry in the repository binding, granted by the review of the pull request that adds it.
+For Claude, developer role overrides precede the repository's model aliases and the usual role defaults. For Codex, roles use explicit
 account-served model names or `default`, the CLI's built-in default; repository Claude aliases
 are not passed to Codex or guessed into another provider's tiers. There is no provider fallback.
 Without a developer override the external-audit reader still follows `ship.external_cli`;
@@ -344,7 +346,8 @@ row, printed after triage, run and `inspect --check` with the CLI version and th
 (`accepted`, `content`, `missing_read`, `failed_read`, `wrong_read`), the content class, whether
 the expected read and a stop were seen, the read path's class (`exact`, `alias`, `mismatch`,
 `absent`) and the successful bridge operations, never a path or answer text. Only the exact content
-from a read of the generated file's resolved path passes; an alias stays refused. A failed preflight
+from a read of the generated file's resolved path passes, a stop in the answer included (the stop is
+reported, not judged); an alias stays refused. A failed preflight
 writes nothing and is never retried: diagnose from that row, then rerun the same command. Process and guard failures are driver errors even when a
 model returns an owner-stop answer. Root AGENTS.md and CLAUDE.md plus .claude/rules text are
 supplied explicitly; path-scoped rules keep their declared scope. Instructions exceeding 128 KiB
@@ -422,7 +425,7 @@ existing developer's runtime or model choices.
 
 The installer imports no Claude settings or environment map. A private-token gate uses the
 existing list selected by `OURO_FORBIDDEN_TOKENS` in the launching environment; it does not copy
-the list into a repository. The README's Codex setup shows persistent Windows configuration and
+the list into a repository. The [guide's Codex setup](guide.md#codex-install-once-per-developer) shows persistent Windows configuration and
 the app restart needed to inherit it.
 
 ## The machine-local overlay — `.claude/ouro.local.toml`
@@ -467,6 +470,11 @@ sees as a directory. The overlay entry is unchecked.
 - `ship.unattended_classes` is allowed only under `ship.policy = "merge-on-green"` and holds only
   `express`, `standard` and `full`. Absent, the driver reads `["express", "standard"]`; the owner
   adds `full` by hand, and the driver never changes the list.
+- Each `[[ship.person]]` entry needs a non-empty `login` with no surrounding whitespace, unique without regard to case, and sets
+  `policy`, `unattended_classes` or both, each under the rules of the `[ship]` key it stands for:
+  `policy` is one of the three values and is refused merging under `ship.review = "none"`;
+  `unattended_classes` is allowed only where the entry's `policy`, else `ship.policy`, is
+  `merge-on-green`. An entry admits no other key.
 - `ship.review = "copilot"` requires `ship.copilot_bot_id`.
 - `ship.review = "external-audit"` requires `ship.external_cli`, one of the adapters
   `bin/external-audit.py` ships (`grok`, `claude`, `codex`, `copilot`); `external_cli` is allowed
@@ -587,9 +595,9 @@ sees as a directory. The overlay entry is unchecked.
 
 ## Rules the skills apply
 
-- **Ship policy is the minimum of repo and issue.** A `trivial` label cannot exceed
-  `ship.policy`; `stop-at-pr` in the binding means `trivial` is advisory and the run stops at the
-  PR.
+- **Ship policy is the minimum of the running login's and the issue's.** The login's policy is its
+  `ship.person` entry, key by key, else `ship.policy`. A `trivial` label cannot exceed it;
+  `stop-at-pr` there means `trivial` is advisory and the run stops at the PR.
 - **A gate is the narrowest command that can fail for the diff.** CI runs the matching
   `[[gate]]` entries as bound. The driver runs selected gates the checks skip. Local validation
   separately establishes committed-input proof; explicit CI validation uses the declared final-head

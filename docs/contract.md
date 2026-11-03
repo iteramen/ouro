@@ -25,9 +25,9 @@ user's bot or a cron calls the driver; a session that follows the protocol by ha
 same marks by the gates.
 
 Humans do exactly two things: **answer ruling questions** and **merge the pull request the
-binding's `[ship].policy` leaves to them** — every one under `stop-at-pr`, every one without the
-`trivial` label under `trivial-merge`, under `merge-on-green` a class outside
-`[ship].unattended_classes`, and under any policy one that no workflow checks (§5, §9).
+effective ship policy (§5) leaves to them** — every one under `stop-at-pr`, every one without the
+`trivial` label under `trivial-merge`, under `merge-on-green` a class outside the unattended
+classes, and under any policy one that no workflow checks (§5, §9).
 
 The lower branch exists because the two human jobs are not equally cheap. Reviewing a PR is
 bounded; answering a ruling can mean an open-ended investigation before the question even makes
@@ -59,7 +59,8 @@ PROBE requires native Linux or macOS (WSL refuses) and an invocation-private cop
 hard-linked files, nested mounts or special files; admission refuses unsupported topology before
 dispatch and again before each command. Canonical aliases of the root use the same boundary.
 External processes must not mutate that private copy or its invocation-stable configuration inputs
-while it is in use. Before worker dispatch and each command, read-only app-server `config/read`
+while it is in use. Claude PROBE commands run without that write boundary: Claude Code refuses only
+`git push`, `git commit` and `gh` there. Before worker dispatch and each command, read-only app-server `config/read`
 (with layers and canonical cwd) and `configRequirements/read` inspect the same executable,
 environment and permission overrides used for launch. Two fresh resolutions must agree on effective
 configuration. The MCP bridge preserves an explicitly declared `CODEX_HOME` verbatim so admission
@@ -592,11 +593,14 @@ part's pull request that is not the last carries none, §3).
 - **The executor demotes on any doubt** — on any declined review finding, when a review fix
   is itself non-trivial, or when the review names an untested vector nothing covers. Unsure
   means not trivial; the run falls back to stop-at-PR.
-- **Effective ship policy = min(repo, issue).** The binding's `[ship].policy` caps what any
-  label can grant: `stop-at-pr` there makes `trivial` advisory and every run stops at the PR.
-- **`merge-on-green` is the owner's per-class grant, beside `trivial`.** Under
-  `[ship].policy = "merge-on-green"` the driver merges a pull request whose Flow class is in
-  `[ship].unattended_classes` when every required check on the head is green, no review requests
+- **Effective ship policy = min(person, issue).** The person's policy is the `[[ship.person]]`
+  entry of the gh login running the driver, key by key, and `[ship]` for a key the entry leaves
+  out or a login with no entry. It caps what any label can grant: `stop-at-pr` there makes
+  `trivial` advisory and every run stops at the PR. The dry run's merge line, `**Ready for
+  merge**` and `**Landed unattended**` name whose policy applied.
+- **`merge-on-green` is the owner's per-class grant, beside `trivial`.** Under a
+  person's policy `merge-on-green` (the line above) the driver merges a pull request whose Flow
+  class is in that person's `unattended_classes` when every required check on the head is green, no review requests
   changes, the last REVIEW verdict is clean and the head is the one those checks and that verdict
   read; it then posts `**Landed unattended**`. A class outside the list stops at `**Ready for
   merge**` as under `stop-at-pr`. The owner adds a class to the list by hand and the driver never
@@ -767,7 +771,7 @@ a schedule or an event. Specifically:
   `trivial`, `checkpoint` conversion, and every merge are human-approved, with the
   exceptions the owner turns on per repo: the `trivial` loop
   §5 pre-authorizes, and the merge `merge-on-green` grants for the classes in
-  `[ship].unattended_classes`. The owner approved each merge when setting the policy rather than
+  the running login's unattended classes (§5). The owner approved each merge when setting the policy rather than
   in the run — the merge alone, never the branch rewrite §5 excludes from it.
 - The unattended **removal** is a deterministic gate demoting `agent-ready` in its explicit
   `-Demote` mode, and the target states why: the anchor gate demotes to `needs-ruling` (a graded

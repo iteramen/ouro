@@ -114,7 +114,14 @@ Quality table, after the outcome tables, one row per ISO week and an `all` row (
 Exit 0 when the report printed (or was posted), 1 when any read or write failed (the message, with
 the failing command's output, on stderr), 2 on a usage error. A failed read never reads as zero.
 """
-import argparse, collections, json, os, re, statistics, subprocess, sys
+import argparse
+import collections
+import json
+import os
+import re
+import statistics
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 # The floor every bin/*.py shares.
@@ -582,9 +589,12 @@ def scope(f):
 def review_fates(records):
     """[(reader, fate, count)], counted per round: fate is `raised`, `fixed`, `re-raised`, `ruled away`,
     `open`, `outside`, or `stopped` (the last verification's entries that ended in the unchanged-finding stop)."""
-    reader = lambda r: r["reader"]["cli"] if isinstance(r["reader"], dict) and r["reader"].get("cli") else "review node"
-    hm = lambda r: [f for f in r["findings"] if sev(f) in ("H", "M")]
-    blocking = lambda r: [f for f in hm(r) if r["round"] == 1 or scope(f) != "OUTSIDE"]
+    def reader(r):
+        return r["reader"]["cli"] if isinstance(r["reader"], dict) and r["reader"].get("cli") else "review node"
+    def hm(r):
+        return [f for f in r["findings"] if sev(f) in ("H", "M")]
+    def blocking(r):
+        return [f for f in hm(r) if r["round"] == 1 or scope(f) != "OUTSIDE"]
     out, carried = [], 0
     for i, r in enumerate(records):
         nxt = next((x for x in records[i + 1:] if x["round"] > r["round"]), None)
@@ -601,7 +611,8 @@ def review_fates(records):
             carried = 0
     verifs = [r for r in records if r["round"] > 1 and not r["ruled"]]
     if len(verifs) >= 2 and verifs[-1]["round"] == verifs[-2]["round"] + 1:
-        key = lambda f: (f.get("file"), f.get("claim"), f.get("evidence"))
+        def key(f):
+            return (f.get("file"), f.get("claim"), f.get("evidence"))
         before = {key(f) for f in blocking(verifs[-2])}
         out.append((reader(verifs[-1]), "stopped", sum(key(f) in before for f in blocking(verifs[-1]))))
     return out

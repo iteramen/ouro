@@ -8,6 +8,10 @@ class Capabilities:
     commands: tuple = ()
     probe: bool = False
 
+# A refused call, as every adapter returns it in answer["_denied"]: tool_name write, edit, delete or run
+# (another tool keeps its own name), and tool_input with file_path, content (write), old and new (edit)
+# or command (run). run.Run.manual_steps and acceptance_answer read only this shape.
+
 READ = Capabilities()
 PROBE = Capabilities(probe=True)
 

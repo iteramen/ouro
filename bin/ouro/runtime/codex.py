@@ -11,9 +11,9 @@ from .. import sh
 from .process import worker_env
 from . import Capabilities, READ, diagnostics, process, schema
 from . import codex_events
-from .claude import tail
 from .network import WINDOWS, readiness as network_readiness
 from .tools import git_readiness
+from .backends import CONFINED, Interface
 
 MIN_VERSION = (0, 163, 0)
 DISABLED = ("shell_tool", "apps", "plugins", "multi_agent", "hooks", "memories", "shell_snapshot",
@@ -95,7 +95,7 @@ def preflight(settings, *, capabilities=None):
     try:
         models = {m["slug"] for m in json.loads(catalog.out)["models"]}
     except (ValueError, KeyError, TypeError):
-        raise sh.DriverError(f"preflight codex: model catalog unavailable: {tail(catalog.err)}")
+        raise sh.DriverError(f"preflight codex: model catalog unavailable: {sh.tail(catalog.err)}")
     unavailable = set(settings.models.values()) - models - {"default"}
     if unavailable:
         raise sh.DriverError(f"preflight codex: account does not serve models {', '.join(sorted(unavailable))}")
@@ -111,7 +111,7 @@ def preflight(settings, *, capabilities=None):
             except sh.DriverError as ex:
                 raise sh.DriverError(f"preflight codex: sandbox/process readiness failed: {ex}; check this host's process permissions") from ex
             if probe.code != 0 or "ouro-sandbox-ready" not in probe.out:
-                raise sh.DriverError(f"preflight codex: OS sandbox unavailable; configure Codex sandbox on this host: {tail(probe.err)}")
+                raise sh.DriverError(f"preflight codex: OS sandbox unavailable; configure Codex sandbox on this host: {sh.tail(probe.err)}")
             network_readiness(root, env=worker_env(settings))
             # Inspection also runs outside repositories. Never copy configured private templates.
             for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
@@ -288,3 +288,13 @@ def instructions(cwd):
         raise sh.DriverError("codex repository instructions exceed 128 KiB")
     return ("Repository instructions follow. Rules with paths front matter apply only to their declared paths; "
             "unscoped rules apply throughout the worktree.\n\n" + text) if text else ""
+
+
+def _worktree_readiness(settings, main, target, branch, base, *, scratch=None):
+    from . import git_capabilities
+    git_capabilities.worktree_readiness(settings, main, target, branch, base, scratch=scratch)
+
+
+INTERFACE = Interface(preflight=lambda settings, capabilities: preflight(settings, capabilities=capabilities),
+                      worktree_readiness=_worktree_readiness, execute=_execute, probe_confinement=CONFINED,
+                      validate_answer=schema.validate_answer)

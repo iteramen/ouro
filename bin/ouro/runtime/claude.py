@@ -6,9 +6,12 @@ from pathlib import Path
 
 from .. import sh
 from .process import worker_env
-from . import Capabilities
+from . import Capabilities, diagnostics
+from .backends import NOT_REQUIRED, UNCONFINED, UNSUPPORTED, Interface
 
 FLAGS = ("--output-format", "--model", "--allowedTools", "--disallowedTools", "--permission-mode", "--json-schema", "--settings")
+SHARED_TOOLS = {"Write": "write", "Edit": "edit", "Bash": "run", "PowerShell": "run"}
+SHARED_INPUT = {"file_path": "file_path", "content": "content", "old_string": "old", "new_string": "new", "command": "command"}
 
 
 def tools_for(capabilities):
@@ -22,8 +25,11 @@ def tools_for(capabilities):
     return tools, denied
 
 
-def tail(text):
-    return "\n".join(str(text).strip().splitlines()[-8:])[-800:]
+def denials(native):
+    """Claude Code's permission_denials in the shared denial shape (see Capabilities)."""
+    return [{"tool_name": SHARED_TOOLS.get(d.get("tool_name"), d.get("tool_name")),
+             "tool_input": {SHARED_INPUT[k]: v for k, v in (d.get("tool_input") or {}).items() if k in SHARED_INPUT}}
+            if isinstance(d, dict) else d for d in native]
 
 
 def preflight(settings):
@@ -37,7 +43,7 @@ def preflight(settings):
     except ValueError:
         status = None
     if r.code != 0 or not isinstance(status, dict) or status.get("loggedIn") is not True:
-        raise sh.DriverError(f"preflight: claude auth status --json (exit {r.code}) does not report a signed-in CLI: {tail(r.out or r.err)!r}; run claude auth login")
+        raise sh.DriverError(f"preflight: claude auth status --json (exit {r.code}) does not report a signed-in CLI: {sh.tail(r.out or r.err)!r}; run claude auth login")
     h = sh.run([*binary, "--help"], timeout=120, env=worker_env(settings))
     missing = [f for f in FLAGS if not re.search(rf"(?<![\w-]){re.escape(f)}(?![\w-])", h.out)]
     if h.code != 0 or missing:
@@ -77,12 +83,25 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, schema, settings,
     try:
         env = json.loads(r.out)
     except ValueError:
-        raise sh.DriverError(f"node {name}: claude exited {r.code} with no JSON envelope; stderr tail: {tail(r.err)!r}; stdout tail: {tail(r.out)!r}")
+        raise sh.DriverError(f"node {name}: claude exited {r.code} with no JSON envelope; stderr tail: {sh.tail(r.err)!r}; stdout tail: {sh.tail(r.out)!r}")
     if not isinstance(env, dict):
         raise sh.DriverError("claude returned a non-object envelope")
     if r.code != 0 or env.get("is_error"):
-        raise sh.DriverError(f"node {name} (session {env.get('session_id', 'unknown')}): claude exited {r.code} with is_error; result: {tail(env.get('result', ''))!r}; stderr tail: {tail(r.err)!r}")
+        raise sh.DriverError(f"node {name} (session {env.get('session_id', 'unknown')}): claude exited {r.code} with is_error; result: {sh.tail(env.get('result', ''))!r}; stderr tail: {sh.tail(r.err)!r}")
     answer = env.get("structured_output", env.get("result", ""))
     if isinstance(answer, dict) and name in ("BUILD", "REVIEW") and env.get("permission_denials"):
-        answer = {**answer, "_denied": env["permission_denials"]}
+        answer = {**answer, "_denied": denials(env["permission_denials"])}
     return answer, env.get("session_id", ""), env.get("usage") or {}, env.get("total_cost_usd")
+
+
+def _attempt(name, prompt, model, tools, cwd, timeout, denied, schema, settings, diagnostic):
+    answer, session, usage, cost = execute(name, prompt, model, tools, cwd, timeout, denied, schema, settings)
+    diagnostic["session"] = diagnostics.identifier(session)
+    for target, source in (("input", "input_tokens"), ("output", "output_tokens"),
+                           ("cache_read", "cache_read_input_tokens"), ("cache_creation", "cache_creation_input_tokens")):
+        diagnostic[target] = diagnostics.count((usage or {}).get(source))
+    return answer, session, usage, cost
+
+
+INTERFACE = Interface(preflight=lambda settings, capabilities: preflight(settings) or (), worktree_readiness=NOT_REQUIRED,
+                      execute=_attempt, probe_confinement=UNCONFINED, validate_answer=UNSUPPORTED)

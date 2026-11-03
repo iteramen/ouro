@@ -62,7 +62,8 @@ if tuple(sys.version_info[:2]) < (3, 12):
 # Both streams: the error lines below name paths, and a caller reads them back the same way it
 # reads the answers. The floor above is printed before this runs, and it is ASCII.
 for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"): _stream.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 import tomllib
 from pathlib import Path
@@ -158,6 +159,9 @@ SCHEMA = {
     "overlays": {"implement": list, "review": list, "land": list},
     "owner": {"role": str, "ruling_approvers": list},
 }
+# [[ship.person]]: one developer's own ship.policy and ship.unattended_classes, granted by the
+# review of the pull request that changes the binding. Each key keeps the rules of the one it stands for.
+PERSON_SCHEMA = {"login": str, "policy": str, "unattended_classes": list}
 REQUIRED = ("schema", "repo.slug", "repo.default_branch", "ship.policy", "ship.review", "owner.ruling_approvers")
 
 # Lists whose entries are regexes, not literals. An invalid pattern is a configuration error the
@@ -207,6 +211,54 @@ def _check_table(name, table, spec, errors):
                     re.compile(pat)
                 except re.error as exc:
                     errors.append(f"{name}.{key}: {pat!r} is not a valid regex ({exc})")
+
+
+def _check_merge_rules(prefix, table, policy, policy_name, review, errors):
+    """The rules tying a policy to the review and to unattended_classes, for [ship] or one person.
+
+    policy is the one that applies to the table: a person's own, else the repository's. Only a
+    policy the table itself sets is checked against the review, so an inherited one is named once.
+    """
+    if review == "none" and table.get("policy") in ("trivial-merge", "merge-on-green"):
+        errors.append(f"ship.review = \"none\" forbids {prefix}.policy = \"{table['policy']}\" (no independent review, no unattended merge)")
+    if isinstance(table.get("unattended_classes"), list):
+        if policy != "merge-on-green":
+            errors.append(f"{prefix}.unattended_classes: only allowed with {policy_name} = \"merge-on-green\"")
+        for cls in table["unattended_classes"]:
+            if cls not in UNATTENDED_CLASSES:
+                errors.append(f"{prefix}.unattended_classes: {cls!r} must be one of {', '.join(UNATTENDED_CLASSES)}")
+
+
+def _check_people(ship, errors):
+    """[[ship.person]] entries: a required login unique without regard to case, and at least one
+    of the two keys an entry stands in for, each under the rules of its [ship] key."""
+    if "person" not in ship:
+        return
+    people = ship["person"]
+    if not isinstance(people, list) or not all(isinstance(p, dict) for p in people):
+        errors.append("ship.person: must be an array of tables ([[ship.person]])")
+        return
+    seen = {}
+    for i, person in enumerate(people):
+        name = f"ship.person.{i}"
+        _check_table(name, person, PERSON_SCHEMA, errors)
+        login = person.get("login")
+        if "login" not in person:
+            errors.append(f"{name}.login: required")
+        elif isinstance(login, str) and not login.strip():
+            errors.append(f"{name}.login: required and non-empty")
+        elif isinstance(login, str) and login != login.strip():
+            errors.append(f"{name}.login: {login!r} has leading or trailing whitespace, which no gh login has")
+        elif isinstance(login, str) and login.lower() in seen:
+            errors.append(f"{name}.login: {login!r} is already ship.person.{seen[login.lower()]}'s (logins compare without regard to case)")
+        elif isinstance(login, str):
+            seen[login.lower()] = i
+        if "policy" not in person and "unattended_classes" not in person:
+            errors.append(f"{name}: sets neither policy nor unattended_classes")
+        if "policy" in person and person["policy"] not in POLICIES:
+            errors.append(f"{name}.policy: must be one of {', '.join(POLICIES)}")
+        _check_merge_rules(name, person, person.get("policy", ship.get("policy")),
+                           f"{name}.policy (else ship.policy)", ship.get("review"), errors)
 
 
 def validate(data):
@@ -259,7 +311,7 @@ def validate(data):
         elif not isinstance(data[name], dict):
             errors.append(f"{name}: must be a table")
         else:
-            _check_table(name, data[name], spec, errors)
+            _check_table(name, {k: v for k, v in data[name].items() if (name, k) != ("ship", "person")}, spec, errors)
     for dotted in REQUIRED:
         try:
             if not lookup(data, dotted) and dotted != "schema":
@@ -329,14 +381,8 @@ def validate(data):
         if isinstance(ship.get(key), str) and ship[key] != want:
             errors.append(f'ship.landing = "{landing}" and ship.{key} = "{ship[key]}" disagree: '
                           f'that landing means {key} = "{want}"')
-    if ship.get("review") == "none" and ship.get("policy") in ("trivial-merge", "merge-on-green"):
-        errors.append(f"ship.review = \"none\" forbids ship.policy = \"{ship['policy']}\" (no independent review, no unattended merge)")
-    if isinstance(ship.get("unattended_classes"), list):
-        if ship.get("policy") != "merge-on-green":
-            errors.append("ship.unattended_classes: only allowed with ship.policy = \"merge-on-green\"")
-        for cls in ship["unattended_classes"]:
-            if cls not in UNATTENDED_CLASSES:
-                errors.append(f"ship.unattended_classes: {cls!r} must be one of {', '.join(UNATTENDED_CLASSES)}")
+    _check_merge_rules("ship", ship, ship.get("policy"), "ship.policy", ship.get("review"), errors)
+    _check_people(ship, errors)
     if ship.get("review") == "copilot" and not ship.get("copilot_bot_id"):
         errors.append("ship.copilot_bot_id: required when ship.review = \"copilot\"")
     if ship.get("review") == "external-audit" and not ship.get("external_cli"):
@@ -496,7 +542,8 @@ def push_filters(text):
     if at is None:
         return {}
     indent, filters, key = len(lines[at]) - len(lines[at].lstrip()), {}, None
-    unquote = lambda s: s.strip().strip("'\"")
+    def unquote(s):
+        return s.strip().strip("'\"")
     for line in lines[at + 1:]:
         if line.strip() and len(line) - len(line.lstrip()) <= indent:
             break
@@ -779,7 +826,8 @@ ruling_approvers = ["someone"]
 
     valid = tomllib.loads(base + "\n[overlays]\nimplement = []\nland = []\n")
     assert validate(valid) == [], validate(valid)
-    with_prefix = lambda line: tomllib.loads(base.replace('default_branch = "main"\n', f'default_branch = "main"\n{line}\n'))
+    def with_prefix(line):
+        return tomllib.loads(base.replace('default_branch = "main"\n', f'default_branch = "main"\n{line}\n'))
     assert validate(with_prefix('branch_prefix = "feature"')) == []
     for line in ('branch_prefix = ""', 'branch_prefix = "a/b"', 'branch_prefix = "a b"', 'branch_prefix = "a..b"',
                  'branch_prefix = "release"\nprotected_branch_prefixes = ["release/"]',
@@ -797,7 +845,8 @@ ruling_approvers = ["someone"]
     assert lookup(valid, "gate.1.run") == "make core-test"
 
     # Validation authority belongs to the repository, not the developer backend.
-    validation_binding = lambda lines: tomllib.loads(base.replace("[ship]\n", "[ship]\n" + lines + "\n"))
+    def validation_binding(lines):
+        return tomllib.loads(base.replace("[ship]\n", "[ship]\n" + lines + "\n"))
     assert validate(validation_binding('validation = "local"')) == []
     ci_validation = validation_binding('validation = "ci"\nvalidation_checks = ["gates (windows)", "gates (linux)"]')
     assert validate(ci_validation) == [], validate(ci_validation)
@@ -1018,7 +1067,8 @@ report_only = ["S9"]
     assert validate(bad_regex) and "not a valid regex" in validate(bad_regex)[0], validate(bad_regex)
     bad_planning = tomllib.loads(base + '\n[docs]\nplanning_paths = ["["]\n')
     assert validate(bad_planning) and "not a valid regex" in validate(bad_planning)[0], validate(bad_planning)
-    notes = lambda pats: validate(tomllib.loads(base.replace('default_branch = "main"', f'default_branch = "main"\nrelease_notes = {pats}')))
+    def notes(pats):
+        return validate(tomllib.loads(base.replace('default_branch = "main"', f'default_branch = "main"\nrelease_notes = {pats}')))
     assert notes('["^changes/"]') == [], notes('["^changes/"]')
     assert notes('["^changes/", "("]') and notes('["^changes/", "("]')[0].startswith("repo.release_notes: '(' is not a valid regex"), notes('["("]')
     empty_key = tomllib.loads(base + '\n[docs.banned]\n"" = "reason"\n')
@@ -1055,6 +1105,38 @@ report_only = ["S9"]
     assert errs == ["ship.unattended_classes: 'trivial' must be one of express, standard, full"], errs
     errs = validate(tomllib.loads(base.replace("[ship]\n", '[ship]\nunattended_classes = ["express"]\n')))
     assert errs == ['ship.unattended_classes: only allowed with ship.policy = "merge-on-green"'], errs
+
+    # [[ship.person]]: a login's own policy and unattended_classes, each under its [ship] key's
+    # rules, the policy an entry leaves out being the repository's.
+    def people(*entries, text=base):
+        return validate(tomllib.loads(text + "".join(f"[[ship.person]]\n{e}\n" for e in entries)))
+    assert people('login = "a"\npolicy = "merge-on-green"\nunattended_classes = ["full"]',
+                  'login = "b"\npolicy = "trivial-merge"') == []
+    assert people('login = "a"\nunattended_classes = ["express"]', text=green) == []
+    errs = people('login = "Ann"\npolicy = "trivial-merge"', 'login = "aNN"\npolicy = "stop-at-pr"')
+    assert errs == ["ship.person.1.login: 'aNN' is already ship.person.0's (logins compare without regard to case)"], errs
+    errs = people('login = "a"\npolicy = "stop-at-pr"\n[ship.person.models]\nbuilder = "opus"')
+    assert errs == ["unknown key: ship.person.0.models"], errs
+    errs = people('login = "a"\npolicy = "merge-on-red"')
+    assert errs == [f"ship.person.0.policy: must be one of {', '.join(POLICIES)}"], errs
+    errs = people('policy = "stop-at-pr"')
+    assert errs == ["ship.person.0.login: required"], errs
+    errs = people('login = " "\npolicy = "stop-at-pr"')
+    assert errs == ["ship.person.0.login: required and non-empty"], errs
+    errs = people('login = "a"\npolicy = "stop-at-pr"', 'login = " a"\npolicy = "stop-at-pr"')
+    assert errs == ["ship.person.1.login: ' a' has leading or trailing whitespace, which no gh login has"], errs
+    errs = people('login = "a"')
+    assert errs == ["ship.person.0: sets neither policy nor unattended_classes"], errs
+    errs = people('login = "a"\nunattended_classes = ["express"]')
+    assert errs == ['ship.person.0.unattended_classes: only allowed with ship.person.0.policy (else ship.policy) = "merge-on-green"'], errs
+    errs = people('login = "a"\npolicy = "merge-on-green"\nunattended_classes = ["trivial"]')
+    assert errs == ["ship.person.0.unattended_classes: 'trivial' must be one of express, standard, full"], errs
+    # an entry stopping at the PR under a merge-on-green repository inherits its classes, inert there
+    assert people('login = "a"\npolicy = "stop-at-pr"', text=green.replace("[ship]\n", '[ship]\nunattended_classes = ["full"]\n')) == []
+    errs = people('login = "a"\npolicy = "merge-on-green"', text=base.replace('review = "adversarial-review"', 'review = "none"'))
+    assert errs == ['ship.review = "none" forbids ship.person.0.policy = "merge-on-green" (no independent review, no unattended merge)'], errs
+    errs = validate(tomllib.loads(base.replace("[ship]\n", '[ship]\nperson = ["a"]\n')))
+    assert errs == ["ship.person: must be an array of tables ([[ship.person]])"], errs
 
     # sync and merge are independent: a repo may rebase to sync and still squash to land. Each is
     # optional, and absent means today's behaviour, so a binding written before them keeps working.

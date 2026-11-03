@@ -36,6 +36,20 @@ def needs_fix(rec):
     return not rec.get("ruled") and any(sev(f) in ("H", "M") and not (verifying and outside(f)) for f in rec["findings"])
 
 
+REPO_POLICY = "the repository's [ship]"
+
+
+def ship_policy(env):
+    """(policy, unattended_classes, whose): the viewer's [[ship.person]] entry over [ship], key by key."""
+    policy, classes = env.lookup("ship.policy"), env.lookup("ship.unattended_classes")
+    people = env.lookup("ship.person") or []
+    login = env.viewer() if people else None  # no gh call for a binding without entries
+    entry = next((p for p in people if str(p.get("login", "")).lower() == login), None)
+    if entry is None:
+        return policy, classes, REPO_POLICY
+    return entry.get("policy", policy), entry.get("unattended_classes", classes), f"{login}'s [[ship.person]] entry"
+
+
 def may_merge(policy, unattended_classes, issue_labels, flow):
     """Whether the effective policy lets the driver merge: the binding's value, narrowed by the issue."""
     if policy == "merge-on-green":
@@ -139,7 +153,7 @@ def pending_follow_ups(body):
 def filed_follow_ups(body):
     """The entries a `**Follow-ups filed**` comment lists as filed: its bullets before any `Not filed` line."""
     head = body.split("\nNot filed", 1)[0]
-    return [l[2:] for l in head.splitlines() if l.startswith("- ")]
+    return [line[2:] for line in head.splitlines() if line.startswith("- ")]
 
 
 def review_line(records, reviewer_on):
@@ -185,7 +199,7 @@ def render_body(rec, review):
             out.append(f"- `{m.get('path')}`" + ("" if m.get("edit") else ": the node gave no edit; make it by hand"))
             if m.get("edit"):
                 fence = "`" * max(3, max((len(x) for x in re.findall(r"`+", str(m["edit"]))), default=0) + 1)
-                out += ["", "  " + fence, *["  " + l for l in str(m["edit"]).splitlines()], "  " + fence, ""]
+                out += ["", "  " + fence, *["  " + line for line in str(m["edit"]).splitlines()], "  " + fence, ""]
     out += ["## Summary", rec.get("summary", ""), "## Changes", *[f"- {x}" for x in c],
             "<details><summary>Verification</summary>", ""]
     out += [f"- Gates at {g['sha'][:7]}: `{g['cmd']}` exit {g['exit']}" for g in gates]
@@ -222,7 +236,7 @@ def failure_extract(log, cap=200, tail=60):
     lines it cuts from the middle; a fixed tail misses a failure that a long SKIPPED list follows. A line that starts with
     `FAIL:`, a fixture suite's verdict, is added back after the cut, so the cut never drops it."""
     lines = log.strip().splitlines()
-    text = [LOG_PREFIX.sub("", l) for l in lines]
+    text = [LOG_PREFIX.sub("", line) for line in lines]
     keep, inside, pytest = [], False, False
     for i, t in enumerate(text):
         if m := PYTEST_SECTION.match(t):
@@ -249,13 +263,14 @@ def failure_extract(log, cap=200, tail=60):
 def body_sections(body):
     """{`## ` heading: its section's text} of a pull request body, the record comment cut and line ends as git writes them."""
     parts = re.split(r"(?m)^(?=## )", RECORD.sub("", (body or "").replace("\r\n", "\n")))
-    return {p.split("\n", 1)[0]: "\n".join(l.rstrip() for l in p.strip().splitlines()) for p in parts if p.startswith("## ")}
+    return {p.split("\n", 1)[0]: "\n".join(line.rstrip() for line in p.strip().splitlines()) for p in parts if p.startswith("## ")}
 
 
 def drawn_body(rec, review, body=""):
     """render_body, keeping each section of `body` a person edited since the driver drew it: the record holds a digest of
     each section as drawn, and a section that no longer matches its digest is theirs, kept as they left it."""
-    digest = lambda t: hashlib.sha256(t.encode("utf-8")).hexdigest()[:16]
+    def digest(t):
+        return hashlib.sha256(t.encode("utf-8")).hexdigest()[:16]
     drawn = rec.get("drawn") or {}
     kept = {h: t for h, t in body_sections(body).items() if h in drawn and digest(t) != drawn[h]}
     rec["drawn"] = {}
@@ -269,7 +284,7 @@ def drawn_body(rec, review, body=""):
 
 
 def without_build_lines(text):
-    return "\n".join(l for l in text.splitlines() if not l.startswith(BUILD_LINE)).strip()
+    return "\n".join(line for line in text.splitlines() if not line.startswith(BUILD_LINE)).strip()
 
 
 def read_record(body):
@@ -370,7 +385,7 @@ def restamped(e, body, findings):
             for frag in re.findall(r'"((?:[^"\\]|\\.)*)"', line):
                 frag = frag.replace('\\"', '"')
                 if 12 <= len(frag) <= 120:
-                    hits = {l[len(ref) + 1:] for l in e.git("grep", "-F", "-l", "-z", "-e", frag.strip("`"), ref, check=False).out.split("\0") if l.startswith(ref + ":")}
+                    hits = {entry[len(ref) + 1:] for entry in e.git("grep", "-F", "-l", "-z", "-e", frag.strip("`"), ref, check=False).out.split("\0") if entry.startswith(ref + ":")}
                     files = hits if files is None else files & hits
             if files and len(files) == 1 and (new := next(iter(files))) != base and Path(new).suffix == Path(base).suffix:
                 line, moved = m.group(1) + new + span[len(base):] + m.group(3), moved + 1

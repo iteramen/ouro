@@ -385,7 +385,8 @@ def plan(repo, base, head):
             raise Unproved("redirected Git inputs are unproved")
         repo = Path(repo).resolve(strict=True)
         deadline = time.monotonic() + 60
-        read = lambda *args, **kw: _git(repo, *args, deadline=deadline, **kw)
+        def read(*args, **kw):
+            return _git(repo, *args, deadline=deadline, **kw)
         _, raw = read("rev-parse", "--show-toplevel")
         if Path(_text(raw).strip()).resolve() != repo:
             raise Unproved("repo must be the effective checkout root")

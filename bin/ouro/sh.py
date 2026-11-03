@@ -22,6 +22,11 @@ BIN = PLUGIN / "bin"
 NO_ANCHOR = "no parseable anchor in the body (a backticked repo path or a quoted code fragment): the shape gate refuses a promotion without one"
 
 
+def tail(text, lines=8):
+    """The last `lines` lines of `text`, at most 800 characters: the excerpt an error message quotes."""
+    return "\n".join(str(text).strip().splitlines()[-lines:])[-800:]
+
+
 
 
 class Refused(Exception):

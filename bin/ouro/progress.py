@@ -78,8 +78,8 @@ class Progress:
             "outcome": "running",
         }
 
-    def revise(self, *, part=_UNSET, lane=None, pr=_UNSET, gates_total=_UNSET):
-        """Record a fact the log line does not carry. Never raises."""
+    def revise(self, *, part=_UNSET, lane=None, pr=_UNSET, gates_total=_UNSET, gates_add=0):
+        """Record a fact the log line does not carry; `gates_add` widens the pass's total in place. Never raises."""
         try:
             if part is not _UNSET:
                 self.data["part"] = part
@@ -92,6 +92,9 @@ class Progress:
                 gates["total"] = None if gates_total is None else int(gates_total)
                 gates["done"] = 0
                 gates["failed"] = 0
+            if gates_add:
+                gates = self.data["gates"]
+                gates["total"] = (gates["total"] or 0) + int(gates_add)
             self.data["updated"] = _stamp()
             self._write()
         except Exception as ex:
@@ -131,7 +134,7 @@ class Progress:
             else:
                 self.data["step"] = tag
                 if tag == 2 and matched.group(2):
-                    self.data["node"] = "direct"
+                    self.data["node"] = _NODES[2] if any(phrase in rest for phrase in _PR_LANE) else "direct"
                 elif tag == 4:
                     self.data["node"] = "CHECKPOINT" if ("CHECKPOINT" in rest or rest.startswith("finding posted")) else "BUILD"
                 else:

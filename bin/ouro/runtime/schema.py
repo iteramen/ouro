@@ -10,17 +10,17 @@ def arr(items):
     return {"type": "array", "items": items}
 
 
-S, I = {"type": "string"}, {"type": "integer"}
+S, INTEGER = {"type": "string"}, {"type": "integer"}
 STOP = {"anyOf": [obj(reason=S, question=S), {"type": "null"}]}
 SCHEMAS = {
     "TRIAGE": obj(verdict={"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "SPLIT", "STALE"]},
                   size=S, flow=S, deliverable=S, doc_impact=S, manual=arr(S), labels=arr(S), comment=S, question=S),
-    "BUILD": obj(subject=S, body=S, claims=arr(obj(path=S, claim=S, verified_by=S)), gates_run=arr(obj(cmd=S, exit=I)),
+    "BUILD": obj(subject=S, body=S, claims=arr(obj(path=S, claim=S, verified_by=S)), gates_run=arr(obj(cmd=S, exit=INTEGER)),
                  validation_pending=arr(obj(cmd=S, reason=S)), residue=arr(S), manual=arr(obj(path=S, edit=S)),
-                 door=S, blast_radius=S, stop=STOP, replies=arr(obj(comment_id=I, reply=S))),
+                 door=S, blast_radius=S, stop=STOP, replies=arr(obj(comment_id=INTEGER, reply=S))),
     "REVIEW": obj(verdict={"type": "string", "enum": ["CLEAN", "FINDINGS"]},
-                  findings=arr(obj(severity={"type": "string", "enum": ["H", "M", "L"]}, file=S, line=I, claim=S, evidence=S, scope=S)),
-                  false_record_sentences=I, files_read=arr(S), stop=STOP),
+                  findings=arr(obj(severity={"type": "string", "enum": ["H", "M", "L"]}, file=S, line=INTEGER, claim=S, evidence=S, scope=S)),
+                  false_record_sentences=INTEGER, files_read=arr(S), stop=STOP),
     "CHECKPOINT": obj(finding=S, stop=STOP),
     "FOLLOWUP": obj(issues=arr(obj(title=S, body=S, labels=arr(S)))),
 }
