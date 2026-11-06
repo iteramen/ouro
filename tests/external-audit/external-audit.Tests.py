@@ -84,7 +84,10 @@ def check(what, cond):
 # row that drives it must have the stub itself write that file, at whatever path the driver
 # happened to pick, the way `codex exec -o <FILE>` would; STUB_EXIT is the exit code (default 0).
 # STUB_STDERR, if set, is written to the stub's stderr, and STUB_STDERR_FILL, if set, is a count of
-# filler lines written after it (an environment variable cannot carry a large stderr). The driver
+# filler lines written after it (an environment variable cannot carry a large stderr). STUB_HOOK_TOOLS,
+# if set, runs the allow-list hook command from the qwen system settings once per tool it names.
+# STUB_REQUIRE_FILE_STDOUT, if set, exits 9 unless stdout is a regular file; STUB_PARTIAL, if set, is
+# written to stdout and flushed before the sleep. The driver
 # reads the stub's exit code only when no verdict parses: a nonzero exit with no reply is what "the
 # CLI refused" looks like.
 STUB_IMPL_SOURCE = '''
@@ -98,7 +101,20 @@ with open(os.environ["STUB_RECORD_ARGV"], "w", encoding="utf-8") as f:
     modes = {p: os.stat(p).st_mode & 0o777 for p in (gh, os.path.dirname(gh), os.path.join(gh, "auth.json"))
              if os.path.exists(p)} if gh else None
     json.dump({"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(), "stdin": stdin_text, "env": env, "seeded": seeded,
-               "modes": modes, "home_files": os.listdir(env["HOME"]) if env["HOME"] and os.path.isdir(env["HOME"]) else None}, f)
+               "modes": modes, "home_files": os.listdir(env["HOME"]) if env["HOME"] and os.path.isdir(env["HOME"]) else None,
+               "environ": {k: v for k, v in os.environ.items() if k.upper().startswith(("QWEN_", "EA_", "OPENAI_"))}}, f)
+if os.environ.get("STUB_REQUIRE_FILE_STDOUT"):
+    import stat
+    if not stat.S_ISREG(os.fstat(1).st_mode):
+        sys.stderr.write("stub: stdout is not a regular file\\n")
+        sys.exit(9)
+hook_tools = os.environ.get("STUB_HOOK_TOOLS")
+if hook_tools is not None:
+    import shlex, subprocess
+    with open(os.environ["QWEN_CODE_SYSTEM_SETTINGS_PATH"], encoding="utf-8") as f:
+        command = json.load(f)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    for tool in filter(None, hook_tools.split(",")):
+        subprocess.run(shlex.split(command), input=json.dumps({"tool_name": tool, "tool_input": {}}), text=True, capture_output=True)
 fork_record = os.environ.get("STUB_FORK_CHILD_RECORD")
 if fork_record:
     child_pid = os.fork()
@@ -108,6 +124,10 @@ if fork_record:
         os._exit(0)
     with open(fork_record, "w", encoding="utf-8") as f:
         f.write(str(child_pid))
+partial = os.environ.get("STUB_PARTIAL")
+if partial:
+    sys.stdout.write(partial)
+    sys.stdout.flush()
 sleep_s = os.environ.get("STUB_SLEEP")
 if sleep_s:
     import time
@@ -195,7 +215,7 @@ def make_stub(name="grok", reply_text=None, exit_code=0, write_file=None, sleep_
 # POSIX, so a differently-cased PATH entry naming the same directory still matches. This is the
 # fleet's own guard, not the driver's: the driver trusts whatever PATH it is given, the way
 # shutil.which does.
-_STUBBED_CLIS = ("grok", "claude", "codex", "copilot")
+_STUBBED_CLIS = ("grok", "claude", "codex", "copilot", "qwen")
 # Every entry that holds one is dropped, not only the first a lookup finds: a second install
 # further down PATH would otherwise stay reachable.
 SAFE_PATH = os.pathsep.join(
@@ -207,7 +227,7 @@ for _name in _STUBBED_CLIS:
           shutil.which(_name, path=SAFE_PATH) is None)
 
 
-def run_driver(args, stub_dir=None, env_extra=None, cwd=None):
+def run_driver(args, stub_dir=None, env_extra=None, cwd=None, driver=DRIVER):
     """python3 external-audit.py <args>, with stub_dir (if given) ahead of a PATH that never
     resolves a real external CLI. TEMP/TMP/TMPDIR point at this suite's own scratch parent, not
     the real machine TEMP, so a driver run under this suite never leaves an artifact folder
@@ -218,7 +238,7 @@ def run_driver(args, stub_dir=None, env_extra=None, cwd=None):
     env["TEMP"] = env["TMP"] = env["TMPDIR"] = str(PARENT_TMP)
     if env_extra:
         env.update(env_extra)
-    return subprocess.run([sys.executable, str(DRIVER), *args], capture_output=True, text=True,
+    return subprocess.run([sys.executable, str(driver), *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", cwd=cwd, env=env, timeout=60)
 
 
@@ -868,7 +888,7 @@ r = run_driver(BASE_ARGS[:-2] + ["--cli", "bogus-cli"], stub_dir=None, cwd=REPO)
 check("an unknown --cli is refused", r.returncode == 1)
 m = re.search(r"adapters: ([^\r\n]*)", r.stderr)
 check("and the refusal lists exactly the shipped adapter set",
-      bool(m) and {a.strip() for a in m.group(1).split(",")} == {"grok", "claude", "codex", "copilot"})
+      bool(m) and {a.strip() for a in m.group(1).split(",")} == {"grok", "claude", "codex", "copilot", "qwen"})
 
 # --- a missing CLI exits 1 -------------------------------------------------------------------
 empty_path = pathlib.Path(tempfile.mkdtemp(prefix="empty-path-", dir=PARENT_TMP))
@@ -1380,6 +1400,135 @@ rc, ends = drawn_end_lines("aaaa,bbbb", "x zzzz y")
 check("control: with no collision the first draw is kept", rc == 0 and len(ends) == 2 and all(e.endswith(" aaaa ===") for e in ends))
 
 
+# --- QwenAdapter: stdin transport, the isolated environment, the verdict in the last result event,
+# denied calls as warnings, and the allow-list hook's log as the read-only boundary. The envelopes
+# are Qwen Code 0.26.6's `--output-format json` event array, trimmed as in tests/runtime/qwen_tests.py;
+# the stub runs the real hook command from the settings env() writes. --------------------------
+QWEN_BASE_ARGS = ["--claims", str(CLAIMS), "--goal", "prove the stub CLI is driven correctly", "--cli", "qwen"]
+QWEN_ENDPOINT = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "http://127.0.0.1:9/v1", "OPENAI_MODEL": "m"}
+
+
+def qwen_events(text, denied=(), is_error=False):
+    events = [{"type": "system", "subtype": "init", "session_id": "s-1", "qwen_code_version": "0.26.6"},
+              {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "c0", "name": "read_file", "input": {"file_path": "external-audit.py"}}]}},
+              {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "c0", "is_error": False, "content": "hello"}]}}]
+    for i, tool in enumerate(denied, 1):
+        events += [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": f"c{i}", "name": tool, "input": {"command": "touch x"}}]}},
+                   {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": f"c{i}", "is_error": True,
+                                                             "content": f"Qwen Code requires permission to use \"{tool}\", but that permission was declined."}]}}]
+    events += [{"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}},
+               {"type": "result", "subtype": "error_during_execution" if is_error else "success", "session_id": "s-1", "is_error": is_error,
+                "num_turns": 2, "result": text, "usage": {"input_tokens": 66, "output_tokens": 42},
+                "permission_denials": [{"tool_name": tool, "tool_input": {"command": "touch x"}} for tool in denied]}]
+    return json.dumps(events)
+
+
+def run_qwen(reply, hook_tools="read_file", extra=None, args=QWEN_BASE_ARGS, driver=DRIVER):
+    stub_dir, record, env_extra = make_stub(name="qwen", reply_text=reply, record_stdin=True)
+    env_extra.update(QWEN_ENDPOINT, STUB_HOOK_TOOLS=hook_tools, **(extra or {}))
+    return run_driver(args, stub_dir, env_extra, cwd=REPO, driver=driver), record
+
+
+def session_dir_of(stdout_text):
+    m = re.search(r"^external-audit: session \S+ round \d+ -> (.+)$", stdout_text, re.M)
+    return pathlib.Path(m.group(1).strip()).parent if m else None
+
+
+QWEN_APPROVE = qwen_events(CLAUDE_INNER_APPROVE)
+# A copy of the driver alone, as bin/Vendor-Ouro.ps1 vendors it: no ouro package beside it.
+LONE = pathlib.Path(tempfile.mkdtemp(prefix="external-audit-lone-", dir=PARENT_TMP)) / "external-audit.py"
+shutil.copyfile(DRIVER, LONE)
+r, record = run_qwen(QWEN_APPROVE, driver=LONE)
+check("a copy of the driver with no ouro package beside it refuses qwen, naming the missing module, and starts nothing",
+      r.returncode == 1 and "qwen_isolation.py is missing" in r.stderr and not record.exists())
+stub_dir, record, env_extra = make_stub(reply_text=APPROVE_REPLY, exit_code=0)
+r = run_driver(BASE_ARGS, stub_dir, env_extra, cwd=REPO, driver=LONE)
+check("and that copy still runs grok", r.returncode == 0 and "VERDICT: APPROVE" in r.stdout and record.exists())
+
+if not (DRIVER.parent / "ouro" / "runtime" / "qwen_isolation.py").is_file():
+    print("  skip: no ouro package beside the driver (vendored layout), so the qwen rows past the refusal above cannot run")
+else:
+    inherited = {"QWEN_CODE_TRUSTED_FOLDERS_PATH": "/trusts/everything.json", "QWEN_SYSTEM_MD": "/x.md"}
+    r1q, record = run_qwen(QWEN_APPROVE, extra=inherited)
+    session1q, sdir = session_of(r1q.stdout), session_dir_of(r1q.stdout)
+    rec = read_record(record)
+    argv1q = rec.get("argv", [])
+    check("qwen round 1 exits 0 and parses the verdict from the last result event's text",
+          r1q.returncode == 0 and "VERDICT: APPROVE" in r1q.stdout)
+    check("qwen round 1's argv is the headless shape with the driver's session id, and no --model for default",
+          session1q is not None and argv1q == ["--output-format", "json", "--approval-mode", "default",
+                                               "--auth-type", "openai", "--session-id", session1q])
+    check("the prompt arrives on stdin, not on argv",
+          "prove the stub CLI is driven correctly" in (rec.get("stdin") or "")
+          and not any("prove the stub CLI is driven correctly" in a for a in argv1q))
+    environ = rec.get("environ", {})
+    check("an inherited QWEN_CODE_TRUSTED_FOLDERS_PATH is replaced by the session's own trust file",
+          sdir is not None and environ.get("QWEN_CODE_TRUSTED_FOLDERS_PATH") == str(sdir / "trusted-folders.json"))
+    check("an env() None removes the variable from the CLI's environment: the inherited QWEN_SYSTEM_MD never reaches it",
+          rec != {} and "QWEN_SYSTEM_MD" not in environ)
+    check("the home and the system settings sit under the session directory, and the endpoint reaches the CLI as it was",
+          sdir is not None and rec.get("env", {}).get("HOME") == str(sdir / "home")
+          and environ.get("QWEN_CODE_SYSTEM_SETTINGS_PATH") == str(sdir / "system.json")
+          and all(environ.get(k) == v for k, v in QWEN_ENDPOINT.items()))
+
+    r2q, record = run_qwen(QWEN_APPROVE, args=QWEN_BASE_ARGS + ["--model", "qwen3-coder", "--resume", session1q or "missing", "--digest", str(DIGEST)])
+    check("qwen round 2 resumes the same session with --resume, the named model on argv, in the home round 1 left",
+          r2q.returncode == 0 and read_argv(record)[-4:] == ["--resume", session1q, "--model", "qwen3-coder"])
+    check("neither round turns chat recording off: --resume reads the recording round 1 left",
+          argv1q and read_argv(record) and "--chat-recording" not in argv1q + read_argv(record))
+    r2n, _ = run_qwen(QWEN_APPROVE, hook_tools="", args=QWEN_BASE_ARGS + ["--resume", session1q or "missing", "--digest", str(DIGEST)])
+    check("an earlier round's hook grants do not carry into the next round", r2n.returncode == 1 and "without the allow-list hook's grant" in r2n.stderr)
+
+    r, _ = run_qwen(qwen_events(CLAUDE_INNER_APPROVE, denied=("run_shell_command", "write_file")))
+    warnings = [ln for ln in r.stderr.splitlines() if ln.startswith("external-audit: WARNING - qwen denied ")]
+    check("each denied call is one WARNING line on stderr, and the verdict is still parsed",
+          r.returncode == 0 and "VERDICT: APPROVE" in r.stdout and len(warnings) == 2
+          and "run_shell_command" in warnings[0] and "write_file" in warnings[1])
+
+    two_results = json.loads(QWEN_APPROVE)
+    two_results[-2:-2] = json.loads(qwen_events(REVISE_REPLY))[-2:]
+    r, _ = run_qwen(json.dumps(two_results))
+    check("of two result events, the verdict is the last one's APPROVE, not the earlier REVISE",
+          r.returncode == 0 and "VERDICT: APPROVE" in r.stdout and "VERDICT: REVISE" not in r.stdout)
+
+    for hook_tools in ("", "grep_search"):
+        r, _ = run_qwen(QWEN_APPROVE, hook_tools=hook_tools)
+        out = session_dir_of(r.stdout)
+        check(f"a read_file that ran without the hook's grant (hook saw {hook_tools or 'nothing'!r}) yields no verdict, and the exit says so",
+              r.returncode == 1 and "qwen ran read_file without the allow-list hook's grant" in r.stderr
+              and "VERDICT" not in r.stdout and out is not None and not any(out.glob("round-*/verdict.json")))
+
+    big = json.loads(QWEN_APPROVE)
+    big[2]["message"]["content"][0]["content"] = "x" * 210_000
+    big = json.dumps(big)
+    r, _ = run_qwen(big, extra={"STUB_REQUIRE_FILE_STDOUT": "1"})
+    check(f"a qwen whose stdout must be a regular file, writing a {len(big)}-byte event array, yields that verdict",
+          len(big) > 200_000 and r.returncode == 0 and "VERDICT: APPROVE" in r.stdout)
+    r, _ = run_qwen(QWEN_APPROVE, args=QWEN_BASE_ARGS + ["--timeout", "2"],
+                    extra={"STUB_REQUIRE_FILE_STDOUT": "1", "STUB_PARTIAL": "[{\"type\": \"system\"", "STUB_SLEEP": "30"})
+    m = re.search(r"timed out after 2s - partial narration in (.+)$", r.stderr, re.M)
+    check("a qwen that times out leaves its partial output in stdout.txt",
+          r.returncode == 1 and bool(m) and pathlib.Path(m.group(1)).name == "stdout.txt"
+          and pathlib.Path(m.group(1)).read_text(encoding="utf-8") == "[{\"type\": \"system\"")
+
+    r, _ = run_qwen(qwen_events(CLAUDE_INNER_APPROVE, is_error=True))
+    check("an error result yields no verdict even when its text holds one", r.returncode == 1 and "VERDICT" not in r.stdout)
+    r, record = run_qwen(QWEN_APPROVE, extra={"OPENAI_API_KEY": ""})
+    check("an unset OPENAI_API_KEY is refused before qwen starts, naming it",
+          r.returncode == 1 and "set OPENAI_API_KEY in the launch environment" in r.stderr and not record.exists())
+    code, _ = dry_argv("qwen", "--effort", "max")
+    check("qwen has no effort route: --effort max is refused", code == 1)
+
+for cli in ("grok", "claude", "copilot"):
+    stub_dir, record, env_extra = make_stub(name=cli, reply_text=claude_envelope(CLAUDE_INNER_APPROVE) if cli == "claude" else APPROVE_REPLY,
+                                            exit_code=0, record_stdin=cli != "grok")
+    env_extra.update(EA_INHERITED="kept", QWEN_SYSTEM_MD="/x.md")
+    run_driver(BASE_ARGS[:-1] + [cli], stub_dir, env_extra, cwd=REPO)
+    check(f"the {cli} adapter's child still inherits the driver's environment whole, QWEN_* included",
+          read_record(record).get("environ", {}).get("EA_INHERITED") == "kept"
+          and read_record(record).get("environ", {}).get("QWEN_SYSTEM_MD") == "/x.md")
+
+
 # --- in process: the cmd.exe refusal's set, git run by its resolved path and refused through a
 # .cmd shim, and the grok home's two refusals (each reachable here without Windows or a second
 # account, by standing in for what decides it) ----------------------------------------------
@@ -1457,6 +1606,11 @@ if os.name != "nt":
             os.environ["GROK_HOME"] = old_home
 else:
     print("  skip: the grok home's owner and mode refusals are POSIX-only, as env() applies them")
+grok_vars = ea.GrokAdapter().env(pathlib.Path(tempfile.mkdtemp(prefix="grok-env-", dir=PARENT_TMP)))
+check("the existing adapters' env() removes nothing: claude, codex and copilot lay nothing over the driver's environment, grok only its homes",
+      all(ea.ADAPTERS[n].env(PARENT_TMP) == {} for n in ("claude", "codex", "copilot"))
+      and {k for k in grok_vars if k not in ("HOMEDRIVE", "HOMEPATH")} == {"HOME", "USERPROFILE", "GROK_HOME"}
+      and all(isinstance(v, str) for v in grok_vars.values()))
 
 
 print("all external-audit cases pass" if not failures else f"{failures} failure(s)")

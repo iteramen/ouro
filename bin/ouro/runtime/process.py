@@ -53,6 +53,30 @@ def worker_env(settings):
     return {config.credential_env: None} if config else {}
 
 
+PUBLISHING_CREDENTIALS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+                          "SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS")
+NO_IDENTITY_SSH = "ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=none"
+
+
+def probe_env(probe, gh_config, inherited=None):
+    """A PROBE node's launch overrides, {} for any other node: they point git and gh away from the stored
+    credentials a push or a gh call would use, and do not remove them; a command that drops an override undoes it.
+    `gh_config` is an empty directory private to the node. An empty credential.helper, read after every config file,
+    resets git's helper list, and an empty core.askPass stops git asking a configured askpass or SSH_ASKPASS; both
+    are appended after the `inherited` (default: this process's) GIT_CONFIG_COUNT entries, never over them."""
+    if not probe:
+        return {}
+    count = (os.environ if inherited is None else inherited).get("GIT_CONFIG_COUNT") or "0"
+    if not count.isdigit():
+        raise DriverError(f"GIT_CONFIG_COUNT is {count!r}, not a count; git refuses it too")
+    index = int(count)
+    return {**{key: None for key in PUBLISHING_CREDENTIALS},
+            f"GIT_CONFIG_KEY_{index}": "credential.helper", f"GIT_CONFIG_VALUE_{index}": "",
+            f"GIT_CONFIG_KEY_{index + 1}": "core.askPass", f"GIT_CONFIG_VALUE_{index + 1}": "",
+            "GIT_CONFIG_COUNT": str(index + 2), "GIT_TERMINAL_PROMPT": "0",
+            "GIT_SSH_COMMAND": NO_IDENTITY_SSH, "GH_CONFIG_DIR": str(gh_config)}
+
+
 def check_platform():
     """Caller validation needs a lifecycle boundary, independent of command environment."""
     if os.name == "nt":

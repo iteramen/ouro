@@ -109,7 +109,7 @@
     timeline of a PR, in a repository the owner names, that already carries a Copilot review.
 .PARAMETER ExternalCli
     ship.external_cli; required with -Review external-audit, as `ouro-binding.py check` requires
-    it. One of the adapters bin/external-audit.py ships: grok, claude, codex or copilot today.
+    it. One of the adapters bin/external-audit.py ships: grok, claude, codex, copilot or qwen today.
 .PARAMETER ExternalModel
     ship.external_model; optional, only with -Review external-audit. Default: default, meaning
     the CLI's own default model, and written into the new binding only when another value is
@@ -146,7 +146,7 @@ $Utf8 = [System.Text.UTF8Encoding]::new($false)
 # unlike -Review and -Landing, it has no default inside any such set -- it is optional, required
 # only under -Review external-audit -- and ValidateSet validates a parameter's default too, not
 # only a value the caller passed, which would refuse every run that left it out.
-$KnownExternalClis = @('grok', 'claude', 'codex', 'copilot')
+$KnownExternalClis = @('grok', 'claude', 'codex', 'copilot', 'qwen')
 
 # ValidateSet matches without case and binds the argument as typed, so each validated value is
 # lowered here, before anything reads it: the binding holds what `ouro-binding.py check` accepts.

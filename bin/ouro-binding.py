@@ -75,7 +75,7 @@ REVIEWS = ("copilot", "adversarial-review", "external-audit", "none")
 # ship.external_cli, required under REVIEWS' "external-audit" and allowed under any value: the
 # adapters bin/external-audit.py ships. One list, pinned equal to the installer's -ExternalCli
 # set and the driver's own ADAPTERS registry by a test, so the three cannot drift apart.
-EXTERNAL_CLIS = ("grok", "claude", "codex", "copilot")
+EXTERNAL_CLIS = ("grok", "claude", "codex", "copilot", "qwen")
 # Two separate choices: a repo may rebase to sync and still squash to land. First is the default.
 SYNCS = ("merge", "rebase")
 MERGES = ("squash", "merge")
@@ -134,7 +134,7 @@ SCHEMA = {
     "gate": {"run": str, "ci": str, "paths": list, "cheap": bool, "direct_code_check": bool},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
-             "external_effort": str, "test_first_for_bugs": bool, "direct": list,
+             "external_effort": str, "test_first_for_bugs": bool, "review_sandbox": bool, "direct": list,
              "unattended_classes": list, "validation": str, "validation_checks": list, "direct_max_lines": int, "direct_max_files": int},
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
@@ -1213,7 +1213,7 @@ report_only = ["S9"]
     # empty string is not "default", it is a typo.
     external = tomllib.loads(base.replace('review = "adversarial-review"', 'review = "external-audit"'))
     assert validate(external) == ["ship.external_cli: required when ship.review = \"external-audit\""], validate(external)
-    assert set(EXTERNAL_CLIS) == {"grok", "claude", "codex", "copilot"}, EXTERNAL_CLIS  # the shipped set; a further adapter widens this tuple, this assertion, and nothing else here
+    assert set(EXTERNAL_CLIS) == {"grok", "claude", "codex", "copilot", "qwen"}, EXTERNAL_CLIS  # the shipped set; a further adapter widens this tuple, this assertion, and nothing else here
     for cli in EXTERNAL_CLIS:
         good = tomllib.loads(base.replace('review = "adversarial-review"', f'review = "external-audit"\nexternal_cli = "{cli}"'))
         assert validate(good) == [], (cli, validate(good))
@@ -1240,6 +1240,13 @@ report_only = ["S9"]
     empty_effort = tomllib.loads(base.replace('review = "adversarial-review"',
         'review = "external-audit"\nexternal_cli = "grok"\nexternal_effort = ""'))
     assert validate(empty_effort) == ["ship.external_effort: must be a non-empty string"], validate(empty_effort)
+    # ship.review_sandbox is a boolean, absent by default; a string spelling of one is refused.
+    assert "review_sandbox" not in tomllib.loads(base)["ship"]
+    for flag in ("true", "false"):
+        sandboxed = tomllib.loads(base.replace("[ship]\n", f"[ship]\nreview_sandbox = {flag}\n"))
+        assert validate(sandboxed) == [], validate(sandboxed)
+    quoted = tomllib.loads(base.replace("[ship]\n", '[ship]\nreview_sandbox = "true"\n'))
+    assert validate(quoted) == ["ship.review_sandbox: expected bool"], validate(quoted)
 
     # ship.direct is optional and empty when absent; a docs glob passes, `**` and a glob naming a
     # gate's own script are refused with the glob and the probe it matched.

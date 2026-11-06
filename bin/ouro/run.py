@@ -11,12 +11,13 @@ import posixpath
 import re
 import shlex
 import shutil
+import stat
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import briefs, execution, node, progress, sh, validation, worktrees
+from . import briefs, developer, execution, node, progress, sh, validation, worktrees
 from .acceptance import (acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, declared_source,
                          empty_list)
 from .coordination import Claim
@@ -26,6 +27,7 @@ from .records import (
     outside, parse_direct, parse_parts, pending_follow_ups, pending_json, read_record, reader_findings,
     release_notes, restamped, review_comment, review_line, review_plan, review_records, sev, ship_policy, slugify,
     tighter, unchanged_findings, when, without_build_lines)
+from .runtime import SANDBOXED_PROBE, review_sandbox
 from .runtime.process import worker_env
 from .runtime.tools import caller_source_writable
 from .sh import DriverError, Refused, Stopped, argv_for, say, script
@@ -52,6 +54,24 @@ def watch_limit():
 
 def poll_seconds():
     return int(os.environ.get("OURO_POLL_SECONDS", "15"))
+
+
+def mixed(cfg):
+    """Whether `cfg` is developer settings in which some role selects a backend other than runtime.backend."""
+    return isinstance(cfg, developer.Settings) and cfg.mixed()
+
+
+def runtime_for(run, role=None):
+    """The settings `role` (BUILD's by default) executes with; the runtime itself while every role selects runtime.backend."""
+    cfg = run.env.runtime
+    return cfg.of(role or run.build_role()) if mixed(cfg) else cfg
+
+
+def refuse_unsandboxed(env):
+    """Under ship.review_sandbox = true, refuse before any tracker call a host that cannot confine REVIEW's PROBE commands."""
+    why = review_sandbox.refusal(env.runtime) if env.lookup("ship.review_sandbox") is True else None
+    if why:
+        raise Refused(why)
 
 
 def acceptance_source(run):
@@ -82,6 +102,7 @@ class Run:
         self.sync_tried = False
         self.synced = set()
         self.fresh = False
+        self.followup_only = False  # a merged pull request: this pass dispatches FOLLOWUP alone
         self.notes = []  # sentences the record carries: a tightening, a reader that was unavailable
         self.in_lane, self.reader_skipped = False, False
         self.execution_grants, self.skipped = None, None  # None: not read from history yet, no gate ran in this invocation
@@ -225,7 +246,8 @@ class Run:
         for rel in relatives:
             first, separator, rest = rel.partition("/")
             rel = first.lower() + separator + rest
-            if rel.startswith(prefixes):
+            # .qwen/ is refused only by the Qwen Code hook, so it is a manual step only when BUILD runs there
+            if rel.startswith(prefixes) or (rel.startswith(".qwen/") and runtime_for(self).backend == "qwen"):
                 return rel
         return None
 
@@ -305,6 +327,7 @@ class Run:
     # ---- transitions
     def go(self):
         e = self.env
+        refuse_unsandboxed(e)
         self.read_issue()
         coordination = self.claim.config and bool(os.environ.get(self.claim.config.credential_env)) and not e.dry
         if coordination and self.issue.get("state") == "CLOSED" and self.part_arg is None:
@@ -404,6 +427,7 @@ class Run:
                 if why:
                     say(f"stopped: {why}")
                     raise Stopped(3)
+            self.followup_only = bool(pr and pr["state"] == "MERGED" and not published)
             self.preflight()
             if not (pr and pr["state"] == "MERGED"):
                 self.check_spec_trust()  # the body the nodes read on this pass, not the one the fresh run checked
@@ -423,8 +447,26 @@ class Run:
 
     def preflight(self):
         """The node runtime's check, where a node can follow and before anything this run writes; a dry run asks no node."""
-        if not self.env.dry:
-            node.preflight(self.env.runtime)  # a runtime fault is a driver error, never a stop or a spent fix round
+        if not self.env.dry:  # a runtime fault is a driver error, never a stop or a spent fix round
+            cfg = self.env.runtime
+            if mixed(cfg):
+                node.preflight(cfg, needs=self.contracts(self.followup_only))
+            else:
+                node.preflight(cfg)
+
+    def contracts(self, merged=False):
+        """{role: the widest contract it can need} for the nodes this command can dispatch (None: full readiness).
+
+        A merged pull request dispatches FOLLOWUP alone; a checkpoint, CHECKPOINT with every command its brief grants."""
+        if merged:
+            return {"triager": node.READ}
+        if "checkpoint" in self.labels:
+            commands = self.build_commands()[1]
+            return {"checkpointer": node.Capabilities(commands=tuple(commands)) if commands else node.READ}
+        return {"triager": node.READ, self.build_role(): None, "reviewer": self.review_contract()}
+
+    def review_contract(self):
+        return node.PROBE if self.flow in ("standard", "full") else node.READ
 
     def branch_exists(self):
         e = self.env
@@ -469,7 +511,7 @@ class Run:
         copy = e.scratch / "checkpoint" if commands else None
         cwd = copy or e.main
         if copy:
-            node.worktree_readiness(e.runtime, e.main, copy, None, f"origin/{e.default}", scratch=e.scratch)
+            node.worktree_readiness(runtime_for(self, "checkpointer"), e.main, copy, None, f"origin/{e.default}", scratch=e.scratch)
             e.git("worktree", "add", "--detach", str(copy), f"origin/{e.default}")
         try:
             if copy:
@@ -477,7 +519,7 @@ class Run:
             prompt = briefs.render("checkpoint", number=self.n, title=self.title, body=self.body,
                                    commands=cmds if commands else "(none: read tools only)",
                                    anchors=briefs.anchors_block(cwd, self.body), contract=briefs.contract_sections(e, (3,)))
-            model = node.model(e, "builder", node.DEFAULT_BUILDER)
+            model = node.model(e, "checkpointer", node.DEFAULT_BUILDER)
             say(f"[4] CHECKPOINT node ({model})")
             tools = node.Capabilities(commands=tuple(commands))
             ans = node.run_node("CHECKPOINT", prompt, model, tools, str(cwd), node.TIMEOUTS["CHECKPOINT"], runtime=e.runtime)
@@ -564,7 +606,7 @@ class Run:
         e = self.env
         worktrees.use(e, self.tree.path)
         def readiness(base):
-            node.worktree_readiness(e.runtime, e.main, self.tree.path, self.branch, base)
+            node.worktree_readiness(runtime_for(self), e.main, self.tree.path, self.branch, base)
         if (self.tree.path / ".git").exists():
             readiness("HEAD")
             say(f"[3] worktree: {self.tree.path} exists")
@@ -951,7 +993,8 @@ class Run:
         tools = node.builder(gates)
         model = self.build_model()
         say(f"[4] BUILD node ({model})" + (" fix round" if findings else ""))
-        ans = node.run_node("BUILD", prompt, model, tools, str(self.tree.path), node.TIMEOUTS["BUILD"], runtime=e.runtime)
+        ans = node.run_node("BUILD", prompt, model, tools, str(self.tree.path), node.TIMEOUTS["BUILD"], runtime=e.runtime,
+                            role=self.build_role())
         observations = (node.USAGE[-1].get("tool_calls", []) if node.USAGE
                         and node.USAGE[-1].get("node") == "BUILD" else [])
         self.acceptance_answer(ans, "BUILD")
@@ -1006,10 +1049,16 @@ class Run:
         derived = derive_flow(self.tree.changed(), gate_files)
         new = tighter(self.flow, derived)
         if new != self.flow:
+            old = self.flow
             self.add_note(f"Flow tightened from {self.flow} to {new} by the diff's paths.")
             self.flow = new
             if new != "direct":
                 self._note(lane="pr")
+            if mixed(e.runtime):  # preflight planned REVIEW at the body's flow
+                try:
+                    node.plan(e.runtime, {"reviewer": self.review_contract()})
+                except DriverError as err:
+                    raise DriverError(f"the diff tightens Flow from {old} to {new}: {err}") from None
         if self.size == "S":
             numstat = self.tree.git("diff", "--numstat", "--no-renames", "-z", f"origin/{e.default}...HEAD").out
             lines = sum(int(a) + int(d) for a, d, _ in (x.split("\t", 2) for x in numstat.split("\0") if x) if a.isdigit() and d.isdigit())
@@ -1421,18 +1470,34 @@ class Run:
         tools, denied, cwd, copy = node.READ, None, self.tree.path, None
         if self.flow in ("standard", "full"):
             copy = e.scratch / f"review-{rnd}"
-            node.worktree_readiness(e.runtime, e.main, copy, None, head, scratch=e.scratch)
-            e.git("worktree", "add", "--detach", str(copy), head)
-            tools, denied, cwd = node.PROBE, None, copy
+            node.worktree_readiness(runtime_for(self, "reviewer"), e.main, copy, None, head, scratch=e.scratch)
+            copy.mkdir()  # never an existing directory: the finally below deletes what this created
+            tools = SANDBOXED_PROBE if e.lookup("ship.review_sandbox") is True else node.PROBE
+            denied, cwd = None, copy
         try:
             if copy:
+                self.review_clone(copy, head)
                 self.setup_tree(copy)
             return node.run_node("REVIEW", prompt, model, tools, str(cwd), node.TIMEOUTS["REVIEW"], denied, runtime=e.runtime)
         finally:
             if copy:
-                r = e.git("worktree", "remove", "--force", str(copy), check=False)
-                if r.code != 0:
-                    say(f"  the review worktree {copy} was not removed: {r.text}")
+                try:
+                    # Git writes its objects read-only, which Windows will not delete.
+                    shutil.rmtree(copy, onexc=lambda remove, path, _: (os.chmod(path, stat.S_IWRITE), remove(path)))
+                except OSError as ex:
+                    say(f"  the review copy {copy} was not removed: {ex}")
+
+    def review_clone(self, copy, head):
+        """The review copy as a standalone repository with no remote, so no push URL or credential config reaches it:
+        a linked worktree would share the main checkout's config, `origin` included. `origin/<default>` stays a ref."""
+        e = self.env
+        commit = e.git("rev-parse", "--verify", f"{head}^{{commit}}").out.strip()
+        base = e.git("rev-parse", "--verify", f"refs/remotes/origin/{e.default}^{{commit}}").out.strip()
+        e.git("init", "--quiet", "--template=", str(copy))
+        # A fetch copies objects into a pack; a local clone would hard-link them, which Codex PROBE admission refuses.
+        e.git("fetch", "--quiet", "--no-tags", str(e.main), commit, base, cwd=copy)
+        e.git("update-ref", f"refs/remotes/origin/{e.default}", base, cwd=copy)
+        e.git("checkout", "--quiet", "--detach", commit, cwd=copy)
 
     def reader_round(self, rnd, head, records):
         """One `bin/external-audit.py` round as a review answer; None, with the record saying so, when the reader is unavailable."""
@@ -1833,7 +1898,7 @@ class Run:
             prompt = briefs.render("followup", merge=sha, residue=bullets(residue), findings=bullets(found), contract=briefs.contract_sections(e, (3,)),
                                    labels=json.dumps({"area": areas, "type": types}))
             say("[11] FOLLOWUP node")
-            ans = node.run_node("FOLLOWUP", prompt, node.model(e, "builder", node.DEFAULT_BUILDER), node.READ, str(e.main), node.TIMEOUTS["FOLLOWUP"], runtime=e.runtime)
+            ans = node.run_node("FOLLOWUP", prompt, node.model(e, "triager", node.DEFAULT_BUILDER), node.READ, str(e.main), node.TIMEOUTS["FOLLOWUP"], runtime=e.runtime)
             items, filed = [it for it in ans.get("issues") or [] if str(it.get("title") or "").strip()], []
         dropped = False
         for i, it in enumerate(items):
@@ -2360,7 +2425,7 @@ class Run:
         e = self.env
         say("[2a] direct: the commit moves to a worktree and the run continues as express")
         target = e.main / ".claude" / "worktrees" / self.dirname
-        node.worktree_readiness(e.runtime, e.main, target, self.branch, "HEAD")
+        node.worktree_readiness(runtime_for(self), e.main, target, self.branch, "HEAD")
         base = e.git("rev-parse", f"origin/{e.default}").out.strip()
         if (not expected_head or e.git("rev-parse", "HEAD").out.strip() != expected_head
                 or e.git("status", "--porcelain", "-z", "--untracked-files=all").out):
@@ -2410,10 +2475,13 @@ class Run:
         return self.drive(None)
 
     # ---- dry run
+    def build_role(self):
+        return "builder_trivial" if "trivial" in self.labels else "builder"
+
     def build_model(self):
         """The BUILD node's model: builder_trivial (sonnet) on a trivial issue, else models.builder with the shared default."""
-        e = self.env
-        return node.model(e, "builder_trivial", "sonnet") if "trivial" in self.labels else node.model(e, "builder", node.DEFAULT_BUILDER)
+        role = self.build_role()
+        return node.model(self.env, role, "sonnet" if role == "builder_trivial" else node.DEFAULT_BUILDER)
 
     def plan(self, pr, branch_known):
         e = self.env

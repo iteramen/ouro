@@ -19,7 +19,9 @@ class Interface:
     worktree_readiness: Callable | str  # (settings, main, target, branch, base, *, scratch) or NOT_REQUIRED
     execute: Callable                   # (name, prompt, model, tools, cwd, timeout, denied, schema, settings, diagnostic)
     probe_confinement: str              # CONFINED or UNCONFINED
+    sandbox_route: Callable | str       # (platform) -> missing prerequisites, None for no route there; NOT_REQUIRED or UNSUPPORTED
     validate_answer: Callable | str     # (name, answer) or UNSUPPORTED
+    admits: Callable                    # (capabilities, None for full readiness) -> whether this host's backend serves it
 
 
 @dataclass(frozen=True)
@@ -36,22 +38,24 @@ class Backend:
     def default_model(self, legacy):
         return legacy if self.claude_aliases else "default"
 
-    def validate_runtime(self, models, effort):
-        for role, value in models.items():
+    def validate_runtime(self, models, effort, effort_key="runtime.effort"):
+        """`models` maps each developer.toml key (runtime.models.builder, runtime.roles.reviewer.model) to its value."""
+        for key, value in models.items():
             if not isinstance(value, str) or not value.strip() or value != value.strip():
-                raise ValueError(f"runtime.models.{role} must be a non-empty model")
+                raise ValueError(f"{key} must be a non-empty model")
             if self.claude_aliases and value not in CLAUDE_MODELS:
-                raise ValueError(f"runtime.models.{role}: {self.label} requires a supported alias")
+                raise ValueError(f"{key}: {self.label} requires a supported alias")
             if not self.claude_aliases and value in CLAUDE_MODELS:
-                raise ValueError(f"runtime.models.{role}: Claude aliases cannot select {self.label} models")
+                raise ValueError(f"{key}: Claude aliases cannot select {self.label} models")
         if effort is not None and effort not in self.efforts:
             ((label, efforts),) = [(b.label, b.efforts) for b in BACKENDS.values() if b.efforts]
-            raise ValueError(f"runtime.effort requires {label} and {', '.join(efforts[:-1])} or {efforts[-1]}")
+            raise ValueError(f"{effort_key} requires {label} and {', '.join(efforts[:-1])} or {efforts[-1]}")
 
 
 BACKENDS = {b.name: b for b in (
     Backend("claude", "Claude", claude_aliases=True),
     Backend("codex", "Codex", claude_aliases=False, efforts=("low", "medium", "high", "xhigh", "max")),
+    Backend("qwen", "Qwen Code", claude_aliases=False),
 )}
 
 

@@ -36,11 +36,15 @@ recommendation, so the ruling costs a review rather than a study.
 
 ### Worker runtimes
 
-The developer runtime binding selects Claude or Codex without changing this protocol or repository
-shipping policy. The caller's harness and the worker runtime are independent. Each node receives
-only its declared capabilities; file-only access is not a shell with a read-only filesystem.
-Preflight checks runtime, authentication, models and required capabilities before tracker
-mutations or branch creation, and a file-only result never admits commands, probes or edits.
+The developer runtime binding selects Claude, Codex or Qwen Code without changing this protocol or repository
+shipping policy, one backend by default and optionally another per worker role, so one run can
+mix them. The caller's harness and the worker runtime are independent. Each node receives
+only its declared capabilities and runs on its role's backend; file-only access is not a shell
+with a read-only filesystem. Preflight checks runtime, authentication, models and required
+capabilities before tracker mutations or branch creation, once per backend the command's roles
+select, at the widest contract those roles can need. A role whose backend does not admit that
+contract refuses the command there, with no fallback to another backend, and a file-only result
+never admits commands, probes or edits.
 Infrastructure failures during execution, including process and guard failures, are driver errors
 even if a model returns an owner-stop answer; they do not become an owner ruling or a spent domain
 fix round. A domain stop must carry a meaningful question. Review runs in a fresh context. Codex
@@ -59,8 +63,40 @@ PROBE requires native Linux or macOS (WSL refuses) and an invocation-private cop
 hard-linked files, nested mounts or special files; admission refuses unsupported topology before
 dispatch and again before each command. Canonical aliases of the root use the same boundary.
 External processes must not mutate that private copy or its invocation-stable configuration inputs
-while it is in use. Claude PROBE commands run without that write boundary: Claude Code refuses only
-`git push`, `git commit` and `gh` there. Before worker dispatch and each command, read-only app-server `config/read`
+while it is in use. Claude and Qwen Code PROBE commands run without that write boundary, unless
+the binding sets `ship.review_sandbox = true`: Claude Code refuses only `git push`, `git commit`
+and `gh` there, and Qwen Code's commands answer to ouro's allow-list hook alone.
+That key refuses a run before any tracker call when the reviewer role's backend has no sandbox
+route on the host (Qwen Code has one on Linux alone), its route's prerequisites are missing (Claude
+on Linux and WSL2: `bwrap` and `socat` on PATH; Qwen Code: `/usr/bin/bwrap`), or the host is native
+Windows, WSL1 or outside Linux, WSL2 and macOS; the refusal names the backend, the platform and the
+missing piece. Codex keeps its own boundary. A Claude
+PROBE review node then launches inside Claude Code's sandbox, with `allowUnsandboxedCommands` off,
+`failIfUnavailable` on, no allowed network domain, and `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a
+temp directory private to that launch and deleted when it returns, so its commands write only in
+the review copy and that directory, never in the temp directory the user's Claude sessions share.
+A Qwen Code PROBE review node launches under `tools.executionSandbox` (backend `bwrap`,
+`workspace-write` on the review copy, `network: closed`) with deny rules for `git push`,
+`git commit` and `gh`. Qwen Code runs no executable hook there, so the allow-list hook never runs
+and its grant check does not discard that node's answer: the sandbox and the deny rules are its
+boundary. Every other Qwen Code node keeps the hook and the check.
+On every backend, with or without `ship.review_sandbox`, a PROBE review node launches without git
+or GitHub credentials: the token, ssh-agent and askpass variables are removed, `gh` gets an empty
+private configuration directory, git's credential helpers and configured askpass are cleared, its
+ssh transport has no identity, and the review copy has no remote
+([binding](binding.md#the-developer-binding) lists each). A push or a `gh` call that keeps these
+overrides, whatever command shape reaches it, finds no helper, askpass, agent, ssh key or `gh`
+login to authenticate with; the name-based refusals stay the first layer. The overrides redirect,
+they neither delete the stored credentials nor confine the commands: a command that drops an
+override or names a credential source itself (`git -c credential.helper=store`) authenticates
+again; on Claude and Codex git still sends a matching `~/.netrc` entry to an http(s) remote, even
+on a plain `git push` that keeps every override, and `~/.git-credentials`, `~/.ssh` and
+`~/.config/gh` stay readable;
+unsandboxed commands still write outside the copy and reach the network; and a raw `ssh` with an
+explicit key, a credential a repository's own config holds (a persisted `http.<url>.extraheader`)
+and `git -C` against another checkout are not covered. The harness's own model login, and the READ,
+CHECKPOINT and BUILD environments, are untouched.
+Before worker dispatch and each command, read-only app-server `config/read`
 (with layers and canonical cwd) and `configRequirements/read` inspect the same executable,
 environment and permission overrides used for launch. Two fresh resolutions must agree on effective
 configuration. The MCP bridge preserves an explicitly declared `CODEX_HOME` verbatim so admission
@@ -96,7 +132,7 @@ no objection hold. Unavailable, malformed or incomplete discovery emits a saniti
 continues; a known conflict survives incomplete evidence. Discovery never marks messages read and
 never retries. Incomplete discovery without a known conflict cannot justify a new claim.
 
-Identity combines configured person, actual selected worker platform (Claude or Codex), a random
+Identity combines configured person, actual selected worker platform (Claude, Codex or Qwen Code), a random
 repository session, authenticated GitHub actor and a random per-run correlation; GitHub and git
 are the workflow authority. A matching display name alone never proves ownership. A separate
 clone has a different session.
@@ -184,7 +220,8 @@ responsible for its foreground run through its reported outcome.
   its merge, the last included, and whoever reverts a part's pull request unticks it in the same
   step. SPLIT stays for a task that is two tasks.
 - **A harness configuration path is a manual step** (.claude, .codex, .agents and .aws), since the harness refuses the build node an edit
-  there. On a promotion the triage node names each such path the change edits among the body's
+  there. When BUILD runs on Qwen Code, .qwen joins the list: a `.qwen/` path appears as a refused
+  write at BUILD, and triage does not plan it. On a promotion the triage node names each such path the change edits among the body's
   backticked ones, never under `.claude/worktrees/`, and triage writes a `Manual: <path>` line
   for it; a checklist part takes the lines its own text names. The builder returns the edit it
   would make, the pull request lists the steps, the union over the branch's commits, and waits

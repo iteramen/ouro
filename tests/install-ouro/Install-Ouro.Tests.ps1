@@ -1405,6 +1405,10 @@ try {
     Assert-Equal '' (Get-Line (Read-Fixture $repo '.claude/ouro.toml') 'external_model') `
         "-ExternalModel default writes no external_model line, the same as omitting it"
     $repo = New-Fixture
+    $run = Invoke-Installer $repo @('-Review', 'external-audit', '-ExternalCli', 'qwen')
+    Assert-Equal 'external_cli = "qwen"' (Get-Line (Read-Fixture $repo '.claude/ouro.toml') 'external_cli') '-ExternalCli qwen is accepted and written'
+    Assert-Equal 'exit=0 ok' (Test-Binding $repo) 'and the qwen binding passes check'
+    $repo = New-Fixture
     # nosuchcli, not a real adapter name -- a name outside the set, one that never ships.
     $run = Invoke-Installer $repo @('-Review', 'external-audit', '-ExternalCli', 'nosuchcli')
     Assert-Equal $true ($run.Code -ne 0) '-ExternalCli naming an adapter that is not shipped is refused'

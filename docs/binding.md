@@ -60,10 +60,11 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
 | `ship.person` | `[[ship.person]]` entries: `login`, with `policy`, `unattended_classes` or both | none | one developer's own `ship.policy` and `ship.unattended_classes`, keyed by the gh login without regard to case; a key the entry leaves out is the repository's; the review of the pull request that changes the binding is the grant; `check` validates each entry; the driver's merge decision, its dry run and triage's notes read the entry of the gh login running them |
 | `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe: Choosing `ship.review` below |
+| `ship.review_sandbox` | `true`, `false` | `false` | `true` confines the REVIEW node's PROBE commands to a harness sandbox: `ouro run` refuses before any tracker call, naming the backend, the platform and the missing piece, when the reviewer role's backend (the developer's `[runtime.roles.reviewer]`, else `runtime.backend`) has no sandbox route on the host, or the host is native Windows, WSL1 or another platform outside Linux, WSL2 and macOS, or the route's prerequisites are missing; Codex keeps its own write boundary; Claude's route is Claude Code's sandbox (bubblewrap on Linux and WSL2, which needs `bwrap` and `socat` on PATH; Seatbelt on macOS): its PROBE review node launches with `sandbox.enabled`, `allowUnsandboxedCommands = false`, `failIfUnavailable` and an empty `sandbox.network.allowedDomains`, and with `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a temp directory private to that launch, which the driver deletes when the node returns, so its commands write only in the disposable review copy and that directory (never the `/tmp/claude-<uid>` every Claude session of the user shares) and reach no network; Qwen Code's route is its tool execution sandbox, on Linux alone (its macOS route is untested), which needs `/usr/bin/bwrap`, the one bwrap it runs: its PROBE review node launches with `tools.executionSandbox` (backend `bwrap`, `workspace-write` on the review copy, `network: closed`) and deny rules for `git push`, `git commit` and `gh`; Qwen Code runs no executable hook there, so ouro's allow-list hook never runs and its grant check does not discard that node's answer: the sandbox and the deny rules are that node's boundary, and every other Qwen Code node keeps the hook; a repository key, since the threat is the repository's: a repository that takes outside contributions sets it, and no developer binding unsets it |
 | `ship.validation` | `local`, `ci` | `local` | final-input validation authority for PR flows; inline direct checks remain local |
 | `ship.validation_checks` | exact GitHub check names | none; required under `ci` | nonempty unique names declaring aggregate CI coverage of selected nonlocal gates |
 | `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's |
-| `ship.external_cli` | `grok`, `claude`, `codex`, `copilot` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
+| `ship.external_cli` | `grok`, `claude`, `codex`, `copilot`, `qwen` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
 | `ship.external_model` | a model name | the CLI's own default | the reader's model; one the CLI refuses counts as a round-1 failure |
 | `ship.external_effort` | an effort level, as the CLI names it | the adapter's own (grok `medium`, none passed on the others) | the reader's reasoning effort, passed as written; `default` or an empty value on the reader's command line is the adapter's own; one the CLI refuses counts as a round-1 failure |
 | `ship.landing` | `merge-squash`, `rebase-squash`, `rebase-merge`, `merge-merge` | `merge-squash` | the sync and merge answers in one word: The landing policy below |
@@ -246,7 +247,7 @@ missing file, malformed TOML, unknown key or provider/model mismatch is a driver
 
 ```toml
 [runtime]
-backend = "codex"                 # claude | codex; absent means claude
+backend = "codex"                 # claude | codex | qwen; absent means claude
 effort = "high"                   # Codex only: low | medium | high | xhigh | max
 
 [runtime.models]
@@ -255,7 +256,75 @@ builder_trivial = "default"
 reviewer = "default"
 ```
 
-The runtime table admits only `runtime.backend`, `runtime.effort` and the three `runtime.models` roles.
+The runtime table admits only `runtime.backend`, `runtime.effort`, `runtime.models` and
+`runtime.roles`. Each node belongs to one worker role: `triager` (TRIAGE and FOLLOWUP),
+`checkpointer` (CHECKPOINT), `builder` and `builder_trivial` (BUILD) and `reviewer` (REVIEW).
+`runtime.models` takes any of them; `triager` and `checkpointer` take the `builder` role's model
+when nothing names theirs.
+
+```toml
+[runtime]
+backend = "claude"
+
+[runtime.roles.triager]
+backend = "qwen"                  # absent means runtime.backend
+model = "deepseek-v4-pro"
+```
+
+A `[runtime.roles.<role>]` table holds only `backend`, `model` and `effort`, each checked
+against that role's backend by the rules of `runtime.models` and `runtime.effort`; an unknown role
+or key is a driver error. Each node dispatches through its role's backend, so one `ouro run` can
+triage and file follow-ups on Qwen Code while it builds and reviews on Claude. A role's model is
+its role table's `model`, then `runtime.models`, then the repository's `[models]`, then the usual
+default; `triager` and `checkpointer` inherit the `builder` model only while they share its
+backend. `runtime.models` and `runtime.effort` apply to the roles on `runtime.backend`: a
+`runtime.models` entry for a role whose table selects another backend is refused, and its model
+goes in that table.
+
+Before any tracker write, a run works out the widest contract each role can need for the command:
+TRIAGE and FOLLOWUP read (READ); CHECKPOINT reads, and runs commands whenever its brief grants
+any: the issue's acceptance commands and every gate the checkpoint selects; REVIEW reads under
+express and probes (PROBE) under standard and full; BUILD takes full readiness. A run resumed on
+a merged pull request plans FOLLOWUP alone. Each backend's preflight runs once, file-only when
+every role on it only reads, full readiness otherwise. A role whose backend does not admit its
+contract is refused there, naming the role, the backend and the contract; there is no fallback to
+another backend. So a `builder` on native Windows Codex, which only reads, refuses a run before it
+writes. A diff that tightens the flow to standard or full after BUILD commits replans REVIEW and refuses
+there a reviewer whose backend does not admit PROBE, before REVIEW, on that run and on every resume.
+`ouro triage` preflights the triager's backend alone, file-only. While every role selects
+`runtime.backend`, each command makes the one preflight it made before role tables existed. The
+attempt diagnostics, the usage table and the progress file's `reviewer` field name the backend
+each node used; a board claim's `platform` stays `runtime.backend`.
+
+A PROBE review node launches without git or GitHub credentials on every backend, with or without
+`ship.review_sandbox`. Its environment has no `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
+`GITHUB_ENTERPRISE_TOKEN`, `SSH_AUTH_SOCK`, `GIT_ASKPASS` or `SSH_ASKPASS`, and sets
+`GIT_TERMINAL_PROMPT=0`. `GH_CONFIG_DIR` names an empty directory private to the launch, so `gh`
+finds no stored login there. Two `GIT_CONFIG_COUNT` entries, appended after any inherited ones,
+set `credential.helper` empty, which clears every credential helper git's config files name, and
+`core.askPass` empty, so git asks neither a configured askpass program nor `SSH_ASKPASS`.
+`GIT_SSH_COMMAND` is `ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o
+IdentityFile=none`, so git's ssh transport offers no agent and no `~/.ssh` key. Codex hands its
+MCP bridge a filtered environment, so the bridge applies the same to every command it runs. The
+review copy is a standalone repository fetched from the main checkout, with no remote:
+`origin/<default>` is a ref there. A push or a `gh` call that keeps these overrides, through a
+nested interpreter or a renamed git alike, finds no helper, askpass, agent, ssh key or `gh` login
+to authenticate with, and the name-based refusals (Claude's deny patterns, the Qwen Code hook and
+deny rules, the Codex bridge) remain the first layer. The harness keeps its own model login:
+Claude Code's and Codex's home and their API variables, and Qwen Code's `OPENAI_*` variables, are
+untouched. READ, CHECKPOINT and BUILD nodes keep their environment.
+
+The overrides point git and `gh` away from the stored credentials; they do not delete them, and
+they do not confine the commands. A command can drop an override (`env -u GIT_CONFIG_COUNT`) or
+name a credential source itself (`git -c credential.helper=store`), and then authenticates as the
+developer would. On Claude and Codex the node keeps the developer's home, so git still sends a
+matching `~/.netrc` entry to an http(s) remote whatever its helpers say, even on a plain `git push`
+that keeps every override, and `~/.git-credentials`, `~/.ssh` and `~/.config/gh` stay readable; Qwen Code's node runs with a home of its own, which hides them from a
+command that keeps `HOME`, not from one that names their path. Outside a sandbox
+(`ship.review_sandbox`, or Codex's own boundary), commands still write outside the copy and reach
+the network. Nothing here covers a raw `ssh` given an explicit key, a credential a repository holds
+in its own config (a persisted `http.<url>.extraheader`), or `git -C` against another checkout.
+
 The optional `coordination` and `followup` tables below are the only other developer tables.
 Developer settings never merge into repository shipping policy, review requirements, gates,
 approvers or the external reader selection; a developer's own ship policy is a `[[ship.person]]`
@@ -340,7 +409,8 @@ authentication, flags, each selected model's availability, the bridge contract a
 file-read proof; full readiness also checks OS sandbox startup, the Git reads above and a network
 capability proof, all before tracker writes or branch creation. Each distinct selected model gets
 a small file-only call on generated readiness data, reported as PREFLIGHT usage. TRIAGE takes the
-file-only (READ) preflight; delivery runs and `inspect --check` take full readiness. A READ result
+file-only (READ) preflight; delivery runs and `inspect --check` take full readiness, unless the
+roles that select Codex only read (the plan above). A READ result
 never admits commands, probes or edits. Each file proof is classified on its attempt's diagnostics
 row, printed after triage, run and `inspect --check` with the CLI version and the runtime file's SHA-256: the proof
 (`accepted`, `content`, `missing_read`, `failed_read`, `wrong_read`), the content class, whether
@@ -358,7 +428,7 @@ are refused.
 | TRIAGE, FOLLOWUP and express/light REVIEW | worktree text read, glob listing and regex search; no command or write tools |
 | CHECKPOINT | file tools plus the issue's listed acceptance/gate commands in a disposable default-branch worktree; no file edit tools or commits. With no command, reads the main checkout |
 | BUILD | the file tools plus constrained write/edit/delete, the listed acceptance/gate commands and git exploration |
-| Sized/full REVIEW | file tools plus probes in a separate detached worktree; no file edit tools, publishing or commits |
+| Sized/full REVIEW | file tools plus probes in a separate standalone copy with no remote; no file edit tools, publishing or commits |
 
 Codex's native shell, apps, plugins, hooks, browser/computer tools, image tools, subagents and
 automatic skill catalogs are disabled for nodes; a private stdio MCP bridge exposes only the
@@ -417,7 +487,9 @@ completion events. A final answer or partial source never overrides a failed tra
 Observed provider usage belongs only to diagnostics until the node is accepted.
 
 `python3 bin/ouro-developer.py install` installs user-wide Codex skills and a launcher;
-`inspect --check` inspects selection and runs preflight; `uninstall` removes owned installation
+`inspect` prints the selection, each role's backend and model among it; `inspect --check` also
+runs preflight, once per backend a role selects when roles select more than one, each at the widest
+contract that backend admits for its roles; `uninstall` removes owned installation
 files while preserving the developer binding. Re-running install updates only unchanged owned
 files and never overwrites unrelated user settings. Invalid, redirected or hard-linked ownership
 metadata is refused before writes. Installer options seed a new binding; they do not replace an
@@ -427,6 +499,89 @@ The installer imports no Claude settings or environment map. A private-token gat
 existing list selected by `OURO_FORBIDDEN_TOKENS` in the launching environment; it does not copy
 the list into a repository. The [guide's Codex setup](guide.md#codex-install-once-per-developer) shows persistent Windows configuration and
 the app restart needed to inherit it.
+
+### Qwen Code workers
+
+`backend = "qwen"` runs every node contract on Qwen Code 0.26.6+ (npm `@qwen-code/qwen-code`):
+READ, CHECKPOINT's commands, PROBE and BUILD, as `runtime.backend` or per role. Its preflight
+proves the model of each role it serves.
+
+The model is reached through an OpenAI-compatible endpoint named in the launch environment:
+`OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` when a role's model is `default`. Any
+other model value is passed as `--model`. Qwen Code's own user and project configuration is never
+read: each node runs with a fresh temporary home and an ouro-written system settings file. Every
+inherited `QWEN_*` variable is removed from the child, and ouro sets its own trusted-folders,
+approvals and runtime paths inside the node's temporary directory.
+
+- **Boundary:** a `PreToolUse` hook matches every tool and logs each call. For a node that only
+  reads, it blocks all but `read_file`, `glob`, `grep_search` and the structured answer; a node
+  that runs commands or edits also gets the shell or the write tools, as below. Denials and hook faults both exit
+  2, Qwen Code's blocking outcome.
+  - `permissions.deny` also removes the exec, monitor, web-fetch and subagent tools, the shell
+    for a node that runs no command, and the write, edit and notebook-edit tools for a node that
+    does not edit.
+  - A node that only reads runs in approval mode `default`, so headless mode declines anything
+    that needs approval.
+  - A node that runs commands or edits runs in approval mode `yolo`, as headless `default`
+    removes the shell, and the hook decides each `run_shell_command` call. CHECKPOINT runs
+    only its brief's exact commands; BUILD runs those and `git rm`, `git mv`, `git status`,
+    `git diff`, `git log` and `git ls-files` with any arguments; and PROBE any single command but `git push`, `git commit` (their dashed
+    builtins `git-push` and `git-commit` included) and `gh`, with no `$`, glob, brace, git `-c`,
+    `--config-env`, `alias.` or `GIT_CONFIG` word. Either way the hook refuses a
+    compound command, a pipe, a redirection, a substitution, a leading variable assignment, a
+    background run and another directory, as bash parses the command line. It reads the names
+    of the words bash runs: not what a nested interpreter (`python3 -c`) or a command that
+    re-splits its argument (`env -S`) does with it, nor a git binary under another name (a
+    symlink or copy), the reach of Claude's deny patterns. So PROBE's refusals stop a reviewer's
+    slip, not a determined push. The commands run unconfined, as on Claude, so a granted command
+    can write where the hook's path check would refuse a write tool. Behind the hook, the PROBE
+    node's credential overrides ([The developer binding](#the-developer-binding)) stop a push that
+    keeps its environment, not one that undoes them.
+  - BUILD's edits: the hook decides each `write_file`, `edit` and `notebook_edit` call. Its path
+    must lie inside the worktree as spelled and as resolved, symlinks followed, and its first
+    component must be none of `.git`, `.claude`, `.codex`, `.agents`, `.aws` and `.qwen`, in any
+    case. A refused write is logged with its input, and BUILD returns it in the shared denial
+    shape; one under `.claude`, `.codex`, `.agents`, `.aws` or `.qwen` becomes a manual step
+    carrying the proposed content or old and new text, as on Claude and Codex; a refused
+    `notebook_edit` is listed with no proposed edit. `.qwen` is a manual-step path only while
+    BUILD runs on Qwen Code. BUILD's prompt
+    carries the installed run skill as Codex's does, and a missing or invalid skill refuses BUILD
+    before dispatch.
+  - A hook that never started would let calls through, so a node whose transcript shows a tool
+    running more often than the hook granted it is a driver error, and its answer is discarded.
+  - Under `ship.review_sandbox = true` the PROBE review node is the exception: it launches under
+    Qwen Code's tool execution sandbox, which runs no executable hook, so its settings carry no
+    hook and its answer is not discarded by the grant check. The sandbox (`workspace-write` on the
+    review copy, `network: closed`) and the `git push`, `git commit` and `gh` deny rules are that
+    node's boundary. A sandbox requested for any other node is a driver error before launch.
+- **Repository isolation:** folder trust is on, and ouro writes the trusted-folders file. For a
+  node that only reads, and for the external reader, it trusts nothing, so the repository's Qwen
+  Code workspace settings, hooks and environment files are ignored. A node that runs commands or
+  edits needs a trusted folder, since Qwen Code overrides `yolo` to `default` in an untrusted
+  one: its file trusts the resolved working directory and marks every ancestor of it untrusted,
+  so no parent directory's `.env` loads. Such a node refuses before launch when its working
+  directory's top level holds a `.qwen` or `.env` entry, in any case, and names the path, so
+  nothing the trusted folder could load is there. The context file name is unguessable, so
+  no `QWEN.md` or `AGENTS.md` loads. The driver supplies the repository instructions, as for
+  Codex.
+- **Telemetry:** usage statistics, telemetry, auto-memory and auto-update are off.
+- **Preflight:** checks the CLI version and flags and the endpoint variables, then runs the hook
+  on a denied and a granted tool, a listed command and an unlisted and a chained one, a
+  probe's command and its `git push`, and a worktree write, a `.claude/` write and a write outside
+  the worktree. It then makes one structured file-read call on generated
+  data per model. That call must read the generated file through the hook and return its exact content.
+  A preflight that is not file-only then makes one live call per contract a role it serves needs,
+  in that scratch directory, trusted as any command or edit node's working directory is, with
+  the model of the first such role: CHECKPOINT's commands
+  (`checkpointer`) and PROBE (`reviewer`) each run a listed shell command, and BUILD (`builder`,
+  `builder_trivial`) runs it and writes one file there. A transcript in which that call is
+  missing, failed or not granted by the hook refuses the backend.
+- **Answers:** a node's answer is the structured result. When Qwen Code fails a run because the
+  model wrote its answer as plain text instead of calling the tool, that text is admitted only
+  when it passes the same strict schema check.
+- **Windows:** the hook command is POSIX-quoted. Qwen Code runs Windows hooks under cmd.exe, so
+  there the hook does not start, and preflight's file proof refuses the backend.
+- **Cost:** reported as unknown.
 
 ## The machine-local overlay — `.claude/ouro.local.toml`
 
@@ -477,7 +632,7 @@ sees as a directory. The overlay entry is unchecked.
   `merge-on-green`. An entry admits no other key.
 - `ship.review = "copilot"` requires `ship.copilot_bot_id`.
 - `ship.review = "external-audit"` requires `ship.external_cli`, one of the adapters
-  `bin/external-audit.py` ships (`grok`, `claude`, `codex`, `copilot`); `external_cli` is allowed
+  `bin/external-audit.py` ships (`grok`, `claude`, `codex`, `copilot`, `qwen`); `external_cli` is allowed
   under any `ship.review` value, for a manual run. `claude` always uses the Claude model family,
   whatever model alias is named; when Claude also builds, the review has a fresh context and
   this reader's contract but shares the model family. `codex` refuses a model its account does not serve —
@@ -487,7 +642,14 @@ sees as a directory. The overlay entry is unchecked.
   account answers `Access denied by policy settings`, the same round-1 failure as an absent CLI —
   and it is a different thing from `ship.review = "copilot"`: this one is the Copilot **CLI**, a
   briefed repository reader, where `ship.review = "copilot"` names the Copilot PR-review bot,
-  which takes no brief and runs only on an open PR. `ship.external_model` is optional and, when
+  which takes no brief and runs only on an open PR. `qwen` is Qwen Code 0.26.6+ against an
+  OpenAI-compatible endpoint: `OPENAI_API_KEY` and `OPENAI_BASE_URL` in the reader's launch
+  environment, and `OPENAI_MODEL` when no `ship.external_model` names the model. It reads under
+  the same allow-list hook and isolation as the Qwen Code worker, needs the `ouro` package beside
+  `external-audit.py` (a vendored copy refuses it), and has no effort route: it accepts a
+  `ship.external_effort` that is absent or `"default"`, and any other value passes the binding
+  check and is refused by the reader at round 1, a round-1 failure. The reader takes the CLI's output from a file, not a pipe, because Qwen
+  Code truncates a piped `-o json` stream. `ship.external_model` is optional and, when
   present, must be non-empty — absent, or `"default"`, means the CLI's own default model.
   `ship.external_effort` is optional and, when present, must be non-empty; absent means the
   adapter's own effort, which `"default"` and an empty value on the reader's command line name too.

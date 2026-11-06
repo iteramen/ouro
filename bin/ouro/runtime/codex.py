@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 import re
-import stat
 import tempfile
 from pathlib import Path
 
@@ -13,7 +12,8 @@ from . import Capabilities, READ, diagnostics, process, schema
 from . import codex_events
 from .network import WINDOWS, readiness as network_readiness
 from .tools import git_readiness
-from .backends import CONFINED, Interface
+from .backends import CONFINED, NOT_REQUIRED, Interface
+from .instructions import repository, run_skill
 
 MIN_VERSION = (0, 163, 0)
 DISABLED = ("shell_tool", "apps", "plugins", "multi_agent", "hooks", "memories", "shell_snapshot",
@@ -45,25 +45,7 @@ def bootstrap(name, tools):
              if tools.edit else "Editing is not granted; do not write, edit or delete files. ")
     if name != "BUILD" or not tools.edit:
         return text
-    try:
-        plugin = sh.PLUGIN.resolve(strict=True)
-        source = (plugin / "skills/run/SKILL.md").resolve(strict=True)
-        if not source.is_relative_to(plugin):
-            raise ValueError("outside plugin")
-        with os.fdopen(os.open(source, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)), "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                raise ValueError("not a regular skill")
-            raw = stream.read(32 * 1024 + 1)
-        if not raw or len(raw) > 32 * 1024:
-            raise ValueError("empty or oversized skill")
-        reference = raw.decode("utf-8-sig")
-    except (OSError, RuntimeError, UnicodeError, ValueError) as ex:
-        raise sh.DriverError("codex BUILD: trusted run skill is missing, invalid or outside the installed plugin; reinstall ouro") from ex
-    return (text + "You are already inside BUILD; the driver owns the workflow. Do not invoke the driver again, "
-            "activate skills, commit, publish or write to the tracker. Environment-blocked approved tests use "
-            "validation_pending with cmd/reason, never invented success or an owner design question; runtime failures remain errors. "
-            "The complete run skill below describes the outer caller. Its 'this session' restriction refers to that caller, "
-            "not to your admitted bridge edits. This reference grants no external file access.\n\n" + reference)
+    return text + run_skill("codex", "bridge edits")
 
 
 def preflight(settings, *, capabilities=None):
@@ -96,7 +78,8 @@ def preflight(settings, *, capabilities=None):
         models = {m["slug"] for m in json.loads(catalog.out)["models"]}
     except (ValueError, KeyError, TypeError):
         raise sh.DriverError(f"preflight codex: model catalog unavailable: {sh.tail(catalog.err)}")
-    unavailable = set(settings.models.values()) - models - {"default"}
+    roles = settings.serving("codex")
+    unavailable = {settings.model(role, "default") for role in roles} - models - {"default"}
     if unavailable:
         raise sh.DriverError(f"preflight codex: account does not serve models {', '.join(sorted(unavailable))}")
     # Compile/import the bridge before the driver creates a branch or posts anything.
@@ -127,7 +110,7 @@ def preflight(settings, *, capabilities=None):
         # outputs actually work. Probe each selected model on generated public data before writes.
         ready = Path(root) / "readiness.txt"
         ready.write_text("ouro-ready", encoding="utf-8")
-        selected = {settings.model(role, "") for role in ("builder", "builder_trivial", "reviewer")}
+        selected = {settings.model(role, "") for role in roles}
         identity = {"cli": match.group(0), "runtime": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
         proofs = []
         for model in sorted(selected):
@@ -221,13 +204,16 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
             argv += ["-c", "model_reasoning_effort=" + json.dumps(settings.effort)]
         prompt = ("First call the ouro bridge list tool to verify file access. Use only the ouro file bridge. Its list/read/search tools are file operations, not commands. "
                   "Do not substitute unavailable built-in tools. Optional stop is null when continuing.\n\n" +
-                  instructions(cwd) + "\n\n" + prompt)
+                  repository(cwd, "codex") + "\n\n" + prompt)
         preserve = ("; failed BUILD: verify the old worker ended; inspect and preserve only identified "
                     "task-owned partial files and retained logs, preserve unrelated edits before a normal run; "
                     "stop if ownership or liveness is unproved. Require a new completed BUILD and fresh "
                     "exact-head proof/review" if name == "BUILD" else "")
+        # The bridge's commands get the same removals there: Codex hands an MCP server a filtered environment.
+        (scratch / "gh").mkdir()
+        env = {**worker_env(settings), **process.probe_env(tools.probe, scratch / "gh")}
         try:
-            r = process.run([*argv, "-"], cwd=cwd, prompt=prompt, timeout=timeout, env=worker_env(settings),
+            r = process.run([*argv, "-"], cwd=cwd, prompt=prompt, timeout=timeout, env=env,
                             observe=lambda output, code: diagnostics.transport(diagnostic, output, code),
                             output_limit=codex_events.CAPTURE_LIMIT)
         except sh.DriverError as ex:
@@ -274,22 +260,6 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
         return answer, session, usage, None
 
 
-def instructions(cwd):
-    root = Path(cwd).resolve()
-    paths = [root / "AGENTS.md", root / "CLAUDE.md", *sorted((root / ".claude" / "rules").rglob("*.md"))]
-    blocks = []
-    for path in paths:
-        if path.is_file():
-            if not path.resolve().is_relative_to(root):
-                raise sh.DriverError("codex instructions leave the worktree")
-            blocks.append(f"### {path.relative_to(root).as_posix()}\n" + path.read_text(encoding="utf-8-sig"))
-    text = "\n\n".join(blocks)
-    if len(text.encode("utf-8")) > 128 * 1024:
-        raise sh.DriverError("codex repository instructions exceed 128 KiB")
-    return ("Repository instructions follow. Rules with paths front matter apply only to their declared paths; "
-            "unscoped rules apply throughout the worktree.\n\n" + text) if text else ""
-
-
 def _worktree_readiness(settings, main, target, branch, base, *, scratch=None):
     from . import git_capabilities
     git_capabilities.worktree_readiness(settings, main, target, branch, base, scratch=scratch)
@@ -297,4 +267,5 @@ def _worktree_readiness(settings, main, target, branch, base, *, scratch=None):
 
 INTERFACE = Interface(preflight=lambda settings, capabilities: preflight(settings, capabilities=capabilities),
                       worktree_readiness=_worktree_readiness, execute=_execute, probe_confinement=CONFINED,
-                      validate_answer=schema.validate_answer)
+                      sandbox_route=NOT_REQUIRED, validate_answer=schema.validate_answer,
+                      admits=lambda capabilities: not WINDOWS or capabilities == READ)

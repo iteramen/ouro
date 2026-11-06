@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install developer-wide ouro skills, inspect configuration, or remove owned installation files.
 
-    python3 ouro-developer.py install [--backend claude|codex] [--model NAME] [--effort LEVEL] [--home PATH]
+    python3 ouro-developer.py install [--backend claude|codex|qwen] [--model NAME] [--effort LEVEL] [--home PATH]
     python3 ouro-developer.py inspect [--check] [--home PATH]
     python3 ouro-developer.py uninstall [--home PATH]
 
@@ -32,7 +32,7 @@ def main(argv=None):
     ap.add_argument("--backend", choices=tuple(BACKENDS), default="codex")
     ap.add_argument("--model", help="set all worker roles in a newly created developer binding")
     ap.add_argument("--effort", choices=tuple(dict.fromkeys(e for b in BACKENDS.values() for e in b.efforts)))
-    ap.add_argument("--check", action="store_true", help="also run the selected runtime's preflight")
+    ap.add_argument("--check", action="store_true", help="also run the preflight of each backend a role selects")
     args = ap.parse_args(argv)
     home = (args.home or Path.home()).resolve()
     config = home / ".config" / "ouro" / "developer.toml" if args.home else developer.default_path()
@@ -58,11 +58,19 @@ def main(argv=None):
         if args.command == "inspect":
             active = Path(os.environ.get("OURO_DEVELOPER_CONFIG") or config) if not args.home else config
             cfg = developer.load(active) if active.exists() or os.environ.get("OURO_DEVELOPER_CONFIG") else developer.Settings()
+            # Outside a repository: a repository's [models] can still change a Claude role's alias.
+            roles = {role: {"backend": cfg.backend_of(role),
+                            "model": cfg.model(role, "sonnet" if role == "builder_trivial" else node.DEFAULT_BUILDER)}
+                     for role in developer.ROLES}
             print(json.dumps({"config": str(active), "backend": cfg.backend, "models": cfg.models,
-                              "effort": cfg.effort, "source": manifest.get("source"), "owned_files": len(files)}, indent=2))
+                              "effort": cfg.effort, "roles": roles, "source": manifest.get("source"),
+                              "owned_files": len(files)}, indent=2))
             if args.check:
                 try:
-                    node.preflight(cfg)
+                    if cfg.mixed():  # each backend a role selects, at the widest contract it admits for its roles
+                        node.preflight(cfg, needs=node.widest(cfg))
+                    else:
+                        node.preflight(cfg)
                 finally:
                     if table := diagnostics.table():
                         print(table)

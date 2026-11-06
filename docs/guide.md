@@ -320,7 +320,8 @@ each node's tools and answer, and where each protocol fact is written, read and 
 [docs/architecture.html](architecture.html).
 
 No node is granted a commit, a push or a tracker write. The REVIEW node gets command probes for
-`standard`/`sized` and `full`/`probe` in a detached worktree, with publishing and commits prohibited;
+`standard`/`sized` and `full`/`probe` in a standalone copy with no remote and with git's credential helpers, ssh identity and
+`gh` login withheld ([binding](binding.md#the-developer-binding)), with publishing and commits prohibited;
 `express`/`light` remains read-only in the BUILD worktree. A configured external reader remains
 read-only. BUILD edits the tree; the driver commits
 it under the human who ran it, with the subject BUILD returned and the record the pull request

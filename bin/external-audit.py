@@ -38,8 +38,8 @@ empty files_read. A 3 is a failed round, not a round: re-run it, and do not spen
 budget on it. Every artifact (prompt, raw stdout, verdict.json) lands under
 %TEMP%/external-audit-<user>/<session>/round-N/ -- never in the repo -- each level created
 owner-only (on POSIX re-set to 0700 and refused when another account owns it), before anything
-is written; the grok adapter's bare home and grok home sit beside the round folders, under
-<session>/. Repo-agnostic by design.
+is written; the grok adapter's bare home and grok home, and the qwen adapter's home, settings and
+hook log, sit beside the round folders, under <session>/. Repo-agnostic by design.
 
 Ported from the owner's prior single-CLI reader; the adapter seam below is what this port adds,
 so a second CLI is a new Adapter subclass, not a rewrite of main().
@@ -64,6 +64,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 # Use the fleet's shared interpreter floor before running the audit.
 if tuple(sys.version_info[:2]) < (3, 12):
@@ -337,7 +338,7 @@ def parse_verdict(text: str) -> dict | None:
 # --- the adapter seam ------------------------------------------------------------------------
 # One entry per external CLI, selected by --cli. Each adapter states how a session starts (an id
 # this driver mints and passes via argv(), or one the CLI mints itself and prints in its own
-# output -- grok, claude and copilot accept the driver's minted id, so session_from_output() is
+# output -- grok, claude, copilot and qwen accept the driver's minted id, so session_from_output() is
 # not overridden for them; codex mints its own thread id instead and overrides it, read back from
 # its event stream after the round), the resume form, the flags
 # that deny every write, how the prompt travels (a file, or stdin when stdin_prompt is set --
@@ -348,6 +349,8 @@ class Adapter:
     binary = ""
     #: True when the adapter's argv omits the prompt file and main() pipes it over stdin instead.
     stdin_prompt = False
+    #: True when the CLI's stdout is stdout.txt itself, read once it exits, in place of the streamed pipe.
+    stdout_file = False
     #: The argv template a non-default effort maps to ({} takes the value); empty means no route.
     effort_route: tuple[str, ...] = ()
     #: What "default" means for this adapter; None passes no effort flag.
@@ -361,10 +364,11 @@ class Adapter:
     def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
         raise NotImplementedError
 
-    def env(self, session_dir: Path) -> dict[str, str]:
+    def env(self, session_dir: Path) -> dict[str, str | None]:
         """Environment variables laid over the driver's own for the CLI's launch; none by default.
-        An adapter that needs session-scoped state creates it under session_dir here, and
-        cleanup() takes back whatever must not outlive the round."""
+        A None value removes that variable from the CLI's environment. An adapter that needs
+        session-scoped state creates it under session_dir here, and cleanup() takes back whatever
+        must not outlive the round."""
         return {}
 
     def cleanup(self, session_dir: Path) -> None:
@@ -379,7 +383,7 @@ class Adapter:
         """The session id to report and resume with, read back from the CLI's own output -- for
         a CLI that mints its own id rather than accepting the one this driver mints and passes
         via argv(). None (the default) means the driver's minted id is authoritative, as it is
-        for grok, claude and copilot; codex overrides this instead. main() calls this after the
+        for grok, claude, copilot and qwen; codex overrides this instead. main() calls this after the
         round, not at argv()."""
         return None
 
@@ -588,8 +592,82 @@ class CopilotAdapter(Adapter):
         return cmd
 
 
+class QwenAdapter(Adapter):
+    """Qwen Code 0.26.6+ against an OpenAI-compatible endpoint: OPENAI_API_KEY and OPENAI_BASE_URL
+    from the launch environment, and OPENAI_MODEL for --model default. The prompt travels on stdin;
+    --output-format json prints one JSON array of events, and the verdict is the last `result`
+    event's text. --session-id passes round 1's id (the driver's, as for grok); --resume repeats it,
+    and reads the chat recording round 1 left in the session's home, so recording stays on. env() writes the system settings under <session>/: the allow-list hook (read_file, glob,
+    grep_search) is the boundary, the write and shell tools are denied, and folder trust keeps the
+    repository's own settings, hooks and context files out. It removes every inherited QWEN_*
+    variable and points the home, trust and approval files there too. A tool that ran without the
+    hook's grant discards the verdict; a denied call is a warning. The isolation is
+    ouro/runtime/qwen_isolation.py beside this script, imported here and not at the top: a vendored
+    copy carries this script alone, so there qwen is refused and every other adapter still runs.
+    No effort route. Its stdout is stdout.txt itself, not a pipe: Qwen Code 0.26.6 cuts a piped
+    `-o json` stream short (at 72-80 KB) and still exits 0."""
+
+    name = "qwen"
+    binary = "qwen"
+    stdin_prompt = True
+    stdout_file = True
+    CREDENTIALS = ("OPENAI_API_KEY", "OPENAI_BASE_URL")
+
+    def _isolation(self):
+        module = Path(__file__).resolve().parent / "ouro" / "runtime" / "qwen_isolation.py"
+        if not module.is_file():
+            raise RuntimeError(f"{module} is missing: the qwen reader needs the ouro package beside this script, "
+                               "which a vendored copy leaves out; every other --cli still runs")
+        if str(module.parents[2]) not in sys.path:
+            sys.path.insert(0, str(module.parents[2]))
+        from ouro.runtime import qwen_isolation
+        return qwen_isolation
+
+    def env(self, session_dir: Path) -> dict[str, str | None]:
+        isolation = self._isolation()
+        unset = [n for n in self.CREDENTIALS if not os.environ.get(n)]
+        if unset:
+            raise RuntimeError(f"set {', '.join(unset)} in the launch environment (an OpenAI-compatible endpoint and its key)")
+        evidence = session_dir / "hook.jsonl"
+        evidence.unlink(missing_ok=True)  # the session directory outlives the round: each round's grants are its own
+        (session_dir / "system.json").write_text(json.dumps(isolation.settings_for(evidence)), encoding="utf-8")
+        # No developer settings here: the driver launching this script has already removed its coordination credential.
+        return isolation.isolated_env(SimpleNamespace(coordination=None), session_dir)
+
+    def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
+        cmd = ["qwen", "--output-format", "json", "--approval-mode", "default",
+               "--auth-type", "openai", ("--resume" if resume else "--session-id"), session]
+        if model and model != "default":
+            cmd += ["--model", model]
+        return cmd
+
+    def verdict_text(self, stdout_text: str, out_dir: Path) -> str:
+        """The last `result` event's text; empty (no verdict) when stdout holds no event array, the
+        result is an error, or a tool ran more often than the hook's log in <session>/ granted it."""
+        try:
+            events = json.loads(stdout_text)
+        except json.JSONDecodeError:
+            return ""
+        results = [e for e in events if isinstance(e, dict) and e.get("type") == "result"] if isinstance(events, list) else []
+        if not results:
+            return ""
+        result = results[-1]
+        for denial in result.get("permission_denials") or []:
+            if isinstance(denial, dict):
+                print(f"external-audit: WARNING - qwen denied {denial.get('tool_name')} "
+                      f"{json.dumps(denial.get('tool_input'))[:200]}", file=sys.stderr)
+        evidence = out_dir.parent / "hook.jsonl"
+        hook = [json.loads(line) for line in evidence.read_text(encoding="utf-8").splitlines()] if evidence.is_file() else []
+        bypassed = self._isolation().unhooked(events, hook)
+        if bypassed:
+            print(f"external-audit: qwen ran {', '.join(bypassed)} without the allow-list hook's grant; the read-only "
+                  "boundary is unproven, so the verdict is discarded", file=sys.stderr)
+            return ""
+        return "" if result.get("is_error") else str(result.get("result", ""))
+
+
 ADAPTERS: dict[str, Adapter] = {a.name: a for a in
-                                (GrokAdapter(), ClaudeAdapter(), CodexAdapter(), CopilotAdapter())}
+                                (GrokAdapter(), ClaudeAdapter(), CodexAdapter(), CopilotAdapter(), QwenAdapter())}
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -723,7 +801,7 @@ def main() -> int:
     # for the SystemExit that main()'s timeout, interrupt and SIGTERM paths end in.
     atexit.register(adapter.cleanup, out.parent)
     try:
-        child_env = {**os.environ, **adapter.env(out.parent)}
+        child_env = {k: v for k, v in {**os.environ, **adapter.env(out.parent)}.items() if v is not None}
     except (RuntimeError, OSError) as e:
         print(f"external-audit: {adapter.binary} could not be prepared - {e}; nothing started", file=sys.stderr)
         return 1
@@ -745,15 +823,16 @@ def main() -> int:
         signal.signal(signal.SIGTERM, _raise_system_exit)
     stderr_path = out / "stderr.txt"
     # stderr goes straight to a file, so a CLI that writes more of it than a pipe holds is never blocked
-    with stdout_path.open("w", encoding="utf-8") as sink, stderr_path.open("w", encoding="utf-8") as stderr_sink:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr_sink, stdin=stdin_arg,
+    sink_file = stdout_path.open("wb") if adapter.stdout_file else stdout_path.open("w", encoding="utf-8")
+    with sink_file as sink, stderr_path.open("w", encoding="utf-8") as stderr_sink:
+        proc = subprocess.Popen(cmd, stdout=sink if adapter.stdout_file else subprocess.PIPE, stderr=stderr_sink, stdin=stdin_arg,
                                 text=True, encoding="utf-8", errors="replace", cwd=cwd, env=child_env, **popen_kwargs)
         def pump():
             for chunk in iter(lambda: proc.stdout.read(256), ""):
                 stdout_chunks.append(chunk)
                 sink.write(chunk)
                 sink.flush()
-        t = threading.Thread(target=pump, daemon=True)
+        t = threading.Thread(target=pump if proc.stdout else (lambda: None), daemon=True)
         t.start()
         deadline = time.time() + args.timeout
         stdin_errors: list[BaseException] = []
@@ -802,7 +881,8 @@ def main() -> int:
             stderr_path.unlink()
         except OSError:  # a descendant can still hold the file open on Windows
             pass
-    stdout_text = "".join(stdout_chunks)
+    stdout_text = (stdout_path.read_text(encoding="utf-8", errors="replace") if adapter.stdout_file
+                   else "".join(stdout_chunks))
     if stdin_errors and not proc.returncode:
         print(f"external-audit: could not write the prompt to {adapter.binary}'s stdin ({stdin_errors[0]}) "
               "- failed round, re-run it", file=sys.stderr)
@@ -843,7 +923,7 @@ def main() -> int:
     approved = str(verdict.get("verdict", "")).upper() == "APPROVE"
 
     # A CLI that mints its own session id overrides session_from_output() -- codex does, reading
-    # it back from its event stream; grok, claude and copilot leave it None, so the id this driver
+    # it back from its event stream; grok, claude, copilot and qwen leave it None, so the id this driver
     # minted and passed via argv() stays authoritative for them. The triage-template headings
     # below use this reported id too, not the driver's minted one, so --resume off a saved
     # template works for codex the same as for the others; round 1's own folder name and the

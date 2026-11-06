@@ -33,6 +33,9 @@ from execution_lifecycle_tests import GateExecutionTests
 from timed_command_tests import TimedCommandTests
 from worktree_tests import WorktreeCleanupTests
 from backend_tests import BackendInterfaceTests
+from qwen_tests import QwenTests  # noqa: E402,F401 -- imported for unittest discovery
+from review_sandbox_tests import ReviewSandboxTests  # noqa: E402,F401 -- imported for unittest discovery
+from probe_credentials_tests import ProbeCredentialTests  # noqa: E402,F401 -- imported for unittest discovery
 from owned_children import reap_fixture_children
 
 
@@ -98,6 +101,27 @@ class RuntimeTests(unittest.TestCase):
                      '[runtime]\nextra=true', '[runtime]\nmodels=[]'):
             with self.subTest(text=text), self.assertRaises(sh.DriverError):
                 self.config(text)
+
+    def test_role_table_precedence_and_inheritance(self):
+        cfg = self.config('[runtime]\nbackend="claude"\n[runtime.models]\nbuilder="sonnet"\nreviewer="haiku"\n'
+                          '[runtime.roles.reviewer]\nmodel="fable"\n[runtime.roles.checkpointer]\nbackend="claude"\n')
+        self.assertEqual(cfg.roles, {"reviewer": {"model": "fable"}, "checkpointer": {"backend": "claude"}})
+        self.assertEqual(cfg.model("reviewer", "opus"), "fable")
+        self.assertEqual(cfg.model("builder", "opus"), "sonnet")
+        self.assertEqual((cfg.model("triager", "opus"), cfg.model("checkpointer", "opus")), ("sonnet", "sonnet"))
+        self.assertEqual(cfg.model("builder_trivial", "haiku"), "haiku")
+        self.assertEqual({cfg.backend_of(role) for role in developer.ROLES}, {"claude"})
+        own = self.config('[runtime]\nbackend="claude"\n[runtime.models]\nbuilder="sonnet"\ntriager="haiku"\n'
+                          '[runtime.roles.builder]\nmodel="fable"\n')
+        self.assertEqual((own.model("triager", "opus"), own.model("checkpointer", "opus")), ("haiku", "fable"))
+        self.assertEqual(self.config('[runtime]\nbackend="codex"\neffort="low"\n[runtime.roles.builder]\neffort="low"\n')
+                         .model("checkpointer", "opus"), "default")
+        repo = {"models.builder": "haiku", "models.reviewer": "sonnet"}
+        env = SimpleNamespace(lookup=lambda key, default: repo.get(key, default), runtime=developer.Settings())
+        self.assertEqual([node.model(env, role, "opus") for role in developer.ROLES],
+                         ["haiku", "haiku", "haiku", "opus", "sonnet"])
+        self.assertEqual(node.model(SimpleNamespace(lookup=lambda key, default: default, runtime=developer.Settings()),
+                                    "triager", node.DEFAULT_BUILDER), "opus")
 
     def test_file_only_has_no_execution_or_edits(self):
         b = Bridge(self.policy)
@@ -1054,6 +1078,22 @@ class RuntimeTests(unittest.TestCase):
             runner.manual_paths = lambda: []
         self.assertIsNone(runner.protected_path(".CLAUDE/WORKTREES/peer/file"))
         self.assertIsNone(runner.protected_path("../.codex/config.toml"))
+
+    def test_qwen_configuration_is_a_manual_step_only_under_a_qwen_builder(self):
+        from ouro.run import Run
+        runner = object.__new__(Run)
+        runner.tree, runner.labels, runner.manual_paths = SimpleNamespace(path=self.root), [], lambda: []
+        harness = [".claude/settings.json", ".codex/config.toml", ".agents/skills/x.md", ".aws/config"]
+        for settings, qwen in ((developer.Settings("claude"), None), (developer.Settings("codex"), None),
+                               (developer.Settings("claude", roles={"reviewer": {"backend": "qwen"}}), None),
+                               (developer.Settings("claude", roles={"builder": {"backend": "qwen"}}), ".qwen/settings.json"),
+                               (developer.Settings("qwen"), ".qwen/settings.json")):
+            with self.subTest(settings=settings):
+                runner.env = SimpleNamespace(runtime=settings)
+                self.assertEqual(runner.protected_path(".qwen/settings.json"), qwen)
+                self.assertEqual(runner.manual_steps({"manual": [{"path": ".qwen/settings.json", "edit": "e"}]}),
+                                 [{"path": qwen, "edit": "e"}] if qwen else [])
+                self.assertEqual([runner.protected_path(p) for p in harness], harness)
 
     def test_protected_lexical_path_keeps_manual_handoff(self):
         from ouro.run import Run

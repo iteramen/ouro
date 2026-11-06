@@ -82,6 +82,7 @@ MODELED_WORKFLOW_SECTIONS = frozenset({
     "sec_express_base_moves", "sec_sync_conflict", "sec_spec_trust", "sec_review_none",
     "sec_copilot", "sec_resume", "sec_external", "sec_other_pr", "sec_manual",
     "sec_executable_acceptance", "sec_acceptance_review_corrections", "sec_coordination", "sec_gate_uncovered",
+    "sec_review_sandbox",
 })
 
 
@@ -1403,6 +1404,63 @@ def sec_preflight():
     code, out, err = c.ouro("run", "1")
     check("a BUILD stop with no question is a driver error: exit 1, no stop or label written, nothing pushed",
           code == 1 and "stop with no question" in err and c.wrote() == [] and c.branches() == ["master"])
+
+
+def sec_review_sandbox():
+    """ship.review_sandbox = true refuses a reviewer backend with no sandbox route before any tracker write and sandboxes a
+    Claude or Qwen Code REVIEW node that has one; absent, nothing changes."""
+    from ouro.runtime import review_sandbox
+    where = review_sandbox.platform()
+    sandboxed = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace("[ship]\n", "[ship]\nreview_sandbox = true\n")
+    qwen_reviewer = TMP / "qwen-reviewer-developer.toml"
+    qwen_reviewer.write_text('[runtime]\nbackend="claude"\n[runtime.roles.reviewer]\nbackend="qwen"\nmodel="qwen-fixture-reviewer"\n',
+                             encoding="utf-8")
+    c = happy_case("reviewsandboxqwen", binding=sandboxed)
+    code, out, err = c.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_reviewer)})
+    refused = (code == 2 and c.wrote() == [] and c.branches() == ["master"] and c.prompts("BUILD") == []
+               and not any(s.startswith("issue view") for s in c.sigs()))
+    if where == "linux" and os.path.exists("/usr/bin/bwrap"):  # Qwen Code runs that bwrap alone; no PATH stand-in serves
+        check("a Qwen Code reviewer with /usr/bin/bwrap satisfies the key on linux: REVIEW runs on Qwen Code, sandboxed",
+              code == 0 and c.node_call("REVIEW")["backend"] == "qwen" and c.node_call("REVIEW")["sandbox"] is True
+              and "review_sandbox" not in err)
+    elif where == "linux":
+        check("a Qwen Code reviewer without /usr/bin/bwrap is refused before any tracker write, branch or node, "
+              "naming the backend, the platform and the missing piece",
+              refused and "selects Qwen Code on linux: missing /usr/bin/bwrap, which the Qwen Code sandbox needs" in err)
+    else:
+        check(f"under ship.review_sandbox = true a Qwen Code reviewer, with no sandbox route on {where}, is refused before any "
+              "tracker write, branch or node, naming the backend, the platform and the missing piece",
+              refused and f"selects Qwen Code on {where}: missing a " in err)
+    tools = TMP / "sandbox-tools"
+    tools.mkdir(exist_ok=True)
+    for name in ("bwrap", "socat"):  # stand-ins: the stub REVIEW node launches no sandbox, it only needs them found
+        (tools / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (tools / name).chmod(0o755)
+    cl = happy_case("reviewsandboxclaude", binding=sandboxed)
+    code, out, err = cl.ouro("run", "1", extra={"PATH": str(tools) + os.pathsep + os.environ["PATH"]})
+    if where in review_sandbox.PLATFORMS:
+        check(f"a Claude reviewer with bwrap and socat on PATH satisfies the key on {where}: REVIEW runs on Claude, sandboxed",
+              code == 0 and cl.node_call("REVIEW")["backend"] == "claude" and cl.node_call("REVIEW")["sandbox"] is True
+              and "review_sandbox" not in err)
+    else:
+        check(f"a Claude reviewer is refused on {where}, which has no harness sandbox, before any tracker write",
+              code == 2 and "missing a platform with a harness sandbox" in err and cl.wrote() == [])
+    codex_reviewer = TMP / "codex-reviewer-developer.toml"
+    codex_reviewer.write_text('[runtime]\nbackend="claude"\n[runtime.roles.reviewer]\nbackend="codex"\nmodel="gpt-fixture-reviewer"\n',
+                              encoding="utf-8")
+    cx = happy_case("reviewsandboxcodex", binding=sandboxed)
+    code, out, err = cx.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(codex_reviewer)})
+    if where in review_sandbox.PLATFORMS:
+        check(f"a Codex reviewer satisfies the key on {where}: the run builds and REVIEW runs on Codex",
+              code == 0 and cx.node_call("REVIEW")["backend"] == "codex" and "review_sandbox" not in err)
+    else:
+        check(f"a Codex reviewer is refused on {where}, which has no harness sandbox, before any tracker write",
+              code == 2 and "missing a platform with a harness sandbox" in err and cx.wrote() == [])
+    ca = happy_case("reviewsandboxabsent")
+    code, out, err = ca.ouro("run", "1")
+    check("without the key a Claude reviewer runs as it does today: BUILD, REVIEW and the pull request",
+          code == 0 and ca.node_call("REVIEW")["backend"] == "claude" and ca.node_call("REVIEW")["sandbox"] is False
+          and ca.pr() is not None and "review_sandbox" not in err)
 
 
 def sec_build_stop():
@@ -3686,6 +3744,113 @@ def sec_developer_runtime():
     code, out, err = cb.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(bad)})
     check("a mixed developer binding is a driver error before tracker writes or a branch",
           code == 1 and "Claude aliases" in err and cb.wrote() == [] and cb.branches() == ["master"])
+    triage = {"_issue_1": issue(labels=("needs-triage", "gates", "bug"),
+                                body="## What\nthing\n\n- `src/app.py` -- x -- \"def compute_total(items):\"\n")}
+    answer = {"verdict": "PROMOTE", "size": "S", "flow": "express", "doc_impact": "none", "comment": "Anchors resolve; one deliverable."}
+    ci = Case("developerinherits", table=triage,
+              binding=BINDING.format(policy="stop-at-pr", review="adversarial-review") + '[models]\nbuilder = "haiku"\n')
+    ci.node("TRIAGE", answer)
+    code, out, err = ci.ouro("triage", "1")
+    check("the triager role takes the repository's models.builder when nothing names its own",
+          code == 0 and ci.node_call("TRIAGE")["model"] == "haiku")
+    roles = TMP / "roles-developer.toml"
+    roles.write_text('[runtime]\nbackend="claude"\n[runtime.models]\nbuilder="haiku"\n[runtime.roles.triager]\nmodel="sonnet"\n', encoding="utf-8")
+    cr = Case("developerroles", table=triage)
+    cr.node("TRIAGE", answer)
+    code, out, err = cr.ouro("triage", "1", extra={"OURO_DEVELOPER_CONFIG": str(roles)})
+    check("a [runtime.roles.triager] model precedes runtime.models for the TRIAGE node",
+          code == 0 and cr.node_call("TRIAGE")["model"] == "sonnet")
+    other = TMP / "role-backend-developer.toml"
+    other.write_text('[runtime]\nbackend="claude"\n[runtime.roles.triager]\nbackend="qwen"\nmodel="deepseek-v4-pro"\n', encoding="utf-8")
+    co = Case("developerrolebackend", table=triage)
+    co.node("TRIAGE", answer)
+    code, out, err = co.ouro("triage", "1", extra={"OURO_DEVELOPER_CONFIG": str(other)})
+    check("a triager on a backend other than runtime.backend triages there, with its own model",
+          code == 0 and co.node_call("TRIAGE")["backend"] == "qwen" and co.node_call("TRIAGE")["model"] == "deepseek-v4-pro")
+    qwen_roles()
+    role_invariance()
+
+
+def qwen_roles():
+    """A reviewer, builder or checkpointer role on Qwen Code: what it serves."""
+    qwen_reviewer = TMP / "qwen-reviewer-developer.toml"
+    qwen_reviewer.write_text('[runtime]\nbackend="claude"\n[runtime.roles.reviewer]\nbackend="qwen"\nmodel="deepseek-v4-pro"\n',
+                             encoding="utf-8")
+    probe_tools = ["Read", "Grep", "Glob", "Bash"]
+    cs = happy_case("qwenreviewerstandard")
+    code, out, err = cs.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_reviewer)})
+    check("a reviewer on Qwen Code serves a standard-flow run: REVIEW probes on Qwen Code while BUILD runs on Claude",
+          code == 0 and cs.node_call("REVIEW")["backend"] == "qwen" and cs.node_call("REVIEW")["tools"] == probe_tools
+          and cs.node_call("BUILD")["backend"] == "claude")
+    qwen_builder = TMP / "qwen-builder-developer.toml"
+    qwen_builder.write_text('[runtime]\nbackend="claude"\n[runtime.roles.builder]\nbackend="qwen"\nmodel="deepseek-v4-pro"\n',
+                            encoding="utf-8")
+    cb = happy_case("qwenbuilder")
+    # The Qwen adapter's denial of a write under .claude/, in the shared shape it returns (tests/runtime/qwen_tests.py).
+    cb.node("BUILD", {**BUILD, "_denied": [{"tool_name": "write", "tool_input": {"file_path": ".claude/rules/x.md",
+                                                                                "content": "qwen-proposed rule"}}]})
+    code, out, err = cb.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_builder)})
+    body = (cb.pr() or {}).get("body", "")
+    check("a builder on Qwen Code builds the run, and its denied .claude/ write is a manual step on the pull request, "
+          "with the content it proposed, so the pull request waits",
+          code == 0 and cb.node_call("BUILD")["backend"] == "qwen" and cb.node_call("BUILD")["model"] == "deepseek-v4-pro"
+          and "does not admit" not in err and "## Manual steps" in body and "- `.claude/rules/x.md`" in body
+          and "qwen-proposed rule" in body and not any(s.startswith("pr merge") for s in cb.sigs()))
+    ce = Case("qwenreviewerexpress", table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: express"))})
+    ce.node("BUILD", {**BUILD, "writes": {"docs/note.md": "note, edited\n"}})  # a docs diff keeps express
+    ce.node("REVIEW", CLEAN)
+    code, out, err = ce.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_reviewer)})
+    check("the same reviewer serves an express-flow run: REVIEW reads on Qwen Code while BUILD runs on Claude",
+          code == 0 and ce.node_call("REVIEW")["backend"] == "qwen" and ce.node_call("REVIEW")["model"] == "deepseek-v4-pro"
+          and ce.node_call("REVIEW")["tools"] == nodemod.READ_TOOLS and ce.node_call("BUILD")["backend"] == "claude")
+    ct = happy_case("qwenreviewertighten", table={"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: express"))})
+    code, out, err = ct.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_reviewer)})  # src/app.py tightens to standard
+    check("a diff that tightens an express run to standard replans REVIEW: the reviewer on Qwen Code probes",
+          code == 0 and "tightens Flow from express to standard" not in err
+          and ct.node_call("REVIEW")["backend"] == "qwen" and ct.node_call("REVIEW")["tools"] == probe_tools)
+    qwen_checkpointer = TMP / "qwen-checkpointer-developer.toml"
+    qwen_checkpointer.write_text('[runtime]\nbackend="claude"\n[runtime.roles.checkpointer]\nbackend="qwen"\nmodel="m"\n', encoding="utf-8")
+    cc = Case("qwencheckpointergates", table={"_issue_1": issue(labels=("agent-ready", "checkpoint", "gates", "bug"))})
+    cc.node("CHECKPOINT", {"finding": "The total is summed at src/app.py:2."})
+    code, out, err = cc.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_checkpointer)})
+    check("a checkpoint whose brief grants a selected gate, with no acceptance command, runs its commands on Qwen Code",
+          code == 0 and "Acceptance" not in ISSUE_BODY and cc.node_call("CHECKPOINT")["backend"] == "qwen"
+          and any(t.startswith("Bash(") for t in cc.node_call("CHECKPOINT")["tools"]))
+    runner = runmod.Run.__new__(runmod.Run)
+    runner.labels, runner.flow = ["agent-ready", "checkpoint"], "standard"
+    check("a run resumed on a merged pull request plans FOLLOWUP's triager alone, whatever its labels",
+          runner.contracts(merged=True) == {"triager": nodemod.READ})
+    cm = happy_case("qwenreviewermerged", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
+    first, _, _ = cm.ouro("run", "1")
+    code, out, err = cm.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_reviewer)})
+    check("a standard-flow run resumed on its merged pull request plans no REVIEW: a reviewer on Qwen Code is not refused",
+          first == 0 and (cm.pr() or {}).get("state") == "MERGED" and code == 0 and "does not admit" not in err
+          and len(cm.prompts("BUILD")) == 1)
+
+
+def role_invariance():
+    """A developer binding with no [runtime.roles] table: every node's backend, settings, preflight call and argv as before."""
+    from unittest import mock
+    from ouro import developer as devmod
+    for cfg in (devmod.Settings(), devmod.Settings("codex", {"builder": "gpt-fixture"}, "high")):
+        check(f"without a role table every role selects {cfg.backend} and executes with the developer settings themselves",
+              not cfg.mixed() and all(cfg.backend_of(r) == cfg.backend and cfg.of(r) is cfg for r in devmod.ROLES))
+        seen = []
+        runner = runmod.Run.__new__(runmod.Run)
+        runner.env = types.SimpleNamespace(runtime=cfg, dry=False)
+        with mock.patch.object(nodemod, "preflight", side_effect=lambda *a, **k: seen.append((a, k))):
+            runner.preflight()
+        check(f"without a role table a {cfg.backend} run makes the one full preflight call it always made", seen == [((cfg,), {})])
+    argvs, usage = [], len(nodemod.USAGE)
+    envelope = {"session_id": "s-invariant", "structured_output": {"verdict": "CLEAN", "findings": []}}
+    with mock.patch.object(shmod, "argv_for", side_effect=lambda *a: list(a)), mock.patch.dict(os.environ, {"OURO_NODE_STUB": ""}), \
+            mock.patch.object(shmod, "run", side_effect=lambda argv, **k: argvs.append(argv) or shmod.R(0, json.dumps(envelope), "", argv)):
+        nodemod.run_node("REVIEW", "p", "opus", nodemod.READ, str(TMP), 5, runtime=devmod.Settings())
+    check("without a role table REVIEW runs on Claude with the argv it always had",
+          argvs == [["claude", "-p", "--output-format", "json", "--model", "opus", "--allowedTools", "Read,Grep,Glob",
+                     "--permission-mode", "dontAsk", "--json-schema", json.dumps(nodemod.SCHEMAS["REVIEW"])]]
+          and [u["backend"] for u in nodemod.USAGE[usage:]] == ["claude"])
+    del nodemod.USAGE[usage:]
 
 
 def sec_setup():
@@ -4911,7 +5076,7 @@ def sec_ci_validation():
 SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("run: full class gates by paths", sec_full_paths),
             ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
             ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: a developer's [[ship.person]] entry", sec_ship_person), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
-            ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
+            ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: ship.review_sandbox", sec_review_sandbox),("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
             ("run: node garbage", sec_node_garbage), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
 INDEX = os.environ.get("OURO_TEST_INDEX")
 WORKERS = int(os.environ.get("OURO_TEST_WORKERS") or min(8, os.cpu_count() or 1))

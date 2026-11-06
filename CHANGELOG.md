@@ -20,6 +20,117 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.11.0] - 2026-11-06
+
+- A Qwen Code preflight that is not file-only proves each contract its roles need through the
+  real CLI and the allow-list hook: CHECKPOINT's commands and PROBE run a granted shell command,
+  and BUILD also writes one file in the trusted scratch directory. A transcript in which the tool
+  is missing, failed or not granted refuses the backend before the run writes anything.
+- A Qwen Code node that runs commands or edits (PROBE review, CHECKPOINT with commands, BUILD)
+  gets its shell and write tools: its private trusted-folders file trusts its resolved working
+  directory, so Qwen Code no longer overrides `--approval-mode yolo` to `default`, and marks
+  every ancestor of that directory untrusted, so no parent directory's `.env` loads. READ nodes
+  and the external reader keep a trust file that trusts nothing.
+- A Qwen Code node that runs commands or edits (PROBE review, CHECKPOINT with commands, BUILD)
+  refuses before launch when its working directory's top level holds a `.qwen` or `.env` entry,
+  in any case, and the refusal names the path. READ nodes are unchanged.
+- A PROBE review node launches without git or GitHub credentials on every backend (Claude, Codex
+  and Qwen Code), with or without `ship.review_sandbox`. `GH_TOKEN`, `GITHUB_TOKEN`,
+  `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `SSH_AUTH_SOCK`, `GIT_ASKPASS` and
+  `SSH_ASKPASS` are removed, `GIT_TERMINAL_PROMPT=0` is set, `GH_CONFIG_DIR` names an empty
+  directory private to the launch, `GIT_CONFIG_COUNT` entries clear `credential.helper` and
+  `core.askPass`, and `GIT_SSH_COMMAND` runs an ssh with no config, agent or identity. Codex's
+  bridge applies the same to each command it runs. The review copy is a standalone repository
+  with no remote in place of a linked worktree, which shared the main checkout's `origin`. A
+  push or `gh` call that keeps these overrides, through a nested interpreter or a renamed git
+  alike, finds no helper, askpass, agent, ssh key or `gh` login. The overrides redirect and do
+  not delete: a command that drops one or names a credential source itself
+  (`git -c credential.helper=store`) authenticates again, and on Claude and Codex git still sends
+  a matching `~/.netrc` entry to an http(s) remote, even on a plain `git push` that keeps every
+  override, while `~/.git-credentials`, `~/.ssh` and `~/.config/gh` stay readable. The commands still run unconfined outside a sandbox: they can
+  write outside the copy and reach the network, and a raw `ssh` with an explicit key is not
+  covered. The harness's own model login and the READ, CHECKPOINT and BUILD environments are
+  unchanged.
+- A repository can require a sandboxed REVIEW node: with `ship.review_sandbox = true`, `ouro run`
+  refuses before any tracker call when the reviewer role's backend has no sandbox route on the
+  host, its prerequisites are missing, or the host is native Windows, WSL1 or another platform
+  with no harness sandbox. The refusal names the backend, the platform and the missing piece.
+  Codex keeps its own boundary, on Linux, WSL2 and macOS. A Claude reviewer launches its PROBE
+  review inside Claude Code's sandbox (`allowUnsandboxedCommands` off, `failIfUnavailable` on, no
+  allowed network domain, and a temp directory private to the launch, deleted when it returns, in
+  place of the `/tmp/claude-<uid>` the user's sessions share), on macOS and, with `bwrap` and `socat` on PATH, on Linux and WSL2.
+  A Qwen Code reviewer launches its PROBE review under Qwen Code's tool execution sandbox
+  (`bwrap`, `workspace-write` on the review copy, `network: closed`, deny rules for `git push`,
+  `git commit` and `gh`), on Linux alone and with `/usr/bin/bwrap` present; the allow-list hook
+  does not run there, so its grant check does not discard that node's answer.
+  **Consumer contract:** `[ship]` admitted no `review_sandbox`; it now admits a boolean, and
+  `check` refuses any other type. Migration: none; an unset key runs as before.
+- A developer can select Qwen Code workers, `[runtime] backend = "qwen"`. The model comes from an
+  OpenAI-compatible endpoint named by `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `OPENAI_MODEL` in
+  the launch environment. An allow-list hook and isolation from the repository's and the
+  developer's own Qwen configuration bound each node. With every role on Qwen Code, `ouro run`'s
+  preflight proves every role's model, and `ouro triage`'s the triager's alone.
+  **Consumer contract:** `runtime.backend` admitted `claude` or `codex`, and `ouro-developer.py
+  install --backend` took `claude|codex`; both now also take `qwen`. Migration: none; an existing
+  developer binding is unchanged.
+- The developer binding names worker roles per node: `triager` (TRIAGE and FOLLOWUP) and
+  `checkpointer` (CHECKPOINT) join `builder`, `builder_trivial` and `reviewer`, and take the
+  `builder` model when nothing names theirs, as those nodes do today. An optional
+  `[runtime.roles.<role>]` table holds `backend`, `model` and `effort`, validated against the
+  role's backend; its `model` precedes `runtime.models`.
+  **Consumer contract:** `[runtime]` admitted `backend`, `effort` and `models` with the roles
+  `builder`, `builder_trivial` and `reviewer`; it now also admits `roles`, and both tables take
+  `triager` and `checkpointer`. `ouro-developer.py install --model` also writes those two roles.
+  Migration: none; an existing developer binding is unchanged.
+- Each node dispatches through its role's backend, so one `ouro run` can triage and file
+  follow-ups on Qwen Code while it builds and reviews on Claude. Before any write, the run
+  preflights each backend its roles select once, at the widest contract those roles can need for
+  the command, and refuses a role whose backend does not admit it, naming the role, the backend
+  and the contract; a diff that tightens the flow past express after BUILD commits replans
+  REVIEW, refusing there a reviewer whose backend does not admit PROBE. Every backend declares
+  what it admits: Claude and Qwen Code every contract, Codex every contract on Linux and READ on
+  native Windows. The attempt diagnostics, the usage table (a new last `backend` column)
+  and the progress file's `reviewer` field name the backend each node used. `ouro-developer.py
+  inspect` prints each role's backend and model, and `inspect --check` preflights every backend a
+  role selects. A binding with no role table dispatches and preflights every node as before.
+  **Consumer contract:** a `runtime.roles.<role>` `backend` or `effort` other than the runtime's
+  own was refused; it is now admitted, and a `runtime.models` entry for a role whose table
+  selects another backend is refused. `inspect` prints a `roles` object, and the usage table a
+  `backend` column. Migration: none; an existing developer binding is unchanged.
+- Qwen Code can be the external review reader: `ship.external_cli = "qwen"` runs the pull
+  request's outside read through `bin/external-audit.py --cli qwen`. The worker's allow-list hook
+  and isolation bound the read. A tool that ran without the hook's grant discards the verdict,
+  and each denied call prints a warning. The endpoint comes from `OPENAI_API_KEY`,
+  `OPENAI_BASE_URL` and `OPENAI_MODEL`. A vendored copy of `external-audit.py`, which has no
+  `ouro` package beside it, refuses `qwen` and runs every other reader. The reader takes the
+  CLI's output from `stdout.txt`, which the CLI writes directly, not from a pipe: Qwen Code
+  truncates a piped `-o json` stream and still exits 0.
+  **Consumer contract:** `ship.external_cli`, the installer's `-ExternalCli` and
+  `external-audit.py --cli` took `grok`, `claude`, `codex` or `copilot`; each now also takes
+  `qwen`. Migration: none.
+- Qwen Code workers run commands: a `checkpointer` whose brief grants commands and a `reviewer`
+  that probes (standard and full flows) can select Qwen Code. Such a node runs in approval mode
+  `yolo`, and the allow-list hook decides each shell call: CHECKPOINT's exact commands, or for
+  PROBE any single command but `git push`, `git commit` (dashed builtins such as `git-push`
+  included) and `gh`, with no `$`, glob, brace, git inline or `GIT_CONFIG` environment config, or
+  alias; a compound command, a redirection, a substitution, a leading
+  assignment, a background run and another directory are refused, as bash parses the command
+  line. A nested interpreter's argument (`python3 -c`), an argument a command re-splits
+  (`env -S`) and a git binary under another name (a symlink or copy) are not inspected, as with
+  Claude's deny patterns, so PROBE's refusals stop a reviewer's slip, not a determined push.
+  The commands run unconfined, as on Claude. Preflight proves the hook admits a listed
+  command and refuses an unlisted, a chained and a probe's `git push` one.
+- Qwen Code workers build: a `builder` or `builder_trivial` role can select Qwen Code. The
+  allow-list hook decides each `write_file`, `edit` and `notebook_edit` call: its path must lie
+  inside the worktree, spelled and resolved, outside `.git`, `.claude`, `.codex`, `.agents`,
+  `.aws` and `.qwen`. Its shell runs the brief's exact commands and `git rm`, `git mv`,
+  `git status`, `git diff`, `git log` and `git ls-files` with any arguments. A refused write
+  returns in the shared denial shape, so one under a harness configuration directory becomes a
+  manual step on the pull request with the proposed content or old and new text; a refused
+  `notebook_edit` is listed with no proposed edit. `.qwen` is among those directories only while
+  BUILD runs on Qwen Code: on Claude and Codex a `.qwen/` path is no manual step. BUILD's prompt carries the installed run skill, as on Codex. Preflight also
+  proves the hook admits a worktree write and refuses a `.claude/` and an outside one.
+
 ## [v1.10.0] - 2026-11-03
 
 - The binding accepts `[[ship.person]]` entries: a gh `login`, unique without regard to case and

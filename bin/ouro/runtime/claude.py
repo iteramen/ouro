@@ -1,17 +1,29 @@
 """Claude transport. Tool spelling and the CLI envelope stay inside this module."""
 import json
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
 from .. import sh
-from .process import worker_env
+from .process import probe_env, worker_env
 from . import Capabilities, diagnostics
 from .backends import NOT_REQUIRED, UNCONFINED, UNSUPPORTED, Interface
 
 FLAGS = ("--output-format", "--model", "--allowedTools", "--disallowedTools", "--permission-mode", "--json-schema", "--settings")
 SHARED_TOOLS = {"Write": "write", "Edit": "edit", "Bash": "run", "PowerShell": "run"}
 SHARED_INPUT = {"file_path": "file_path", "content": "content", "old_string": "old", "new_string": "new", "command": "command"}
+# Bash writes only in the cwd (the disposable review copy) and the launch's own temp root; no domain is admitted;
+# a missing sandbox fails the launch.
+SANDBOX = {"sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
+                       "network": {"allowedDomains": []}}}
+SANDBOX_PREREQUISITES = {"linux": ("bwrap", "socat"), "wsl2": ("bwrap", "socat"), "macos": ()}  # macOS: Seatbelt, built in
+
+
+def sandbox_route(where):
+    """The executables Claude Code's sandbox lacks on PATH on platform `where`, or None where it has no sandbox."""
+    needs = SANDBOX_PREREQUISITES.get(where)
+    return None if needs is None else [f"{b} on PATH" for b in needs if shutil.which(b) is None]
 
 
 def tools_for(capabilities):
@@ -56,7 +68,7 @@ def execute(name, prompt, model, tools, cwd, timeout, denied, schema, settings):
         root = Path(directory)
         policy = root / "policy.json"
         evidence = root / "commands.jsonl"
-        extra = []
+        extra, env = [], {}
         if name == "BUILD" and isinstance(tools, Capabilities):
             commands = list(tools.commands)
             policy.write_text(json.dumps({"root": str(Path(cwd).resolve()), "commands": commands,
@@ -64,20 +76,28 @@ def execute(name, prompt, model, tools, cwd, timeout, denied, schema, settings):
             hooks = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{
                 "type": "command", "command": observed.invocation("hook", policy)}]}]}}
             extra = ["--settings", json.dumps(hooks)]
+        elif isinstance(tools, Capabilities) and tools.sandbox:
+            extra = ["--settings", json.dumps(SANDBOX)]
+            # Claude Code's sandbox also admits writes under <CLAUDE_CODE_TMPDIR or TMPDIR>/claude-<uid>, by default
+            # /tmp/claude-<uid>, which every session of the uid shares: this launch gets its own, deleted when it returns.
+            (root / "tmp").mkdir()
+            env = {"CLAUDE_CODE_TMPDIR": str(root / "tmp"), "TMPDIR": str(root / "tmp")}
+        (root / "gh").mkdir()
+        env.update(probe_env(isinstance(tools, Capabilities) and tools.probe, root / "gh"))
         answer, session, usage, cost = _execute(
-            name, prompt, model, tools, cwd, timeout, denied, schema, settings, extra)
+            name, prompt, model, tools, cwd, timeout, denied, schema, settings, extra, env)
         usage = {**usage, "tool_calls": [json.loads(line) for line in evidence.read_text(
             encoding="utf-8").splitlines()] if evidence.exists() else []}
         return answer, session, usage, cost
 
 
-def _execute(name, prompt, model, tools, cwd, timeout, denied, schema, settings, extra=()):
+def _execute(name, prompt, model, tools, cwd, timeout, denied, schema, settings, extra=(), env=None):
     if isinstance(tools, Capabilities):
         tools, denied = tools_for(tools)
     argv = sh.argv_for("claude", "-p", "--output-format", "json", "--model", model, "--allowedTools", ",".join(tools),
                        *(["--disallowedTools", ",".join(denied)] if denied else []),
                        "--permission-mode", "dontAsk", "--json-schema", json.dumps(schema), *extra)
-    r = sh.run(argv, cwd=cwd, input_text=prompt, timeout=timeout, env=worker_env(settings))
+    r = sh.run(argv, cwd=cwd, input_text=prompt, timeout=timeout, env={**worker_env(settings), **(env or {})})
     if r.code is None:
         raise sh.DriverError(f"node {name} timed out after {timeout}s")
     try:
@@ -103,5 +123,7 @@ def _attempt(name, prompt, model, tools, cwd, timeout, denied, schema, settings,
     return answer, session, usage, cost
 
 
-INTERFACE = Interface(preflight=lambda settings, capabilities: preflight(settings) or (), worktree_readiness=NOT_REQUIRED,
-                      execute=_attempt, probe_confinement=UNCONFINED, validate_answer=UNSUPPORTED)
+INTERFACE = Interface(preflight=lambda settings, capabilities: preflight(settings) or (), admits=lambda capabilities: True,
+                      worktree_readiness=NOT_REQUIRED,
+                      execute=_attempt, probe_confinement=UNCONFINED, sandbox_route=sandbox_route,
+                      validate_answer=UNSUPPORTED)

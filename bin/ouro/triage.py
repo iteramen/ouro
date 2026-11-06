@@ -2,7 +2,7 @@
 import json
 import re
 
-from . import briefs, node, sh
+from . import briefs, developer, node, sh
 from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, declared_source, empty_list
 from .records import REPO_POLICY, body_line, parse_parts, restamped, ship_policy
 from .run import Run
@@ -216,7 +216,11 @@ def shape_findings(env, issue, body, labels, comment):
 
 
 def triage(env, n, dry):
-    node.preflight(env.runtime, capabilities=node.READ)  # the TRIAGE node runs even in a dry run
+    needs = {"triager": node.READ}  # the TRIAGE node runs even in a dry run
+    if isinstance(env.runtime, developer.Settings) and env.runtime.mixed(needs):
+        node.preflight(env.runtime, needs=needs)
+    else:
+        node.preflight(env.runtime, capabilities=node.READ)
     i = env.gh_json("issue", "view", str(n), "--json", "number,title,body,labels,comments,state")
     labels = [tag["name"] for tag in i.get("labels", [])]
     body = i.get("body") or ""
@@ -236,7 +240,7 @@ def triage(env, n, dry):
                            anchors="\n".join(f"- {a}" for a in anchors) or "No finding: every anchor line resolves.",
                            files=file_list(files), contract=briefs.contract_sections(env, (3, 4, 8)))
     say(f"TRIAGE node for #{n}")
-    ans = node.run_node("TRIAGE", prompt, node.model(env, "builder", node.DEFAULT_BUILDER), node.READ,
+    ans = node.run_node("TRIAGE", prompt, node.model(env, "triager", node.DEFAULT_BUILDER), node.READ,
                         str(env.main), node.TIMEOUTS["TRIAGE"], runtime=env.runtime)
     verdict = str(ans.get("verdict") or "").strip().upper()
     if verdict not in VERDICTS:

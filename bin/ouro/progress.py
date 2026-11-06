@@ -53,7 +53,8 @@ def _pull(line):
 
 class Progress:
     def __init__(self, env, issue, part):
-        backend = getattr(getattr(env, "runtime", None), "backend", None)
+        runtime = getattr(env, "runtime", None)
+        backend = runtime.backend_of("reviewer") if hasattr(runtime, "backend_of") else getattr(runtime, "backend", None)
         self.env = env
         self.backend = backend if isinstance(backend, str) and backend.strip() else None
         self.path = None

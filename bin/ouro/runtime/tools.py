@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import stat
+import tempfile
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -551,12 +552,14 @@ class Bridge:
         before = execution.fingerprint(self.root, inventory) if self.policy["edit"] else None
         arguments = sh.argv_for(argv[0], *argv[1:])
         command_argv = sandbox_argv(self.root, arguments, probe=True) if probe else sandbox_argv(self.root, arguments)
-        if probe:
-            environment = process.child_env(environment)
-            first = probe_configuration(self.root, environment, command_argv)
-            if first != probe_configuration(self.root, environment, command_argv):
-                raise sh.DriverError("PROBE effective configuration changed before command")
-        r = process.run(command_argv, cwd=self.root, timeout=600, env=environment or None)
+        with tempfile.TemporaryDirectory(prefix="ouro-probe-gh-") as gh:
+            if probe:
+                # Removal markers stay: process.run normalizes this environment once more.
+                environment = {**process.child_env(environment), **process.probe_env(True, gh)}
+                first = probe_configuration(self.root, environment, command_argv)
+                if first != probe_configuration(self.root, environment, command_argv):
+                    raise sh.DriverError("PROBE effective configuration changed before command")
+            r = process.run(command_argv, cwd=self.root, timeout=600, env=environment or None)
         after = execution.fingerprint(self.root, inventory) if before else None
         self.inputs = before if before == after else None
         if git_query and git_configuration_failure(r):
