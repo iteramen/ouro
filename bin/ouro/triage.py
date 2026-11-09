@@ -9,6 +9,7 @@ from .run import Run
 from .sh import DriverError, argv_for, say
 
 STATE_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage", "idea")  # umbrella is cleared by its children closing, never by a re-triage
+MODIFIERS = ("checkpoint", "trivial")  # ride on agent-ready only
 VERDICTS = ("PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE")
 
 
@@ -28,11 +29,13 @@ def label_moves(verdict, size, labels, named=()):
     elif verdict == "SPLIT":
         add = ["umbrella"]
     else:
-        remove = [label for label in ("agent-ready", "checkpoint") if label in present] if verdict == "STALE" and "checkpoint" in present else []
+        remove = [label for label in ("agent-ready", *MODIFIERS) if label in present] if verdict == "STALE" and "checkpoint" in present else []
         return [], remove
     add = list(named) + add
     remove = [label for label in STATE_LABELS if label in present and label not in add]
-    if verdict == "PROMOTE" and "checkpoint" in present:
+    if "agent-ready" not in add:  # a modifier never stands alone
+        remove += [label for label in MODIFIERS if label in present]
+    elif verdict == "PROMOTE" and "checkpoint" in present:
         remove.append("checkpoint")
     return [a for a in add if a not in present], remove
 

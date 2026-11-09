@@ -24,8 +24,11 @@ class ReviewSandboxTests(unittest.TestCase):
     def test_the_route_and_platform_matrix(self):
         with which("bwrap", "socat"):
             for where in ("linux", "wsl2", "macos"):
-                for backend in ("codex", "claude"):
-                    self.assertIsNone(review_sandbox.refusal(developer.Settings(backend), where), (backend, where))
+                self.assertIsNone(review_sandbox.refusal(developer.Settings("claude"), where), where)
+            for where in ("linux", "macos"):
+                self.assertIsNone(review_sandbox.refusal(developer.Settings("codex"), where), where)
+            why = review_sandbox.refusal(developer.Settings("codex"), "wsl2")
+            self.assertIn("selects Codex on wsl2: missing a Codex sandbox route", why)
             for where in ("wsl2", "macos"):
                 why = review_sandbox.refusal(developer.Settings("qwen"), where)
                 self.assertIn(f"selects Qwen Code on {where}: missing a Qwen Code sandbox route", why)

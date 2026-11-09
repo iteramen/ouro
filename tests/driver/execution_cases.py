@@ -35,6 +35,13 @@ def exercise(h):
             h.git(c.main, "push", "-q", "origin", "master")
         c.node("BUILD", {**h.BUILD, **answer})
         return c
+    def restore_ready(c):
+        # Model the owner's explicit re-admission after a stop; keep counters and evidence.
+        path = c.state / "issue-1.json"
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state["labels"] = [{"name": name} for name in ("agent-ready", "gates", "bug")]
+        path.write_text(json.dumps(state), encoding="utf-8")
+
     def ready(c):
         return any(x["body"].startswith("**Ready for merge**") for x in c.pr_comments())
     successes = {"_run": [command, second]}
@@ -90,6 +97,76 @@ def exercise(h):
         print("SKIP: supported caller proof controls; actual unsupported refusal controls above remain required")
         return
 
+    for fails in (False, True):
+        c = case("resumed-unobserved-" + str(fails), {})
+        if fails:
+            c.write("gates/other.py", "raise SystemExit(9)\n")
+            h.git(c.main, "add", "gates/other.py")
+            h.git(c.main, "commit", "-qm", "failing acceptance fixture")
+            h.git(c.main, "push", "-q", "origin", "master")
+        code, out, err = c.ouro("run", "1")
+        wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+        head = h.git(wt, "rev-parse", "HEAD")
+        h.check("unobserved acceptance without consent never executes caller command",
+                code == 3 and not ready(c) and no_caller_receipt(c)
+                and "Missing successful execution evidence" in out)
+        c.clear_prompts()
+        code, out, err = c.ouro("run", "1", "--validate")
+        h.check("explicit caller consent cannot resume an owner stop",
+                code == 3 and "not agent-ready" in out and not c.prompts("BUILD")
+                and h.git(wt, "rev-parse", "HEAD") == head)
+        restore_ready(c)
+        c.clear_prompts()
+        code, out, err = c.ouro("run", "1", "--validate")
+        h.check("resumed explicit caller proof preserves head and spent fixes",
+                h.git(wt, "rev-parse", "HEAD") == head and not c.prompts("BUILD")
+                and ((fails and code == 3 and "exit 9" in out and not ready(c))
+                     or (not fails and code == 0 and ready(c))))
+        if not fails:
+            receipts = [json.loads(p.read_text(encoding="utf-8")) for p in h.validation_receipts(c)]
+            h.check("missing candidate obtains authentic exact-head acceptance evidence",
+                    any(r["sha"] == head and second in r["commands"] for r in receipts))
+            h.git(wt, "commit", "--allow-empty", "-qm", "stale caller proof")
+            newer = h.git(wt, "rev-parse", "HEAD")
+            code, out, err = c.ouro("run", "1", "--validate")
+            receipts = [json.loads(p.read_text(encoding="utf-8")) for p in h.validation_receipts(c)]
+            h.check("resumed caller path executes again rather than accepting stale-head proof",
+                    code == 0 and any(r["sha"] == newer and second in r["commands"] for r in receipts)
+                    and not c.prompts("BUILD"))
+
+    # A missing candidate is different from an explicit unsuccessful worker report.
+    # The command itself passes, so a widened resume would incorrectly reach review.
+    for name, report in (("failed", {"exit": 9}), ("noninteger", {"exit": "0"}),
+                         ("boolean", {"exit": False}), ("missing-exit", {})):
+        c = case("resumed-report-" + name, {"gates_run": [{"cmd": second, **report}]})
+        code, out, err = c.ouro("run", "1")
+        wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+        head = h.git(wt, "rev-parse", "HEAD")
+        h.check(name + " worker report reaches the original bounded finding",
+                code == 3 and "Missing successful execution evidence" in out)
+        restore_ready(c)
+        c.clear_prompts()
+        code, out, err = c.ouro("run", "1", "--validate")
+        h.check(name + " worker report cannot be bypassed by resumed caller consent",
+                code == 3 and "Missing successful execution evidence" in out
+                and not ready(c) and not c.prompts("BUILD") and not c.prompts("REVIEW")
+                and h.git(wt, "rev-parse", "HEAD") == head and no_caller_receipt(c))
+
+    unapproved = "python3 gates/unapproved.py"
+    c = case("resumed-unapproved", {"writes": {
+        **h.BUILD["writes"],
+        ".claude/ouro.toml": binding.replace("[ship]", '[[gate]]\nrun = "' + unapproved
+            + '"\ncheap = true\npaths = ["src/*"]\nci = "echo another workflow runs this gate"\n[ship]'),
+        "gates/unapproved.py": "raise SystemExit('caller must not execute')\n"}})
+    c.ouro("run", "1")
+    restore_ready(c)
+    c.clear_prompts()
+    code, out, err = c.ouro("run", "1", "--validate")
+    h.check("resumed branch-only approval cannot authorize missing caller execution",
+            code == 3 and "Missing successful execution evidence" in out
+            and unapproved in out and "caller must not execute" not in out
+            and not c.prompts("BUILD") and no_caller_receipt(c))
+
     c = case("success", successes)
     code, out, err = c.ouro("run", "1")
     h.check("worker-only candidates wait for explicit caller consent instead of auto-executing",
@@ -107,8 +184,8 @@ def exercise(h):
     h.git(wt, "commit", "-q", "--allow-empty", "-m", "later head without execution")
     c.clear_prompts()
     code, out, err = c.ouro("run", "1", "--validate")
-    h.check("a newer resumed head cannot inherit an older worker receipt",
-            code == 0 and c.prompts("BUILD") and "Missing successful execution evidence" in out)
+    h.check("a newer resumed head obtains fresh caller proof without a BUILD fix",
+            code == 0 and not c.prompts("BUILD") and "Missing successful execution evidence" not in out)
     proof = pathlib.Path(h.git(wt, "rev-parse", "--absolute-git-dir")) / "ouro-validation"
     head = h.git(wt, "rev-parse", "HEAD")
     receipts = [p for p in proof.glob("*/receipt.json") if json.loads(p.read_text(encoding="utf-8"))["sha"] == head]
@@ -118,12 +195,41 @@ def exercise(h):
     ready_before = sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments())
     c.clear_prompts()
     code, out, err = c.ouro("run", "1")
-    h.check("corrupt current-head proof waits for consent instead of reusing observations",
-            code == 0 and not c.prompts("BUILD") and "waiting for validation" in out
-            and sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments()) == ready_before)
+    h.check("corrupt proof without current candidates uses the bounded fix path",
+            code == 0 and len(c.prompts("BUILD")) == 1 and "waiting for validation" in out
+            and "Missing successful execution evidence" in out and sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments()) == ready_before)
+    c.clear_prompts()
     code, out, err = c.ouro("run", "1", "--validate")
     h.check("explicit validation replaces corrupt proof with genuine command execution",
             code == 0 and not c.prompts("BUILD") and "Missing successful execution evidence" not in out)
+
+    # Keep the original corruption control with current worker-candidate provenance;
+    # the caller-only newer-head case above deliberately has different provenance.
+    c = case("current-candidate-corrupt", successes)
+    c.ouro("run", "1")
+    code, out, err = c.ouro("run", "1", "--validate")
+    wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+    head = h.git(wt, "rev-parse", "HEAD")
+    proof = pathlib.Path(h.git(wt, "rev-parse", "--absolute-git-dir")) / "ouro-validation"
+    receipts = [path for path in proof.glob("*/receipt.json")
+                if json.loads(path.read_text(encoding="utf-8"))["sha"] == head]
+    h.check("current-candidate corruption starts from genuine current-head proof",
+            code == 0 and ready(c) and bool(receipts))
+    for receipt in receipts:
+        receipt.write_text("{corrupt", encoding="utf-8")
+    ready_before = sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments())
+    c.clear_prompts()
+    code, out, err = c.ouro("run", "1")
+    h.check("current-candidate corrupt proof waits for consent without rebuilding",
+            code == 0 and not c.prompts("BUILD") and not c.prompts("REVIEW")
+            and "waiting for validation" in out and h.git(wt, "rev-parse", "HEAD") == head
+            and sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments()) == ready_before)
+    c.clear_prompts()
+    code, out, err = c.ouro("run", "1", "--validate")
+    h.check("current-candidate corrupt proof is replaced by fresh explicit execution",
+            code == 0 and not c.prompts("BUILD") and h.git(wt, "rev-parse", "HEAD") == head
+            and "Missing successful execution evidence" not in out
+            and "validation @ " in out and ready(c))
 
     c = case("head-reader", {"_run": [command, second]})
     c.write("gates/check.py",
@@ -214,7 +320,7 @@ def exercise(h):
         c.clear_prompts()
         code, out, err = c.ouro("run", "1", "--validate")
         h.check(recovery + " receipts: a newer resumed head retains a branch-added command obligation",
-                code == 3 and added in out and "Missing successful execution evidence" in out
+                code == 3 and added in out and "exit 9" in out
                 and int(h.git(wt, "rev-list", "--count", "--no-merges", "origin/master..HEAD")) == 6
                 and any(h.stop_comment_ok(stop, "review cap") and "5 fix rounds are spent" in stop
                         for stop in h.stops_of(c))

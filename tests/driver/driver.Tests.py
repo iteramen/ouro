@@ -586,6 +586,16 @@ def sec_labels():
     check("STALE still moves nothing", t.label_moves("STALE", "S", ["needs-triage"]) == ([], []))
     check("PROMOTE exits checkpoint routing", t.label_moves("PROMOTE", "S", ["agent-ready", "checkpoint", "gates"]) == ([], ["checkpoint"]))
     check("STALE retires checkpoint routing without admitting BUILD", t.label_moves("STALE", "S", ["agent-ready", "checkpoint", "gates"]) == ([], ["agent-ready", "checkpoint"]))
+    for verdict, with_checkpoint, with_trivial in (
+            ("PROMOTE", ([], ["checkpoint"]), ([], [])),
+            ("NEEDS-RULING", (["needs-ruling"], ["agent-ready", "checkpoint"]), (["needs-ruling"], ["agent-ready", "trivial"])),
+            ("BLOCKED", (["blocked"], ["agent-ready", "checkpoint"]), (["blocked"], ["agent-ready", "trivial"])),
+            ("SPLIT", (["umbrella"], ["agent-ready", "checkpoint"]), (["umbrella"], ["agent-ready", "trivial"])),
+            ("STALE", ([], ["agent-ready", "checkpoint"]), ([], []))):
+        check(f"{verdict} on agent-ready + checkpoint leaves no modifier standing alone", t.label_moves(verdict, "S", ["agent-ready", "checkpoint"]) == with_checkpoint)
+        check(f"{verdict} on agent-ready + trivial leaves no modifier standing alone", t.label_moves(verdict, "S", ["agent-ready", "trivial"]) == with_trivial)
+    check("STALE on checkpoint + trivial removes both with agent-ready", t.label_moves("STALE", "S", ["agent-ready", "checkpoint", "trivial"]) == ([], ["agent-ready", "checkpoint", "trivial"]))
+    check("a PROMOTE at L, a SPLIT, drops trivial with agent-ready", t.label_moves("PROMOTE", "L", ["agent-ready", "trivial"]) == (["umbrella"], ["agent-ready", "trivial"]))
     for text in ("Verdict: PROMOTE (size S, flow express). Anchors resolve.", "Verdict: PROMOTE \u2014 Anchors resolve.", "Verdict: PROMOTE - Anchors resolve.",
                  "Verdict: **PROMOTE**\n\nAnchors resolve.", "**Verdict:** PROMOTE\n\nAnchors resolve.", "**Verdict: PROMOTE**\n\nAnchors resolve.",
                  "verdict: promote. Anchors resolve.", "**Triage**\nVerdict: PROMOTE: Anchors resolve.", "Verdict: NEEDS-RULING, Anchors resolve."):
@@ -1169,7 +1179,15 @@ def sec_findings_fix():
     c.node("BUILD", {**BUILD, "subject": "fix(app): nothing", "writes": {}}, 2)
     c.node("REVIEW", CLEAN)
     code, out, err = c.ouro("run", "1")
-    check("a red-gate fix that changes no file is still a driver error, not an empty commit", code == 1 and "left no change" in err and len(c.prompts("BUILD")) == 2)
+    stops = stops_of(c)
+    check("a red-gate fix that changes no file stops as `open decision`, exit 3, naming the gate and its evidence log, not an empty commit",
+          code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision") and "gate `python3 gates/check.py` exited 1" in stops[0]
+          and "evidence " in stops[0] and "no file change fixes" in stops[0] and "needs-ruling" in labels_of(c)
+          and "left no change" not in err and len(c.prompts("BUILD")) == 2 and not c.prompts("REVIEW"))
+    c = Case("firstbuildnone")
+    c.node("BUILD", {**BUILD, "writes": {}})
+    code, out, err = c.ouro("run", "1")
+    check("a first BUILD that changes no file is still a driver error, with no stop", code == 1 and "left no change" in err and stops_of(c) == [])
 
     class FakeEnv:
         def lookup(self, key, default=None):
@@ -3344,8 +3362,9 @@ def sec_lane_guards():
         run.claim = types.SimpleNamespace(prepared=None)
         run.ensure_worktree = lambda: seen.__setitem__("ensure", seen["ensure"] + 1)
         run.rederive = lambda: None
-        def drive(pr):
+        def drive(pr, *, resumed=True):
             seen["drive"] += 1
+            seen["drive_resumed"] = resumed
             return 0
         run.drive = drive
         with mock.patch.object(runmod.node, "worktree_readiness", lambda *a, **k: None), \
@@ -3358,6 +3377,7 @@ def sec_lane_guards():
         if fault == "none":
             check("clean fallback still hands H to its issue branch and restores B before ordinary drive",
                   result == 0 and seen["ensure"] == seen["drive"] == 1
+                  and seen.get("drive_resumed") is False
                   and real_git(c.main, "rev-parse", "HEAD") == base
                   and real_git(c.main, "rev-parse", run.branch) == head)
         elif fault == "late-issue-head":
@@ -4160,7 +4180,9 @@ def sec_validation_inheritance():
         c.clear_prompts()
         code, out, err = validation_run(c, '--validate')
         check(f'{name} cannot justify a contradictory or invalid historical request',
-              code == 1 and error in err and not validation_logs(c) and not c.prompts('BUILD')
+              (code == 3 and len(stops := stops_of(c)) == 1 and stop_comment_ok(stops[0], 'open decision')
+               and '`python3 unapproved.py`' in stops[0] if error == 'not granted' else code == 1 and error in err)
+              and not validation_logs(c) and not c.prompts('BUILD')
               and not c.prompts('REVIEW') and not c.pr() and git(wt, 'rev-parse', 'HEAD') == head)
 
     from ouro import validation
@@ -4223,6 +4245,31 @@ def sec_validation_inheritance():
               len(automatic) == 2 and {json.loads(p.read_text())['sha'] for p in automatic} == {old_head, head}
               and len(validation_receipts(c)) == 4
               and all(r['exit'] == 0 for p in automatic for r in json.loads(p.read_text())['results']))
+
+
+def sec_validation_gate_removed():
+    c = validation_case('gate-removed', answer={'validation_pending': [{'cmd': 'python3 gates/check.py', 'reason': 'sandbox'}]})
+    code, out, err = validation_run(c)
+    wt = validation_wt(c)
+    built = git(wt, 'rev-parse', 'HEAD')
+    check('gate-removed: the first run records the binding gate as a pending request and waits',
+          code == 0 and 'waiting for validation' in out and 'python3 gates/check.py' in git(wt, 'log', '-1', '--format=%B'))
+    binding = c.main / '.claude/ouro.toml'
+    binding.write_text(binding.read_text(encoding='utf-8').replace(
+        '[[gate]]\nrun = "python3 gates/check.py"\nci = "echo SKIP: the checks cannot run this gate"\n', ''), encoding='utf-8')
+    git(c.main, 'commit', '-qam', 'drop the check gate')
+    git(c.main, 'push', '-q', 'origin', 'master')
+    c.clear_prompts()
+    code, out, err = validation_run(c, '--validate')
+    stops = stops_of(c)
+    check('a branch commit\'s pending request the invoking binding no longer grants stops as open decision, naming the command, '
+          'the BUILD commit and both ways out',
+          code == 3 and 'gates/check.py' not in binding.read_text(encoding='utf-8')
+          and 'validation command not granted' not in err and len(stops) == 1 and stop_comment_ok(stops[0], 'open decision')
+          and '`python3 gates/check.py`' in stops[0] and built[:7] in stops[0]
+          and 'Grant the command again' in stops[0] and 'discard the branch and rebuild' in stops[0]
+          and 'needs-ruling' in labels_of(c) and 'agent-ready' not in labels_of(c)
+          and not validation_logs(c) and not c.prompts('BUILD') and not c.prompts('REVIEW') and git(wt, 'rev-parse', 'HEAD') == built)
 
 
 @reap_fixture_children
@@ -4367,6 +4414,17 @@ def sec_validation_handoff():
           logs[0][1] in (c.nodes / 'BUILD.2.prompt.txt').read_text() and 'evidence' in (c.nodes / 'BUILD.2.prompt.txt').read_text())
     check('the final PR retains failed previous-head evidence separately from current-head success',
           c.pr() is not None and f"attempt @ {logs[0][1]}" in c.pr()['body'] and 'exit 9' in c.pr()['body'])
+
+    c = validation_case('fail-none', mode='fail-once')
+    c.node('BUILD', {**BUILD, 'validation_pending': [{'cmd': cmd, 'reason': 'sandbox'} for cmd in VALIDATION_CMDS]}, 1)
+    c.node('BUILD', {**BUILD, 'subject': 'fix(app): nothing', 'writes': {}}, 2)
+    code, out, err = validation_run(c, '--validate')
+    stops, logs = stops_of(c), validation_logs(c)
+    check('a red validation command whose fix round changes no file stops as `open decision`, exit 3, naming the command and its evidence log',
+          code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], 'open decision')
+          and "validation `python3 gates/validate.py first` exited 9" in stops[0] and 'evidence ' in stops[0]
+          and 'no file change fixes' in stops[0] and 'needs-ruling' in labels_of(c) and 'left no change' not in err
+          and len(logs) == 1 and c.prompts('BUILD') == ['BUILD.1.prompt.txt', 'BUILD.2.prompt.txt'] and not c.prompts('REVIEW'))
 
     c = validation_case('pending-gate', commands=['python3 gates/check.py'])
     c.write('gates/check.py', VALIDATOR)
@@ -4704,6 +4762,63 @@ def sec_ci_validation():
           code == 0 and ready(c) and c.prompts("BUILD") == [] and c.prompts("REVIEW")
           and any(row["head"] == new for row in observations(c)) and new in c.pr()["body"]
           and set(marker.read_text(encoding="utf-8").splitlines()) == {old, new} and not receipts(c))
+
+    pending_ci = {"_rollup": [{**success, "status": "IN_PROGRESS", "conclusion": None}]}
+
+    def built(name):  # a BUILD committed and pushed, its draft waiting on CI
+        c = case(name, token=True, table=pending_ci, answer={"gates_run": [{"cmd": windows, "exit": 0}]})
+        code, out, err = c.ouro("run", "1")
+        wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+        check(name + ": the first run waits on CI", code == 0 and "waiting for CI validation" in out)
+        c.clear_prompts()
+        return c, wt, git(wt, "rev-parse", "HEAD")
+
+    def add_gate(where):
+        binding = where / ".claude/ouro.toml"
+        binding.write_text(binding.read_text(encoding="utf-8") + '\n[[gate]]\nrun = "python3 gates/added.py"\n'
+                           'ci = "echo another workflow runs this gate"\npaths = ["never/"]\n', encoding="utf-8")
+        git(where, "commit", "-qam", "a [[gate]] change")
+
+    c, wt, before = built("gate-landed")
+    add_gate(c.main)
+    git(c.main, "push", "-q", "origin", "master")
+    landed = git(c.main, "rev-parse", "HEAD")
+    code, out, err = c.ouro("run", "1")
+    head = git(wt, "rev-parse", "HEAD")
+    check("a resume after a [[gate]] change landed on the default branch syncs before the CI coverage check, pushes and waits on CI",
+          code == 0 and "CI gate coverage changed" not in out + err and "sync with master before comparing" in out
+          and head != before and sh("git", "merge-base", "--is-ancestor", landed, head, cwd=wt)[0] == 0
+          and git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total") == head
+          and "waiting for CI validation" in out and not c.prompts("BUILD"))
+
+    c, wt, before = built("gate-conflict")
+    c.write("src/app.py", "def compute_total(items):\n    return sum(items) - 999\n")
+    add_gate(c.main)  # the conflicting edit rides the [[gate]] commit
+    git(c.main, "push", "-q", "origin", "master")
+    landed = git(c.main, "rev-parse", "HEAD")
+    code, out, err = c.ouro("run", "1")
+    head = git(wt, "rev-parse", "HEAD")
+    check("a resume whose sync conflicts hands the BUILD node the conflict, as the push step does, and the merge commit passes the coverage check",
+          code == 0 and "CI gate coverage changed" not in out + err and "sync conflict: the BUILD node gets it" in out
+          and len(c.prompts("BUILD")) == 1 and "Resolve this merge conflict" in (c.nodes / c.prompts("BUILD")[0]).read_text(encoding="utf-8")
+          and sh("git", "merge-base", "--is-ancestor", landed, head, cwd=wt)[0] == 0
+          and git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total") == head
+          and "<<<<<<<" not in (wt / "src/app.py").read_text(encoding="utf-8") and "waiting for CI validation" in out)
+
+    c, wt, before = built("gate-branch")
+    add_gate(wt)
+    git(wt, "push", "-q", "origin", "HEAD")
+    code, out, err = c.ouro("run", "1")
+    check("a [[gate]] change the branch makes itself survives the sync, and the refusal names the branch's HEAD",
+          code == 1 and f"CI gate coverage changed: the branch's HEAD ({git(wt, 'rev-parse', 'HEAD')[:7]})" in err
+          and "invoking checkout" not in err)
+
+    c, wt, before = built("gate-invoking")
+    add_gate(c.main)  # the invoking checkout's commit, which origin's default branch does not hold
+    code, out, err = c.ouro("run", "1")
+    check("an invoking binding the default branch does not hold survives the sync, and the refusal names the invoking checkout",
+          code == 1 and "CI gate coverage changed: the invoking checkout's [[gate]] entries differ from origin/master's" in err
+          and git(wt, "rev-parse", "HEAD") == before)
 
     # Compact API matrix: real committed fixture/Git/Run, only remote GitHub responses modeled.
     c = case("api", token=True)
@@ -5074,7 +5189,7 @@ def sec_ci_validation():
 
 # Heaviest first, by the slower CI leg's section time: the pool starts sections in this order.
 SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("run: full class gates by paths", sec_full_paths),
-            ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
+            ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: a pending validation the binding no longer grants", sec_validation_gate_removed), ("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
             ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: a developer's [[ship.person]] entry", sec_ship_person), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
             ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: ship.review_sandbox", sec_review_sandbox),("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
             ("run: node garbage", sec_node_garbage), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]

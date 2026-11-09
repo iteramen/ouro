@@ -67,10 +67,10 @@ while it is in use. Claude and Qwen Code PROBE commands run without that write b
 the binding sets `ship.review_sandbox = true`: Claude Code refuses only `git push`, `git commit`
 and `gh` there, and Qwen Code's commands answer to ouro's allow-list hook alone.
 That key refuses a run before any tracker call when the reviewer role's backend has no sandbox
-route on the host (Qwen Code has one on Linux alone), its route's prerequisites are missing (Claude
+route on the host (Codex has one on Linux and macOS, Qwen Code on Linux alone), its route's prerequisites are missing (Claude
 on Linux and WSL2: `bwrap` and `socat` on PATH; Qwen Code: `/usr/bin/bwrap`), or the host is native
 Windows, WSL1 or outside Linux, WSL2 and macOS; the refusal names the backend, the platform and the
-missing piece. Codex keeps its own boundary. A Claude
+missing piece. Codex's route is its own boundary, on Linux and macOS. A Claude
 PROBE review node then launches inside Claude Code's sandbox, with `allowUnsandboxedCommands` off,
 `failIfUnavailable` on, no allowed network domain, and `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a
 temp directory private to that launch and deleted when it returns, so its commands write only in
@@ -318,6 +318,9 @@ A `PROMOTE` removes `checkpoint`, keeping `agent-ready` so the next run builds t
 A `STALE` on a checkpoint removes both `checkpoint` and `agent-ready`, retaining unrelated
 labels and leaving closure to the owner; the next run refuses rather than building or repeating
 the measurement. A `STALE` on an issue without `checkpoint` leaves its labels unchanged.
+A narrowed `needs-ruling` removes `checkpoint` with `agent-ready`, as `BLOCKED` and `SPLIT` do.
+`trivial` leaves with `agent-ready` under any verdict that removes it, and stays under any that
+keeps it.
 A `**Checkpoint finding**` comment, and the `**Triage**` verdict it is measured against, count
 only from a trusted author: the job token's bot or a login in `[owner].ruling_approvers`.
 
@@ -459,7 +462,11 @@ completion.
 
 In local mode, final proof comes from the bounded validator under its lock, with clean
 committed inputs, exact-head ordered-command receipts and intact logs. Binding-selected driver
-gates keep their execution authority. Additional successful worker candidates require explicit
+gates keep their execution authority. On a resumed local-validation run, explicit `--validate`
+may also execute missing required commands at the invoking head without worker candidates,
+provided every missing command belongs to the trusted invoking Acceptance/binding allowlist.
+This consent does not extend to a fresh BUILD or later fix head in the same invocation;
+failed or malformed worker reports retain their existing finding path. Additional successful worker candidates require explicit
 `ouro run N --validate` and the invoking command allowlist before caller execution; an intact
 current-input validator receipt may be reused without executing again. A timeout, overflow or
 interruption never proves success. Native Linux provides the caller boundary; on other platforms a required local or caller proof
@@ -469,8 +476,10 @@ CI-owned checks or portable local-only driver gates.
 In PR flows, `ship.validation = "ci"` makes the repository's nonempty, unique
 `ship.validation_checks` exact check names the aggregate authority for selected nonlocal gates.
 `gate.run`, `gate.ci` and path selection define that coverage; invoking and committed gate lists
-must agree. The driver pushes a draft PR and requires the declared checks to succeed at its final
-head before review, Ready or merge; missing, skipped, neutral, pending, failed or stale results do
+must agree. A resume whose branch's list differs from the invoking one syncs the branch first, as
+the push step does, a conflict taking that step's path; a difference that survives the sync
+refuses, naming the copy that differs: the invoking checkout's, or the branch's HEAD. The driver
+pushes a draft PR and requires the declared checks to succeed at its final head before review, Ready or merge; missing, skipped, neutral, pending, failed or stale results do
 not count. A new head requires new proof. Omitted Actions evidence can be reconciled against
 an authenticated ordinary PR workflow and its latest PR/dispatch invocations. Repository and head
 repository, exact head/ref, unchanged workflow definition at the PR base, GitHub Actions provider,
@@ -513,9 +522,15 @@ reviewing or landing. Only `ouro run N [--part K] --validate` executes the curre
 acceptance/binding commands in the invoking driver's context, in order, without a shell or
 expanded builder permissions. Malformed, duplicate, unknown or fresh conflicting requests fail
 before commit/execution; historical overlaps without prior inherited provenance also fail.
+A branch commit's request that the invoking binding does not grant, such as one for a gate removed
+since that BUILD, ends the run as `**Stop:** open decision` (exit 3) before execution, naming the
+command and the BUILD commit: grant the command again, or discard the branch and rebuild.
 Direct-lane handoffs are unsupported and fail before commit or push. Exit 75 or a missing
 executable waits; real failures use the bounded fix path. Execution is bounded to 3600 seconds
-and 1 MiB of retained output per command.
+and 1 MiB of retained output per command. A fix round that a red validation command or a red
+gate started, whose BUILD leaves no change in the tree, stops as `open decision` (exit 3),
+naming the command and its evidence log: no file change fixes that failure, a missing host
+precondition for one.
 
 Caller validation runs only on native Linux. Other platforms, including Windows and WSL, refuse
 before launch with exit 75 and no successful receipt: retry on a native Linux host. Kernel/proc

@@ -100,6 +100,7 @@ class Run:
         self.committed_here = set()
         self.pending = []  # review comments held until the express draft opens
         self.sync_tried = False
+        self.sync_lease = None  # a rebase sync's lease, held until the push it is for
         self.synced = set()
         self.fresh = False
         self.followup_only = False  # a merged pull request: this pass dispatches FOLLOWUP alone
@@ -730,14 +731,19 @@ class Run:
         return int(self.tree.git("rev-list", "--count", f"origin/{self.env.default}..HEAD").out.strip() or 0)
 
     # ---- the drive loop (transitions 4-9)
-    def drive(self, pr):
+    def drive(self, pr, *, resumed=True):
         e = self.env
         if pr:
             self._note(pr=pr["number"])
         if not e.pr_checks():
             self.add_note(f"No workflow at origin/{e.default} names pull_request, so the pull request's checks cannot run the gates: every selected gate ran here, and the run skipped the checks step.")
+        # a [[gate]] change landed on the default branch leaves the branch's copy behind until the push step's sync
+        if resumed and self.commits_past_base() and self.ci_mode() and self.gate_entries() != e.data.get("gate", []):
+            say(f"[3] the branch's [[gate]] entries differ from the invoking binding's: sync with {e.default} before comparing them")
+            self.sync()
         if self.commits_past_base():
             self.rederive()  # a resumed run re-reads the tightening from the diff; it is kept nowhere else
+        self.caller_validation_head = self.tree.head() if resumed and self.commits_past_base() else None
         for _ in range(40):
             pr = self.find_pr() if pr is None or pr["state"] != "MERGED" else pr
             if pr and pr["state"] == "MERGED":
@@ -766,7 +772,7 @@ class Run:
                         failed = results[-1]
                         tail = failure_extract(Path(failed['log']).read_text(encoding="utf-8", errors="replace"))
                         self.fix_round(f"validation `{failed['cmd']}` exited {failure} @ {failed['sha']}; "
-                                       f"evidence {failed['log']}:\n{tail}", records)
+                                       f"evidence {failed['log']}:\n{tail}", records, red=True)
                         continue
             head = results[0]["sha"] if pending else self.tree.head()
             inputs = self.check_inputs(head)
@@ -786,7 +792,7 @@ class Run:
                     return 0
                 self.gated.add(head)
                 if red:
-                    self.fix_round(f"gate `{red[0]}` exited {red[1]}; the failure in its log:\n{red[2]}", records)
+                    self.fix_round(f"gate `{red[0]}` exited {red[1]}; evidence {red[3]}; the failure in its log:\n{red[2]}", records, red=True)
                     continue
             inputs = self.check_inputs(head)
             if inputs == 75:
@@ -968,10 +974,11 @@ class Run:
         return acceptance_commands(acceptance_source(self)) + sorted(self.ci_commands(selected=False)) + [run for run, g in self.bound_gates(tree=False) if g.get("cheap") is True
                 or (here or not self.notice(g)) and (here or self.locally_run(run, g) or g.get("paths"))]
 
-    def build(self, findings=None, threads=None, track=True, record_ok=False):
+    def build(self, findings=None, threads=None, track=True, record_ok=False, red=False):
         """Ask the BUILD node and commit what it left; None when a Copilot round declined every thread and changed nothing.
 
-        `record_ok`: a review's fix round may change no file, since its findings may be the record's sentences; any other build must change the tree."""
+        `record_ok`: a review's fix round may change no file, since its findings may be the record's sentences; any other build must change the tree.
+        `red`: the fix round of a red validation command or gate, whose unchanged tree is an `open decision` stop, not a driver error."""
         e = self.env
         if not self.in_lane:
             self.require_acceptance()
@@ -1015,7 +1022,7 @@ class Run:
                 self.last_build = ans
                 return None
             if not (record_ok or steps):
-                raise DriverError("node BUILD left no change in the tree")
+                self.no_change(findings, red)
             say("  no file changed: the record rides an empty commit" + (", with the manual steps" if steps else ""))
         msg = subject + "\n\n" + without_build_lines(str(ans.get("body") or "")) + "\n" + (f"\nFixes #{self.n}\n" if self.in_lane else "")
         facts = {"door": ans.get("door") or "", "blast_radius": ans.get("blast_radius") or "", "residue": ans.get("residue") or [],
@@ -1042,6 +1049,13 @@ class Run:
         if findings is None and track:
             self.rederive()
         return self.tree.head()
+
+    def no_change(self, findings, red):
+        """A BUILD that left no change: an `open decision` stop in a red command's fix round, a driver error otherwise."""
+        if red:
+            self.stop_issue("open decision", "The fix round for this red command left no change in the tree: the failure is one no file "
+                            "change fixes, such as a missing host precondition.\n\n" + findings, 3)
+        raise DriverError("node BUILD left no change in the tree")
 
     def rederive(self):
         e = self.env
@@ -1080,7 +1094,7 @@ class Run:
         say(f"  {sentence}")
         self.notes.append(sentence)
 
-    def fix_round(self, findings, records, record_ok=False):
+    def fix_round(self, findings, records, record_ok=False, red=False):
         """A fix is a commit past the first build's, so the rounds already taken are read from the branch."""
         done = max(0, int(self.tree.git("rev-list", "--count", "--no-merges", f"origin/{self.env.default}..HEAD").out.strip() or 0) - 1)
         if done >= FIX_CAP:
@@ -1089,7 +1103,7 @@ class Run:
                      if pr else f"the branch `{self.branch}` stays in its worktree. A fix commit on the branch")
             self.stop_issue("review cap", f"{FIX_CAP} fix rounds are spent and the change is not clean.\n\n" + findings +
                             f"\n\nThe hand-off: {where}, `agent-ready` back in place of `needs-ruling`, and `ouro run {self.n}` verify it as any fix round.", 3)
-        self.build(findings=findings, record_ok=record_ok)
+        self.build(findings=findings, record_ok=record_ok, red=red)
         if self.reader_skipped:  # a fix with no reviewer (a red gate or check) may add what a reader probes
             gate_files = set(self.env.ob.gate_paths({"gate": self.gate_entries()}))
             if not self.docs_only(derive_flow(self.tree.changed(), gate_files)):
@@ -1109,7 +1123,12 @@ class Run:
         if not self.env.pr_checks():
             raise DriverError("CI validation requires a pull_request workflow on the default branch")
         if self.gate_entries() != self.env.data.get("gate", []):
-            raise DriverError("CI gate coverage changed: update the owner's invoking binding before resuming")
+            base = f"origin/{self.env.default}"
+            if self.gate_entries(rev=base) != self.env.data.get("gate", []):
+                raise DriverError(f"CI gate coverage changed: the invoking checkout's [[gate]] entries differ from {base}'s; "
+                                  "update the owner's invoking binding before resuming")
+            raise DriverError(f"CI gate coverage changed: the branch's HEAD ({self.tree.head()[:7]}) holds [[gate]] entries other than "
+                              f"{base}'s and the invoking binding's; CI covers no gate a branch adds or changes")
         return {cmd for cmd, gate in self.bound_gates(tree=False)
                 if not self.locally_run(cmd, gate)
                 and (not selected or not gate.get("paths") or self.tree.touches(gate["paths"]))}
@@ -1126,16 +1145,21 @@ class Run:
     def wait_hint(self, commands=None):
         return validation.wait_hint(self.env, self.n, self.k, self.required_execution() if commands is None else commands)
 
-    def gate_entries(self, tree=True):
-        """The [[gate]] entries of the binding at the tree's HEAD, as CI reads them; the main checkout's when `tree` is off, or there is no worktree yet (a dry run), or the commit has none. `tree` may name another Tree."""
+    def gate_entries(self, tree=True, rev="HEAD"):
+        """The [[gate]] entries of the binding at the tree's HEAD (or `rev`), as CI reads them; the main checkout's when `tree` is off, or there is no worktree yet (a dry run), or the commit has none. `tree` may name another Tree.
+
+        During a sync's merge conflict HEAD is the pre-sync tip, so the merge's index entry stands for it; a binding that is itself conflicted has none, and the check waits for the merge commit."""
         tree = self.tree if tree is True else tree
-        r = tree.git("show", "HEAD:.claude/ouro.toml", check=False) if tree and tree.path.is_dir() else None  # the commit's, not the file's: a sync conflict leaves markers in the file
+        live = tree and tree.path.is_dir()
+        if live and rev == "HEAD" and tree.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0:
+            rev = ""  # `:path` is the index's stage-0 entry
+        r = tree.git("show", f"{rev}:.claude/ouro.toml", check=False) if live else None  # the commit's, not the file's: a sync conflict leaves markers in the file
         if r is None or r.code != 0:
             return list(self.env.data.get("gate", []))
         try:
             return self.env.ob.tomllib.loads(r.out).get("gate", [])
         except ValueError as x:
-            raise DriverError(f"the branch's .claude/ouro.toml cannot be read: {x}")
+            raise DriverError(f"the .claude/ouro.toml at {rev or 'the merge index'} cannot be read: {x}")
 
     def bound_gates(self, tree=True):
         """Every [[gate]], `<ouro>` replaced by the plugin root: its paths, never the issue's labels, decide whether a change runs it."""
@@ -1213,7 +1237,7 @@ class Run:
                 execution.ci_inputs(tree, head)
             if r.code != 0:
                 self.gate_log = rec_gates
-                return (run, r.code, failure_extract(r.out + r.err))
+                return (run, r.code, failure_extract(r.out + r.err), log)
         self.gate_log = rec_gates
         self.skipped = skipped
         if ci:
@@ -1230,7 +1254,7 @@ class Run:
         """Use the existing bounded validator for every final BUILD execution proof.
 
         Binding-selected driver gates retain their existing authority. Worker-only
-        candidates require explicit caller consent and the invoking allowlist;
+        candidates and resumed missing proof require caller consent and the invoking allowlist;
         observing a worker command never widens caller permissions.
         """
         self.execution_results, self.gate_log, self.skipped = [], [], skipped
@@ -1266,7 +1290,7 @@ class Run:
                 return failure
             failed = results[-1]
             tail = failure_extract(Path(failed["log"]).read_text(encoding="utf-8", errors="replace"))
-            return failed["cmd"], failure, tail
+            return failed["cmd"], failure, tail, failed["log"]
 
         # These are exactly the gates the normal driver already chose to execute.
         if automatic:
@@ -1283,14 +1307,32 @@ class Run:
         if missing and all(cmd in allowed for cmd in missing):
             observed = all(cmd in candidates for cmd in missing)
             self._note(gates_add=len(missing))
-            failed = batch(missing, execute_missing=observed and self.options.validate)
+            resumed = head == getattr(self, "caller_validation_head", None) and self.options.validate
+            if resumed:
+                reports = self.build_facts(evidence=False)["build_gates"]
+                resumed = not any(r["cmd"] in missing and (type(r.get("exit")) is not int or r["exit"] != 0)
+                                  for r in reports)
+            failed = batch(missing, execute_missing=(observed or resumed) and self.options.validate)
             # Existing genuine proof survives loss of worker-candidate metadata.
-            # Absent proof without observed candidates still needs a BUILD fix.
-            return None if failed == 75 and not observed else failed
+            # Explicit consent at the invoking head can request missing trusted proof;
+            # it grants nothing to a fresh BUILD or a later fix in this invocation.
+            return None if failed == 75 and not (observed or resumed) else failed
         return None
 
     # ---- push and the pull request
     def sync_and_push(self, records):
+        if not self.sync():
+            return False
+        args = ["-Lease", self.sync_lease] if self.sync_lease else []
+        p = self.env.run(script("Push-Branch.ps1", *args), cwd=self.tree.path)
+        if p.code != 0:
+            raise DriverError(f"{sh.cmdline(p.argv)} failed (exit {p.code}): {p.text}")
+        self.sync_lease = None
+        say("[6] pushed " + self.branch)
+        return True
+
+    def sync(self):
+        """Sync-Branch.ps1 in the tree. A conflict goes to the BUILD node as a finding once, and returns False; a second one stops."""
         e = self.env
         r = self.env.run(script("Sync-Branch.ps1"), cwd=self.tree.path)
         if r.code != 0:
@@ -1309,11 +1351,8 @@ class Run:
                 self.stop_issue("open decision", "The resolution still holds conflict markers in: " + ", ".join(left), 3)
             return False
         lease = re.search(r"(?m)^lease: (\S+)\s*$", r.out)  # Sync-Branch's own line, not a merged commit subject
-        args = ["-Lease", lease.group(1)] if lease else []
-        p = self.env.run(script("Push-Branch.ps1", *args), cwd=self.tree.path)
-        if p.code != 0:
-            raise DriverError(f"{sh.cmdline(p.argv)} failed (exit {p.code}): {p.text}")
-        say("[6] pushed " + self.branch)
+        if lease:
+            self.sync_lease = lease.group(1)
         return True
 
     def open_pr(self, head):
@@ -1360,6 +1399,15 @@ class Run:
                 return facts
         return {}
 
+    def require_granted(self, sha, pending, allowed):
+        """A committed caller obligation the invoking binding does not grant is the owner's to clear, not a driver error."""
+        for p in pending if isinstance(pending, list) else []:
+            if isinstance(p, dict) and isinstance(p.get("cmd"), str) and p["cmd"] not in allowed:
+                self.stop_issue("open decision", f"The BUILD commit {sha[:7]} requested caller validation of `{p['cmd']}`, "
+                                "which the invoking binding does not grant: a `[[gate]]` or acceptance change since that BUILD can remove it. "
+                                "The request lives in that commit's record, so a sync does not clear it. Grant the command again in the "
+                                f"binding, or discard the branch and rebuild; then `agent-ready` back in place of `needs-ruling`, and `ouro run {self.n}`.", 3)
+
     def build_facts(self, *, evidence=True):
         """The record's door, blast, summary, residue and build_gates: the newest BUILD answer on the branch, which describes the whole branch; its manual steps, the union over the branch's answers."""
         # Metadata-only callers must not collect receipt/state evidence before validation holds its lock.
@@ -1368,8 +1416,10 @@ class Run:
         sha, f = next(((s, x) for s, x in facts if x), (shas[-1], {}))  # no facts anywhere: the first commit's body
         manual = {}
         pending = {}
-        for _, x in reversed(facts):  # oldest first: a later answer's edit replaces an earlier one, a later silence keeps it
-            newest = {p["cmd"]: p for p in validation.requests(x.get("validation_pending", []), self.validation_commands(),
+        allowed = self.validation_commands()
+        for s, x in reversed(facts):  # oldest first: a later answer's edit replaces an earlier one, a later silence keeps it
+            self.require_granted(s, x.get("validation_pending"), allowed)
+            newest = {p["cmd"]: p for p in validation.requests(x.get("validation_pending", []), allowed,
                                                                x.get("gates_run") or [], inherited=pending)}
             pending = {**newest, **{cmd: p for cmd, p in pending.items() if cmd not in newest}}
             for m in x.get("manual") or []:
@@ -2472,7 +2522,7 @@ class Run:
         self.flow = "express"
         self._note(lane="pr")
         self.rederive()
-        return self.drive(None)
+        return self.drive(None, resumed=False)
 
     # ---- dry run
     def build_role(self):

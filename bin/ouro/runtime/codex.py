@@ -12,7 +12,7 @@ from . import Capabilities, READ, diagnostics, process, schema
 from . import codex_events
 from .network import WINDOWS, readiness as network_readiness
 from .tools import git_readiness
-from .backends import CONFINED, NOT_REQUIRED, Interface
+from .backends import CONFINED, Interface
 from .instructions import repository, run_skill
 
 MIN_VERSION = (0, 163, 0)
@@ -260,6 +260,11 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
         return answer, session, usage, None
 
 
+def sandbox_route(where):
+    """Nothing Codex's own boundary lacks on Linux or macOS, or None elsewhere: its PROBE admission refuses every WSL host."""
+    return [] if where in ("linux", "macos") else None
+
+
 def _worktree_readiness(settings, main, target, branch, base, *, scratch=None):
     from . import git_capabilities
     git_capabilities.worktree_readiness(settings, main, target, branch, base, scratch=scratch)
@@ -267,5 +272,5 @@ def _worktree_readiness(settings, main, target, branch, base, *, scratch=None):
 
 INTERFACE = Interface(preflight=lambda settings, capabilities: preflight(settings, capabilities=capabilities),
                       worktree_readiness=_worktree_readiness, execute=_execute, probe_confinement=CONFINED,
-                      sandbox_route=NOT_REQUIRED, validate_answer=schema.validate_answer,
+                      sandbox_route=sandbox_route, validate_answer=schema.validate_answer,
                       admits=lambda capabilities: not WINDOWS or capabilities == READ)

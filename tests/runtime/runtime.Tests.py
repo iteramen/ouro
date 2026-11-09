@@ -215,6 +215,22 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(sh.DriverError):
             schema.validate_answer("TRIAGE", {"verdict": "NEEDS-RULING", "question": ""})
 
+    def test_triage_wire_verdicts_match_the_driver(self):
+        from ouro import triage
+        spec = schema.SCHEMAS["TRIAGE"]
+        self.assertEqual(spec["properties"]["verdict"]["enum"], list(triage.VERDICTS))
+        self.assertEqual(node.SCHEMAS["TRIAGE"]["properties"]["verdict"]["enum"], list(triage.VERDICTS))
+        blocked = {**sample(spec), "verdict": "BLOCKED", "size": "M", "flow": "full", "question": ""}
+        schema.validate(blocked, spec)
+        schema.validate_answer("TRIAGE", blocked)
+        self.assertEqual(triage.label_moves("BLOCKED", "M", ["needs-ruling", "CI-CD"]), (["blocked"], ["needs-ruling"]))
+        with self.assertRaises(sh.DriverError):
+            schema.validate({**blocked, "verdict": "WAITING"}, spec)
+        for question in ("", "  \n"):
+            with self.assertRaises(sh.DriverError):
+                schema.validate_answer("TRIAGE", {**blocked, "verdict": "NEEDS-RULING", "question": question})
+        schema.validate_answer("TRIAGE", {**blocked, "verdict": "NEEDS-RULING", "question": "Ship behind a flag or not?"})
+
     def test_codex_transport_uses_final_file_and_records_evidence(self):
         self.addCleanup(diagnostics.ATTEMPTS.clear)
         def fake(argv, **kwargs):

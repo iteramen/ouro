@@ -20,6 +20,33 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.11.1] - 2026-11-09
+
+- `ship.review_sandbox = true` refuses a Codex reviewer on WSL2 before any tracker call, naming
+  the missing Codex sandbox route. Codex's route is Linux and macOS, not Linux, WSL2 and macOS
+  as the v1.11.0 entry says: its PROBE admission refuses every WSL host, and the run used to be
+  refused only when the REVIEW node launched.
+- A triage `NEEDS-RULING`, `BLOCKED` or `SPLIT` that removes `agent-ready` also removes the
+  `checkpoint` and `trivial` modifiers, and a `STALE` on a checkpoint removes `trivial` with
+  them, so no modifier is left standing alone on a state the driver does not run.
+- A fix round started by a red validation command or a red gate, whose BUILD leaves the tree
+  unchanged, ends as `**Stop:** open decision` (exit 3) naming the command, its exit code and
+  its evidence log, not as the driver error "node BUILD left no change in the tree". A
+  no-change BUILD outside a red-command round is still a driver error.
+- A resumed run under CI validation syncs its branch with the default branch before comparing
+  `[[gate]]` entries, so a `[[gate]]` change that landed after the BUILD no longer strands the
+  run on "CI gate coverage changed". A mismatch left after the sync names the copy that differs:
+  the branch's HEAD or the invoking checkout.
+- A resume whose branch records a pending validation command the invoking binding no longer
+  grants stops as `**Stop:** open decision`, naming the command and its BUILD commit, not as the
+  driver error "validation command not granted".
+- On a resumed local-validation run, `--validate` runs the required commands missing at the
+  invoking head even when no BUILD offered them as candidates, provided each is in the invoking
+  Acceptance or binding allowlist. A fresh BUILD or a later fix head still needs candidates, and
+  a failed or malformed BUILD exit report keeps its finding path.
+- The TRIAGE output schemas of the Claude, Codex and Qwen Code backends admit the `BLOCKED`
+  verdict, which the driver already accepted and moved labels for.
+
 ## [v1.11.0] - 2026-11-06
 
 - A Qwen Code preflight that is not file-only proves each contract its roles need through the

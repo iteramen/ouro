@@ -1,5 +1,6 @@
 """Qwen Code adapter on recorded envelopes: argv, isolation settings, the edit refusal and the hook."""
 import dataclasses
+import itertools
 import json
 import os
 import pathlib
@@ -46,7 +47,7 @@ def text_run(text, message="Model produced plain text instead of calling the str
 
 
 class QwenTests(unittest.TestCase):
-    def execute(self, events, *, tools=READ, model="qwen3-coder", code=0, hooked=HOOKED, raises=None, name="CHECKPOINT"):
+    def execute(self, events, *, tools=READ, model="qwen3-coder", code=0, hooked=HOOKED, raises=None, name="CHECKPOINT", cwd=None):
         seen = {}
 
         def run(argv, cwd=None, prompt=None, timeout=None, env=None):
@@ -63,7 +64,7 @@ class QwenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, patch.object(sh, "argv_for", side_effect=lambda *a: list(a)), \
                 patch.object(process, "run", side_effect=run):
             pathlib.Path(d, "AGENTS.md").write_text("repo rule", encoding="utf-8")
-            out = qwen._execute(name, "the brief", model, tools, d, 30, None, {}, developer.Settings("qwen"), {})
+            out = qwen._execute(name, "the brief", model, tools, cwd or d, 30, None, {}, developer.Settings("qwen"), {})
         return out, seen
 
     def test_the_command_line_is_headless_file_only_and_takes_the_prompt_on_stdin(self):
@@ -203,9 +204,22 @@ class QwenTests(unittest.TestCase):
             self.assertEqual(seen["cwd"], d)
 
     def test_a_command_or_edit_node_trusts_its_working_directory_and_untrusts_each_ancestor_and_a_read_node_trusts_nothing(self):
-        for tools in (Capabilities(commands=("python3 check.py",)), PROBE, builder([])):
-            with self.subTest(tools=tools):
-                seen = self.execute(EVENTS, tools=tools)[1]
+        for tools, linked in itertools.product((Capabilities(commands=("python3 check.py",)), PROBE, builder([])), (False, True)):
+            with self.subTest(tools=tools, linked=linked), tempfile.TemporaryDirectory() as d:
+                link = None
+                if linked:  # a cwd reached through a symlink is trusted by its physical path, the one Qwen Code's process.cwd() sees
+                    physical, link = pathlib.Path(d, "physical"), pathlib.Path(d, "link")
+                    physical.mkdir()
+                    try:
+                        link.symlink_to(physical, target_is_directory=True)
+                    except OSError as error:
+                        if os.name == "nt" and error.winerror == 1314:
+                            self.skipTest("Windows symlink privilege unavailable")
+                        raise
+                    self.assertNotEqual(str(link), str(link.resolve()))
+                seen = self.execute(EVENTS, tools=tools, cwd=link and str(link))[1]
+                if linked:
+                    self.assertEqual(seen["cwd"], str(link))
                 cwd = pathlib.Path(seen["cwd"]).resolve()
                 self.assertEqual(seen["trust"], {str(cwd): "TRUST_FOLDER", **{str(p): "DO_NOT_TRUST" for p in cwd.parents}})
                 self.assertEqual(list(seen["trust"].values()).count("TRUST_FOLDER"), 1)
@@ -433,6 +447,8 @@ class QwenTests(unittest.TestCase):
             hooked = [{"tool": "run_shell_command", "granted": True}, {"tool": "write_file", "granted": True}]
             qwen.contract_proof("BUILD", ("run", "write"), {"tool_calls": [run, write], "hook": hooked}, root)
             for usage, message in (({"tool_calls": [write], "hook": hooked}, "run proof failed .call observed False, hook observed True"),
+                                   ({"tool_calls": [{**run, "command": "git status"}, write], "hook": hooked},
+                                    "run proof failed .call observed False, hook observed True"),
                                    ({"tool_calls": [run, write], "hook": hooked[1:]}, "run proof failed .call observed True, hook observed False"),
                                    ({"tool_calls": [run, {**write, "path": "../x.txt"}], "hook": hooked}, "write proof failed .call observed False"),
                                    ({"tool_calls": [run, write], "hook": [hooked[0], {"tool": "write_file", "granted": False}]},

@@ -120,6 +120,75 @@ class ProbeBoundaryTests(unittest.TestCase):
                         "PROBE effective configuration admission refused: read-only-rpc "
                         "(unavailable, conflicting, aliased or unprovable configuration)")
 
+    def test_darwin_system_alias_attestation_controls(self):
+        paths = ["/etc", "/", "/private", "/private/etc",
+                 "/private/etc/codex", "/private/etc/codex/config.toml"]
+        cases = [
+            ("present", None), ("absent-file", 5), ("absent-directory", 4),
+            ("linux", None), ("user", None), ("project", None), ("other-source", None),
+            ("absolute-link", None), ("chained-link", None),
+            *[("owner", i) for i in range(6)],
+            *[("symlink", i) for i in range(1, 6)],
+            ("etc-directory", None), ("file-directory", None), ("hardlink", None),
+            ("missing-private", 2), ("missing-etc", 0),
+        ]
+        self.assertEqual(len(cases), 25)
+        for mutation, index in cases:
+            with self.subTest(mutation=mutation, index=index):
+                def lstat(path):
+                    position = paths.index(str(path))
+                    if ((mutation == "absent-file" and position == 5)
+                            or (mutation == "absent-directory" and position >= 4)
+                            or (mutation.startswith("missing-") and position == index)):
+                        raise FileNotFoundError
+                    mode = 0o120777 if position == 0 else (0o100644 if position == 5 else 0o40755)
+                    if mutation == "symlink" and position == index:
+                        mode = 0o120777
+                    if mutation == "etc-directory" and position == 0:
+                        mode = 0o40755
+                    if mutation == "file-directory" and position == 5:
+                        mode = 0o40755
+                    return SimpleNamespace(st_mode=mode, st_uid=int(mutation == "owner" and position == index),
+                                           st_gid=0, st_dev=1, st_ino=position + 1, st_size=1,
+                                           st_mtime_ns=1, st_ctime_ns=1,
+                                           st_nlink=2 if mutation == "hardlink" else 1)
+                link = {"absolute-link": "/private/etc", "chained-link": "other"}.get(mutation, "private/etc")
+                platform = "linux" if mutation == "linux" else "darwin"
+                kind = mutation if mutation in ("user", "project") else "system"
+                source = "/etc/other.toml" if mutation == "other-source" else paths[5].replace("/private", "", 1)
+                # Model Darwin paths independently of the host filesystem flavour.
+                class SystemPath(pathlib.PurePosixPath):
+                    def lstat(self):
+                        return lstat(self)
+                with patch.object(tools.sys, "platform", platform), patch.object(
+                        tools, "Path", SystemPath), patch.object(tools.os, "readlink", return_value=link):
+                    if mutation in ("present", "absent-file", "absent-directory"):
+                        self.assertEqual(len(tools.system_configuration_alias(SystemPath(source), kind)), 6)
+                    else:
+                        with self.assertRaises((ValueError, FileNotFoundError)):
+                            tools.system_configuration_alias(SystemPath(source), kind)
+
+    def test_system_alias_replacement_during_resolution_refuses(self):
+        with public_fixture("ouro-system-alias-") as folder:
+            root = pathlib.Path(folder).resolve()
+            response = self.configuration_fixture(root)
+            response["layers"].append(dict(name=dict(type="system", file="/etc/codex/config.toml"),
+                                           version="opaque", config={}))
+            with patch.object(sh, "argv_for", side_effect=lambda *a: [sys.executable, *a[1:]]):
+                launch = tools.sandbox_argv(root, ["python", "check.py"], probe=True)
+            original = pathlib.Path.resolve
+            def resolve(path, *args, **kwargs):
+                if str(path) == "/etc/codex/config.toml":
+                    return pathlib.Path("/private/etc/codex/config.toml")
+                return original(path, *args, **kwargs)
+            for replaced in ("link", "directory"):
+                with self.subTest(replaced=replaced), patch.object(tools.sys, "platform", "darwin"), patch.object(
+                        tools.process, "run", side_effect=self.rpc(response)), patch.object(
+                        pathlib.Path, "resolve", resolve), patch.object(
+                        tools, "system_configuration_alias", side_effect=[[(replaced, 1)], [(replaced, 2)]]):
+                    with self.assertRaisesRegex(sh.DriverError, "layer-provenance"):
+                        tools.probe_configuration(root, {"CODEX_HOME": str(root / ".codex")}, launch)
+
     def test_effective_configuration_rejects_merged_and_unknown_grants(self):
         with public_fixture("ouro-effective-config-") as folder:
             root = pathlib.Path(folder).resolve()

@@ -87,6 +87,35 @@ def probe_root(root):
     return root
 
 
+def system_configuration_alias(source, kind):
+    """Attest only Darwin's fixed system alias, including absent config inputs."""
+    if sys.platform != "darwin" or kind != "system" or str(source) != "/etc/codex/config.toml":
+        raise ValueError("configuration alias")
+    identities = []
+    for path in (Path("/etc"), Path("/"), Path("/private"), Path("/private/etc"),
+                 Path("/private/etc/codex"), Path("/private/etc/codex/config.toml")):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if path in (Path("/private/etc/codex"), Path("/private/etc/codex/config.toml")):
+                identities.append((str(path), None))
+                continue
+            raise
+        if info.st_uid != 0:
+            raise ValueError("system configuration ownership")
+        if path == Path("/etc"):
+            if not stat.S_ISLNK(info.st_mode) or os.readlink(path) != "private/etc":
+                raise ValueError("system configuration alias")
+        elif path.name == "config.toml":
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("system configuration file")
+        elif not stat.S_ISDIR(info.st_mode):
+            raise ValueError("system configuration directory")
+        identities.append((str(path), info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                           info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+    return identities
+
+
 def probe_configuration(root, environment, launch):
     """Read-only RPC admission; never expose raw configuration or server diagnostics."""
     options = launch[launch.index("-c"):launch.index("--permission-profile")]
@@ -224,7 +253,18 @@ def probe_configuration(root, environment, launch):
             else:
                 field = "dotCodexFolder" if kind == "project" else "file"
                 source = Path(name[field])
-                if not source.is_absolute() or source.resolve() != source:
+                if not source.is_absolute():
+                    raise ValueError("configuration alias")
+                if (sys.platform == "darwin" and kind == "system"
+                        and name[field] == "/etc/codex/config.toml"):
+                    before = system_configuration_alias(source, kind)
+                    resolved = source.resolve()
+                    if (resolved != Path("/private/etc/codex/config.toml")
+                            or before != system_configuration_alias(source, kind)):
+                        raise ValueError("system configuration changed")
+                    files[str(source)] = before
+                    source = resolved
+                elif source.resolve() != source:
                     raise ValueError("configuration alias")
                 if kind == "user":
                     home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex")

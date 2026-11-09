@@ -18,7 +18,7 @@ MATRIX = {
                "probe_confinement": UNCONFINED, "sandbox_route": "implemented", "validate_answer": UNSUPPORTED,
                "admits": "implemented"},
     "codex": {"preflight": "implemented", "worktree_readiness": "implemented", "execute": "implemented",
-              "probe_confinement": CONFINED, "sandbox_route": NOT_REQUIRED, "validate_answer": "implemented",
+              "probe_confinement": CONFINED, "sandbox_route": "implemented", "validate_answer": "implemented",
               "admits": "implemented"},
     "qwen": {"preflight": "implemented", "worktree_readiness": NOT_REQUIRED, "execute": "implemented",
              "probe_confinement": UNCONFINED, "sandbox_route": "implemented", "validate_answer": "implemented",

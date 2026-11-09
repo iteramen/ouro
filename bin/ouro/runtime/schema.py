@@ -13,7 +13,7 @@ def arr(items):
 S, INTEGER = {"type": "string"}, {"type": "integer"}
 STOP = {"anyOf": [obj(reason=S, question=S), {"type": "null"}]}
 SCHEMAS = {
-    "TRIAGE": obj(verdict={"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "SPLIT", "STALE"]},
+    "TRIAGE": obj(verdict={"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE"]},
                   size=S, flow=S, deliverable=S, doc_impact=S, manual=arr(S), labels=arr(S), comment=S, question=S),
     "BUILD": obj(subject=S, body=S, claims=arr(obj(path=S, claim=S, verified_by=S)), gates_run=arr(obj(cmd=S, exit=INTEGER)),
                  validation_pending=arr(obj(cmd=S, reason=S)), residue=arr(S), manual=arr(obj(path=S, edit=S)),

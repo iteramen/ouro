@@ -60,7 +60,7 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
 | `ship.person` | `[[ship.person]]` entries: `login`, with `policy`, `unattended_classes` or both | none | one developer's own `ship.policy` and `ship.unattended_classes`, keyed by the gh login without regard to case; a key the entry leaves out is the repository's; the review of the pull request that changes the binding is the grant; `check` validates each entry; the driver's merge decision, its dry run and triage's notes read the entry of the gh login running them |
 | `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe: Choosing `ship.review` below |
-| `ship.review_sandbox` | `true`, `false` | `false` | `true` confines the REVIEW node's PROBE commands to a harness sandbox: `ouro run` refuses before any tracker call, naming the backend, the platform and the missing piece, when the reviewer role's backend (the developer's `[runtime.roles.reviewer]`, else `runtime.backend`) has no sandbox route on the host, or the host is native Windows, WSL1 or another platform outside Linux, WSL2 and macOS, or the route's prerequisites are missing; Codex keeps its own write boundary; Claude's route is Claude Code's sandbox (bubblewrap on Linux and WSL2, which needs `bwrap` and `socat` on PATH; Seatbelt on macOS): its PROBE review node launches with `sandbox.enabled`, `allowUnsandboxedCommands = false`, `failIfUnavailable` and an empty `sandbox.network.allowedDomains`, and with `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a temp directory private to that launch, which the driver deletes when the node returns, so its commands write only in the disposable review copy and that directory (never the `/tmp/claude-<uid>` every Claude session of the user shares) and reach no network; Qwen Code's route is its tool execution sandbox, on Linux alone (its macOS route is untested), which needs `/usr/bin/bwrap`, the one bwrap it runs: its PROBE review node launches with `tools.executionSandbox` (backend `bwrap`, `workspace-write` on the review copy, `network: closed`) and deny rules for `git push`, `git commit` and `gh`; Qwen Code runs no executable hook there, so ouro's allow-list hook never runs and its grant check does not discard that node's answer: the sandbox and the deny rules are that node's boundary, and every other Qwen Code node keeps the hook; a repository key, since the threat is the repository's: a repository that takes outside contributions sets it, and no developer binding unsets it |
+| `ship.review_sandbox` | `true`, `false` | `false` | `true` confines the REVIEW node's PROBE commands to a harness sandbox: `ouro run` refuses before any tracker call, naming the backend, the platform and the missing piece, when the reviewer role's backend (the developer's `[runtime.roles.reviewer]`, else `runtime.backend`) has no sandbox route on the host, or the host is native Windows, WSL1 or another platform outside Linux, WSL2 and macOS, or the route's prerequisites are missing; Codex's route is its own write boundary, on Linux and macOS (its PROBE admission refuses WSL); Claude's route is Claude Code's sandbox (bubblewrap on Linux and WSL2, which needs `bwrap` and `socat` on PATH; Seatbelt on macOS): its PROBE review node launches with `sandbox.enabled`, `allowUnsandboxedCommands = false`, `failIfUnavailable` and an empty `sandbox.network.allowedDomains`, and with `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a temp directory private to that launch, which the driver deletes when the node returns, so its commands write only in the disposable review copy and that directory (never the `/tmp/claude-<uid>` every Claude session of the user shares) and reach no network; Qwen Code's route is its tool execution sandbox, on Linux alone (its macOS route is untested), which needs `/usr/bin/bwrap`, the one bwrap it runs: its PROBE review node launches with `tools.executionSandbox` (backend `bwrap`, `workspace-write` on the review copy, `network: closed`) and deny rules for `git push`, `git commit` and `gh`; Qwen Code runs no executable hook there, so ouro's allow-list hook never runs and its grant check does not discard that node's answer: the sandbox and the deny rules are that node's boundary, and every other Qwen Code node keeps the hook; a repository key, since the threat is the repository's: a repository that takes outside contributions sets it, and no developer binding unsets it |
 | `ship.validation` | `local`, `ci` | `local` | final-input validation authority for PR flows; inline direct checks remain local |
 | `ship.validation_checks` | exact GitHub check names | none; required under `ci` | nonempty unique names declaring aggregate CI coverage of selected nonlocal gates |
 | `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's |
@@ -190,7 +190,8 @@ that together they execute all selected nonlocal gates, including gates delegate
 notice. `gate.run`, `gate.ci` substitutions and `gate.paths` are the command and selection
 declarations; there is no second command registry. The invoking gate list must equal
 the committed gate list: a branch cannot silently change its own declared validation coverage.
-Update the trusted invoking binding before resuming a gate-list change.
+A resume syncs a branch whose list lags a gate-list change on the default branch; update the
+trusted invoking binding before resuming a gate-list change it lacks.
 
 What CI mode requires before review, Ready or merge is [contract §4](contract.md), "Execution
 evidence". macOS coordinators with admitted workers use this route; Windows needs an admitted
@@ -204,7 +205,12 @@ invoking binding and the branch's binding. Verify that those checks execute ever
 nonlocal `gate.run`. An additional acceptance command needs an exact `gate.run` declaration
 whose paths select it and whose CI job actually executes it; check names alone add no coverage.
 Local-only gates still run on the coordinator. Inherited caller handoffs without that CI
-coverage require native Linux and `--validate`. No binding or obligation is changed automatically.
+coverage require native Linux and `--validate`. In local validation, a resumed invocation with
+`--validate` can obtain missing required proof at its initial head even without BUILD candidates;
+every missing command must be in the trusted invoking Acceptance/binding allowlist. Fresh BUILD
+and later fix heads keep the candidate prerequisite. Exact command strings, including absolute
+paths, remain distinct, and all native lifecycle, clean-input and receipt guards apply.
+No binding or obligation is changed automatically.
 Resume `run N` with its original `--part` and `--pr` flags, where used. The prepared source is
 kept; successful exact-head checks precede independent review, Ready and merge. Missing, skipped,
 pending, failed or stale-head checks remain unproven. When the rollup omits an Actions success,
@@ -295,6 +301,11 @@ there a reviewer whose backend does not admit PROBE, before REVIEW, on that run 
 `runtime.backend`, each command makes the one preflight it made before role tables existed. The
 attempt diagnostics, the usage table and the progress file's `reviewer` field name the backend
 each node used; a board claim's `platform` stays `runtime.backend`.
+
+Codex PROBE admits only Darwin's exact system-layer `/etc/codex/config.toml` alias to
+`/private/etc/codex/config.toml`: the fixed root-owned `/etc` link and physical chain are
+attested before and after resolution, including absent inputs, and retained for drift checks.
+Other configuration aliases remain refused; permission and sandbox checks still apply.
 
 A PROBE review node launches without git or GitHub credentials on every backend, with or without
 `ship.review_sandbox`. Its environment has no `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
