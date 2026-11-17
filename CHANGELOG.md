@@ -20,6 +20,20 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.11.3] - 2026-11-17
+
+- A heading inside a fenced code block opens no Acceptance, Tests or Verification section, so
+  an example body quoted in a fence grants none of the commands that follow it. A line that
+  opens with three or more backticks and holds another backtick later on is an inline code
+  span, not a fence opener, as in CommonMark, so it no longer hides the headings below it.
+
+- An `Acceptance command:` label with no backticked command, bare or carrying prose such as
+  `run from the repo root`, is no longer refused when a span or shell fence below it in the same
+  Acceptance, Tests or Verification run grants a command, with prose lines or a sub-heading in
+  between, so such a body runs again instead of stopping as `acceptance unrunnable` with the
+  wrong fix, "put the command in backticks". A label carrying an unbackticked runner command, or
+  one above no granted command, is still refused.
+
 ## [v1.11.2] - 2026-11-17
 
 - The plugin draws a local `ouro run`'s progress line above the prompt in Claude Code with no

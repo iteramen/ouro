@@ -8,11 +8,30 @@ from .sh import DriverError
 ACCEPTANCE = ("python3 ", "python ", "pwsh ", "dotnet ", "npm ", "npx ", "pytest", "bash ", "go test")
 
 
+def fenced(lines):
+    """Whether each line is a fence marker or inside a ``` or ~~~ fence, which closes only on a bare marker of its character at least as long.
+
+    A backtick run followed by another backtick on its line is an inline code span, not a marker (CommonMark's info-string rule)."""
+    fence = None
+    for line in lines:
+        marker = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
+        if marker and not (marker.group(1)[0] == "`" and "`" in marker.group(2)):
+            value = marker.group(1)
+            if fence is None:
+                fence = value
+            elif value[0] == fence[0] and len(value) >= len(fence) and not marker.group(2).strip(" \t"):
+                fence = None
+            yield True
+        else:
+            yield fence is not None
+
+
 def sections(body):
-    """Each body line but the headings that open or close a section, with whether an acceptance/test/verification section holds it."""
+    """Each body line but the headings that open or close a section, with whether an acceptance/test/verification section holds it; a fenced heading is a line."""
     level = 0
-    for line in body.splitlines():
-        h = re.match(r"(#{2,3})\s+(.*)", line)
+    lines = body.splitlines()
+    for inside, line in zip(fenced(lines), lines):
+        h = None if inside else re.match(r"(#{2,3})\s+(.*)", line)
         if h and (not level or len(h.group(1)) <= level):
             level = len(h.group(1)) if re.search(r"\b(acceptance|tests?|testing|verif\w*)\b", h.group(2), re.I) else 0
         else:
@@ -26,7 +45,11 @@ def acceptance_text(body):
 
 def acceptance_spans(body):
     """Backticked spans in the sections whose heading names acceptance, tests or verification."""
-    joined = acceptance_text(body)
+    return quoted_lines(acceptance_text(body))
+
+
+def quoted_lines(joined):
+    """The backticked spans and shell-fence lines of a text."""
     spans = [s.strip() for s in re.findall(r"`([^`\n]+)`", joined)]
     for block in re.findall(r"(?ms)^```(?:sh|bash|shell|powershell|ps1)?[ \t]*\n(.*?)^```", joined):
         spans.extend(line.strip() for line in block.splitlines() if line.strip())
@@ -54,17 +77,9 @@ FIELD = re.compile(r"(?i)^[ ]{0,3}(?:[-*][ ]+)?(?:Acceptance command:|\*\*Accept
 
 def prose(pairs):
     """The (held, line) pairs whose line is prose: not inside a fence, not an indented block."""
-    fence = None
-    for held, line in pairs:
-        marker = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
-        if marker:
-            value = marker.group(1)
-            if fence is None:
-                fence = value
-            elif value[0] == fence[0] and len(value) >= len(fence) and not marker.group(2).strip(" \t"):
-                fence = None
-            continue
-        if fence is None and not line.startswith(("    ", "\t")):
+    pairs = list(pairs)
+    for inside, (held, line) in zip(fenced(line for _, line in pairs), pairs):
+        if not inside and not line.startswith(("    ", "\t")):
             yield held, line
 
 
@@ -72,6 +87,16 @@ def acceptance_declarations(text):
     """An explicit field is prose, never a fenced or indented historical example."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     return [cmd for _, line in prose((False, line) for line in lines) for cmd in DECLARED_ACCEPTANCE.findall(line)]
+
+
+def granted_below(rows, allowed):
+    """Whether the held rows below a label, up to the next field or the end of the held run, hold a span or a shell fence that grants a command."""
+    run = []
+    for held, ln in rows:
+        if not held or FIELD.match(ln):
+            break
+        run.append(ln)
+    return any(s in allowed for s in quoted_lines("\n".join(run)))
 
 
 def unread_fields(body, allowed):
@@ -90,6 +115,8 @@ def unread_fields(body, allowed):
             move = "move the line and its command under an `## Acceptance` heading"
         if (where and quoted) or cmd in allowed:
             continue
+        if where and not span and not PREFIXED.sub("", cmd).startswith(ACCEPTANCE) and granted_below(rows[i + 1:], allowed):
+            continue  # a bare or prose label above prose or a sub-heading, then the command it introduces
         fixes = ([] if quoted else ["put the command in backticks"]) + ([] if where else [move])
         problems.append((f"`{cmd}`: " if cmd else "") + "this `Acceptance command:` line grants nothing as written; " + " and ".join(fixes))
     return problems

@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -282,6 +283,18 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertNotIn("stale creation record", output.getvalue())
         self.assertNotIn("shutdown evidence uncertain", output.getvalue())
         self.assertIs(worktrees.read_record(self.record)["settled"], True)
+
+    def test_removed_directory_still_registered_prints_notice_and_retains_record(self):
+        self.create()
+        worktrees.use(self.env, self.path)
+        shutil.rmtree(self.path)  # The registration stays: Git lists the tree as prunable.
+        self.assertIn("prunable", self.git("worktree", "list", "--porcelain"))
+        self.env._worktrees_settled = True
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            worktrees.close(self.env)
+        self.assertIn("shutdown evidence uncertain; creation record retained", output.getvalue())
+        self.assertTrue(self.record.exists())
 
     def test_changed_identity_at_shutdown_prints_notice_and_retains_record(self):
         self.create()

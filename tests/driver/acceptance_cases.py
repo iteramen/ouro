@@ -268,9 +268,29 @@ def unread_fields(h):
             ("under an Acceptance heading before a bare next line names the backticks alone", "Acceptance", dotnet + "\n",
              "put the command in backticks"),
             ("under an Acceptance heading before a text fence names the backticks alone", "Acceptance", "```text\n" + dotnet + "\n```\n",
-             "put the command in backticks")):
+             "put the command in backticks"),
+            ("under an Acceptance heading before prose and a sh fence under another heading names the backticks alone", "Acceptance",
+             "Run from the repo root:\n## Notes\n```sh\n" + dotnet + "\n```\n", "put the command in backticks")):
         body = h.ISSUE_BODY + "\n## " + heading + "\nAcceptance command:\n" + below
         h.check("a label line " + name, problems(body) == [label + fix] and dotnet not in h.runmod.acceptance_commands(body))
+    for name, text, below in (
+            ("an unbackticked runner above an unrelated granted sh fence", dotnet, "```sh\npython3 lint.py\n```\n"),
+            ("an unbackticked runner above a non-runner span", dotnet, "Needs `DOTNET_ROOT` set.\n"),
+            ("prose above a non-runner span", "run the suite", "Edit `foo.py` first.\n"),
+            ("prose above prose and a text fence", "run the suite", "Run from the repo root:\n```text\n" + dotnet + "\n```\n")):
+        body = h.ISSUE_BODY + "\n## Acceptance\nAcceptance command: " + text + "\n" + below
+        h.check("a label line carrying " + name + " names the backticks alone",
+                problems(body) == ["`" + text + "`: " + label + "put the command in backticks"])
+    for name, tail, fix in (
+            ("under Acceptance, its command granted above, before prose and a sh fence under another heading",
+             "## Acceptance\n`" + dotnet + "`\nAcceptance command: run the suite\nRun from the repo root:\n## Notes\n```sh\n" + dotnet + "\n```\n",
+             "put the command in backticks"),
+            ("under Acceptance before the next field, which grants the command",
+             "## Acceptance\nAcceptance command: run the suite\nAcceptance command: `" + dotnet + "`\n", "put the command in backticks"),
+            ("under another heading before a sh fence opening Acceptance",
+             "## Notes\nAcceptance command: run the suite\n## Acceptance\n```sh\n" + dotnet + "\n```\n",
+             "put the command in backticks and move the line under an `## Acceptance` heading")):
+        h.check("a label line carrying prose " + name + " is refused", problems(h.ISSUE_BODY + "\n" + tail) == ["`run the suite`: " + label + fix])
     for name, body in (("a whole-line field under Acceptance", h.ISSUE_BODY + "\n## Acceptance\nAcceptance command: `" + dotnet + "`\n"),
                        ("a bold bullet field under Verification", h.ISSUE_BODY + "\n### Verification\n* **Acceptance command:** `" + dotnet + "`\n"),
                        ("a span under Tests", h.ISSUE_BODY + "\n## Tests\nAcceptance command: `" + dotnet + "` passes\n"),
@@ -283,8 +303,22 @@ def unread_fields(h):
                        ("a bold label line before a bash fence", h.ISSUE_BODY + "\n## Acceptance\n**Acceptance command:**\n```bash\n" + dotnet + "\n```\n"),
                        ("a label line before a span on the next line", h.ISSUE_BODY + "\n## Acceptance\nAcceptance command:\n`" + dotnet + "`\n"),
                        ("a label line ending another section before a sh fence opening Acceptance",
-                        h.ISSUE_BODY + "\n## Notes\nAcceptance command:\n## Acceptance\n```sh\n" + dotnet + "\n```\n")):
+                        h.ISSUE_BODY + "\n## Notes\nAcceptance command:\n## Acceptance\n```sh\n" + dotnet + "\n```\n"),
+                       ("a label line and a prose line before a sh fence",
+                        h.ISSUE_BODY + "\n## Acceptance\nAcceptance command:\nRun from the repo root:\n```sh\n" + dotnet + "\n```\n"),
+                       ("a label line and a sub-heading before a sh fence",
+                        h.ISSUE_BODY + "\n## Acceptance\nAcceptance command:\n#### Linux\n```sh\n" + dotnet + "\n```\n"),
+                       ("a label line carrying prose before a sh fence",
+                        h.ISSUE_BODY + "\n## Acceptance\nAcceptance command: run from the repo root\n```sh\n" + dotnet + "\n```\n")):
         h.check("granted forms and examples yield no unread-field problem: " + name, problems(body) == [])
+    quoted = ("## What happens\n```text\n## Acceptance\nRun it.\n```\nThe quoted body then ran `dotnet test X.csproj -c Debug`.\n"
+              "## Acceptance\nAcceptance command: `python3 tests/driver/driver.Tests.py`\n")
+    h.check("a heading inside a fence opens no section: only the real section's command is granted",
+            h.runmod.acceptance_commands(quoted) == ["python3 tests/driver/driver.Tests.py"])
+    h.check("a line holding an inline code span after its opening backticks opens no fence: the Acceptance section stays granted",
+            h.runmod.acceptance_commands("## What\n```dotnet build```\n## Acceptance\n`python3 a.py`\n") == ["python3 a.py"])
+    h.check("a truly unclosed fence hides the Acceptance heading below it: nothing is granted",
+            h.runmod.acceptance_commands("## What\n```text\ndotnet build\n## Acceptance\n`python3 a.py`\n") == [])
     h.check("a non-runner declaration keeps the runner-forms message",
             problems(h.runmod.declared_source(h.ISSUE_BODY, ["gh issue close 1"]))
             == ["`gh issue close 1`: this explicit command is outside the approved acceptance runner forms"])
