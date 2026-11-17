@@ -220,7 +220,7 @@ def shape_findings(env, issue, body, labels, comment):
 
 def triage(env, n, dry):
     needs = {"triager": node.READ}  # the TRIAGE node runs even in a dry run
-    if isinstance(env.runtime, developer.Settings) and env.runtime.mixed(needs):
+    if isinstance(env.runtime, developer.Settings):
         node.preflight(env.runtime, needs=needs)
     else:
         node.preflight(env.runtime, capabilities=node.READ)

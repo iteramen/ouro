@@ -9,9 +9,9 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from ouro import developer, node, run, sh
+from ouro import developer, node, run, sh, triage
 from ouro.runtime import Capabilities, READ, PROBE, builder, codex, diagnostics, process
 from ouro.runtime.tools import Bridge
 
@@ -281,8 +281,9 @@ class FileOnlyReadinessTests(unittest.TestCase):
         with patch.object(node, "preflight") as preflight:
             runner = object.__new__(run.Run)
             runner.env = SimpleNamespace(runtime=self.cfg, dry=False)
+            runner.labels, runner.flow, runner.followup_only = [], "express", False
             runner.preflight()
-            preflight.assert_called_once_with(self.cfg)
+            preflight.assert_called_once_with(self.cfg, needs={"triager": READ, "builder": None, "reviewer": READ})
             preflight.reset_mock()
             path = Path(node.__file__).parents[1] / "ouro-developer.py"
             spec = importlib.util.spec_from_file_location("file_only_inspection", path)
@@ -293,6 +294,35 @@ class FileOnlyReadinessTests(unittest.TestCase):
             config.write_text('[runtime]\nbackend="codex"\n')
             self.assertEqual(inspector.main(["inspect", "--check", "--home", str(self.root)]), 0)
             self.assertEqual(preflight.call_args.kwargs, {})
+
+    @patch.object(codex, "WINDOWS", False)
+    def test_a_single_backend_run_checks_and_probes_only_the_models_of_its_roles(self):
+        cfg = developer.Settings("codex", roles={role: {"model": f"gpt-{role}"} for role in developer.ROLES})
+        catalog = sh.R(0, json.dumps({"models": [{"slug": f"gpt-{role}"} for role in developer.ROLES]}), "", [])
+        probed = []
+
+        def model(name, prompt, model, tools, cwd, *args):
+            probed.append(model)
+            return self.model_read(name, prompt, model, tools, cwd)
+        usage = len(node.USAGE)
+        with patch.dict(os.environ, {"OURO_NODE_STUB": ""}), patch.object(sh, "argv_for", side_effect=lambda *args: list(args)), \
+                patch.object(sh, "run", side_effect=[*self.metadata()[:3], catalog, sh.R(0, "", "", [])]), \
+                patch.object(process, "run", return_value=sh.R(0, "ouro-sandbox-ready", "", [])), \
+                patch.object(codex, "network_readiness"), patch.object(codex, "git_readiness"), \
+                patch.object(codex, "execute", side_effect=model):
+            node.preflight(cfg, needs={"triager": READ, "builder": None, "reviewer": READ})
+        del node.USAGE[usage:]
+        self.assertEqual(probed, ["gpt-builder", "gpt-reviewer", "gpt-triager"])  # not the checkpointer's, not builder_trivial's
+        # ouro triage dispatches the triager alone: an account serving only its model admits it.
+        del probed[:]
+        served = sh.R(0, json.dumps({"models": [{"slug": "gpt-triager"}]}), "", [])
+        env = SimpleNamespace(runtime=cfg, gh_json=Mock(side_effect=sh.DriverError("past the preflight")))
+        with patch.dict(os.environ, {"OURO_NODE_STUB": ""}), patch.object(sh, "argv_for", side_effect=lambda *args: list(args)), \
+                patch.object(sh, "run", side_effect=[*self.metadata()[:3], served]), \
+                patch.object(codex, "execute", side_effect=model), self.assertRaisesRegex(sh.DriverError, "past the preflight"):
+            triage.triage(env, 1, False)
+        del node.USAGE[usage:]
+        self.assertEqual(probed, ["gpt-triager"])
 
 
 if __name__ == "__main__":

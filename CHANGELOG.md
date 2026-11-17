@@ -20,6 +20,34 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.11.2] - 2026-11-17
+
+- The plugin draws a local `ouro run`'s progress line above the prompt in Claude Code with no
+  setup: `hooks/hooks.json` registers the mod `hooks/band/register.tsx` under `modules`, which
+  shows `bin/ouro-run-status.py`'s line dimmed, redraws it about every ten seconds while it
+  shows, and leaves the slot empty when the script prints nothing or a survey holds it. It
+  reads the session repository's progress file only, never `gh`. A `statusLine` command can
+  still run the script.
+- `ouro run`'s preflight proves only the roles the command can dispatch, on a single backend as
+  on mixed ones: a run resumed on a merged pull request the triager alone, a checkpoint the
+  checkpointer alone, any other run the triager, its one build role and the reviewer. Qwen Code
+  makes one live call per distinct contract and model among them, so an express run makes no
+  PROBE call, a run with no checkpoint no commands call, and `builder` and `builder_trivial` on
+  different models each get the BUILD proof. Codex checks and probes the models of those roles
+  alone, and `ouro triage` the triager's alone. A diff that tightens the flow from express or
+  direct to standard or full preflights the reviewer again at PROBE before REVIEW, on a single backend as on mixed ones.
+- An issue body's `Acceptance command:` line that grants nothing, because its command has no
+  backticks or the line sits outside an Acceptance, Tests or Verification section, is refused
+  as acceptance: triage answers NEEDS-RULING and a run stops as `acceptance unrunnable` before
+  BUILD, naming the fix (add the backticks, or move the line under an `## Acceptance`
+  heading). Such a line used to pass unread, and a run resumed after BUILD could fail on it as a driver error. A
+  body holding such a line that used to run now stops until the line is fixed.
+- A Claude REVIEW node with probe capability is granted Claude Code's `PowerShell` tool beside
+  `Bash`, with `git push`, `git commit` and `gh` refused in both, so a reviewer on Windows can
+  run its mutation probes; under `ship.review_sandbox` it keeps `Bash` alone. The REVIEW brief
+  says probes are made and restored with shell commands, and a REVIEW answer that carries
+  refused calls prints one line in the run's log naming each refused tool and its command or path.
+
 ## [v1.11.1] - 2026-11-09
 
 - `ship.review_sandbox = true` refuses a Codex reviewer on WSL2 before any tracker call, naming

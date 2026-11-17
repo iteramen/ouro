@@ -230,11 +230,23 @@ LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?|\x1b\[[0-9
 ERROR_MARK = re.compile(r"\b(error|failed|failure|fatal|panic|traceback|exception)\b", re.I)
 
 
+def verdict_end(text, i):
+    """One past the last line of the `FAIL:` verdict at line `i`: the verdict, and the Python traceback right under it
+    through its final exception line, the first line at column 0 after the indented frames."""
+    if i + 1 >= len(text) or not text[i + 1].startswith("Traceback (most recent call last):"):
+        return i + 1
+    j = i + 2
+    while j < len(text) and text[j][:1] in (" ", "\t"):
+        j += 1
+    return min(j + 1, len(text))
+
+
 def failure_extract(log, cap=200, tail=60):
     """What a fix round reads of a red log: pytest's FAILURES and ERRORS sections with the FAILED and ERROR lines and the
     result line, or else every line an error marker names, with two lines of context, then the log's tail. Over `cap`
     lines it cuts from the middle; a fixed tail misses a failure that a long SKIPPED list follows. A line that starts with
-    `FAIL:`, a fixture suite's verdict, is added back after the cut, so the cut never drops it."""
+    `FAIL:`, a fixture suite's verdict, is added back after the cut with the traceback under it, so the cut never drops
+    either."""
     lines = log.strip().splitlines()
     text = [LOG_PREFIX.sub("", line) for line in lines]
     keep, inside, pytest = [], False, False
@@ -248,7 +260,7 @@ def failure_extract(log, cap=200, tail=60):
         keep = sorted({j for i, t in enumerate(text) if ERROR_MARK.search(t) for j in range(max(0, i - 2), i + 3) if j < len(lines)})
     if len(keep) > cap:
         keep = keep[:cap // 2] + keep[-(cap // 2):]
-    keep = sorted(set(keep) | {i for i, t in enumerate(text) if t.startswith("FAIL:")})
+    keep = sorted(set(keep) | {j for i, t in enumerate(text) if t.startswith("FAIL:") for j in range(i, verdict_end(text, i))})
     if not pytest:
         keep = sorted(set(keep) | set(range(max(0, len(lines) - tail), len(lines))))
     out, last = [], -1

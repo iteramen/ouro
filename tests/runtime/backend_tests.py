@@ -122,6 +122,20 @@ class BackendInterfaceTests(unittest.TestCase):
         self.assertEqual(steps, [{"path": ".claude/rules/x.md", "edit": "a rule"},
                                  {"path": ".codex/config.toml", "edit": '{"old": "a", "new": "b"}'}])
 
+    def test_claude_probe_grants_both_shells_and_denies_publishing_in_each(self):
+        from ouro.runtime import SANDBOXED_PROBE, claude
+        self.assertEqual(claude.tools_for(PROBE), (
+            ["Read", "Grep", "Glob", "Bash", "PowerShell"],
+            ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)",
+             "PowerShell(git push *)", "PowerShell(git commit *)", "PowerShell(gh *)"]))
+        tools, denied = claude.tools_for(SANDBOXED_PROBE)
+        self.assertEqual(tools, ["Read", "Grep", "Glob", "Bash"], "a sandboxed probe grants Bash alone")
+        self.assertEqual(denied, claude.tools_for(PROBE)[1])
+        self.assertEqual(claude.tools_for(builder(["python3 check.py"])), (
+            ["Edit", "Write", "Read", "Grep", "Glob", "Bash(git rm *)", "Bash(git mv *)", "Bash(git status *)",
+             "Bash(git diff *)", "Bash(git log *)", "Bash(git ls-files *)", "Bash(python3 check.py)"], None))
+        self.assertEqual(claude.tools_for(READ), (["Read", "Grep", "Glob"], None))
+
     def test_node_opens_one_attempt_row_per_execution_for_every_backend(self):
         for name, backend in BACKENDS.items():
             calls = []
@@ -189,21 +203,21 @@ class BackendInterfaceTests(unittest.TestCase):
         cfg = developer.Settings("claude", roles={"triager": {"backend": "qwen"}, "reviewer": {"backend": "qwen"}})
         groups = node.plan(cfg, {"triager": READ, "builder": None, "reviewer": READ})
         self.assertEqual({name: (scoped.serves, contract) for name, (scoped, contract) in groups.items()},
-                         {"qwen": (("triager", "reviewer"), READ), "claude": (("builder",), None)})
+                         {"qwen": ({"triager": READ, "reviewer": READ}, READ), "claude": ({"builder": None}, None)})
         self.assertEqual(groups["qwen"][0].serving("qwen", ("triager",)), ["triager", "reviewer"])
         self.assertEqual(groups["claude"][0].serving("claude"), ["builder"])
         groups = node.plan(cfg, {"triager": READ, "builder": None, "reviewer": PROBE})
         self.assertEqual({name: (scoped.serves, contract) for name, (scoped, contract) in groups.items()},
-                         {"qwen": (("triager", "reviewer"), None), "claude": (("builder",), None)})
+                         {"qwen": ({"triager": READ, "reviewer": PROBE}, None), "claude": ({"builder": None}, None)})
         self.assertEqual(set(node.plan(cfg, {"checkpointer": Capabilities(commands=("python3 check.py",))})), {"claude"})
         moved = developer.Settings("claude", roles={"checkpointer": {"backend": "qwen"}})
         self.assertEqual({name: (scoped.serves, contract) for name, (scoped, contract) in
                           node.plan(moved, {"checkpointer": Capabilities(commands=("python3 check.py",))}).items()},
-                         {"qwen": (("checkpointer",), None)})
+                         {"qwen": ({"checkpointer": Capabilities(commands=("python3 check.py",))}, None)})
         building = developer.Settings("claude", roles={"builder": {"backend": "qwen"}})
         self.assertEqual({name: (scoped.serves, contract) for name, (scoped, contract) in
                           node.plan(building, {"triager": READ, "builder": None, "reviewer": PROBE}).items()},
-                         {"claude": (("triager", "reviewer"), None), "qwen": (("builder",), None)})
+                         {"claude": ({"triager": READ, "reviewer": PROBE}, None), "qwen": ({"builder": None}, None)})
         windows = developer.Settings("claude", roles={"builder": {"backend": "codex"}})
         with patch.object(codex, "WINDOWS", True), self.assertRaises(sh.DriverError) as caught:
             node.plan(windows, {"triager": READ, "builder": None, "reviewer": PROBE})
@@ -225,12 +239,20 @@ class BackendInterfaceTests(unittest.TestCase):
         usage = len(node.USAGE)
         with patch.dict("os.environ", {"OURO_NODE_STUB": ""}), patch.object(Backend, "interface", new=property(lambda b: fakes[b.name])):
             node.preflight(cfg, needs={"triager": READ, "builder": None, "reviewer": READ})
-            self.assertEqual(calls, [("qwen", ("triager",), READ), ("claude", ("builder", "reviewer"), None)])
+            self.assertEqual(calls, [("qwen", {"triager": READ}, READ), ("claude", {"builder": None, "reviewer": READ}, None)])
             self.assertEqual([(u["node"], u["backend"]) for u in node.USAGE[usage:]], [("PREFLIGHT", "qwen"), ("PREFLIGHT", "claude")])
+            del calls[:], node.USAGE[usage:]
+            commands = Capabilities(commands=("python3 check.py",))
+            reviewing = developer.Settings("claude", roles={"reviewer": {"backend": "qwen"}})
+            node.preflight(reviewing, needs={"reviewer": PROBE, "checkpointer": commands})
+            self.assertEqual(calls, [("qwen", {"reviewer": PROBE}, None), ("claude", {"checkpointer": commands}, None)])
             del calls[:], node.USAGE[usage:]
             same = developer.Settings("claude", roles={"reviewer": {"model": "sonnet"}})
             node.preflight(same, capabilities=READ, needs={"triager": READ})
-            self.assertEqual(calls, [("claude", (), READ)])  # one backend: the call a binding without a role table makes
+            node.preflight(same, needs={"triager": READ, "builder": None, "reviewer": PROBE})
+            node.preflight(same, capabilities=READ)
+            self.assertEqual(calls, [("claude", {"triager": READ}, READ),  # one backend: one call, scoped to the command's roles
+                                     ("claude", {"triager": READ, "builder": None, "reviewer": PROBE}, None), ("claude", {}, READ)])
             del node.USAGE[usage:]
         windows = developer.Settings("claude", roles={"triager": {"backend": "codex"}})
         with patch.dict("os.environ", {"OURO_NODE_STUB": "stub"}), patch.object(codex, "WINDOWS", True), \

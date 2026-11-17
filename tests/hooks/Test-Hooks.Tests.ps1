@@ -6,8 +6,9 @@
 .DESCRIPTION
     Reads hooks/hooks.json the way Claude Code's plugin loader does, with ${CLAUDE_PLUGIN_ROOT}
     standing for the plugin root, and pins the surface first: .claude-plugin/plugin.json names the
-    file, it holds at least one PreToolUse entry, every entry is a command with a timeout, and the
-    script each command names exists. Then each hook runs once per fixture in
+    file, it holds at least one PreToolUse entry, its modules are the one band module and that
+    file exists, its command hooks are the listed ones, every entry is a command with a timeout,
+    and the script each command names exists. Then each hook runs once per fixture in
     tests/hooks/<hook>/, <hook> being the script's file name without its extension, the event
     piped to it on standard input as Claude Code sends it. A fixture is one JSON file:
 
@@ -33,6 +34,8 @@
       rule                                             | case that fails without it
       -------------------------------------------------|------------------------------------
       plugin.json names the registry                   | the manifest row
+      modules is the band module alone, and it exists  | the modules and module-file rows
+      the command hooks stay as registered             | the command-hook list row
       a hook with no fixture directory is a failure    | a registered hook with no directory
       allow is exit 0 and deny is exit 2, nothing else | every fixture row
       stderr carries the reason                        | the deny rows with a reason
@@ -70,6 +73,19 @@ $manifest = Get-Content -LiteralPath (Join-Path $Base '.claude-plugin/plugin.jso
 Assert-Equal './hooks/hooks.json' $manifest.hooks 'plugin.json names hooks/hooks.json'
 $reg = Get-Content -LiteralPath $Registry -Raw -Encoding utf8 | ConvertFrom-Json
 Assert-Equal $true ([bool]$reg.hooks.PreToolUse -and @($reg.hooks.PreToolUse).Count -ge 1) 'the registry holds a PreToolUse entry'
+Assert-Equal './band/register.tsx' (@($reg.modules) -join ', ') 'modules names exactly ./band/register.tsx'
+Assert-Equal $true (Test-Path -LiteralPath (Join-Path $Base 'hooks/band/register.tsx') -PathType Leaf) 'the band module hooks/band/register.tsx exists'
+$commandHooks = @(foreach ($event in $reg.hooks.PSObject.Properties) {
+    foreach ($group in @($event.Value)) { foreach ($h in @($group.hooks)) { "$($event.Name) $($group.matcher) $($h.timeout) $($h.command)" } }
+}) -join "`n"
+$expectedHooks = @(
+    'PreToolUse Bash|PowerShell 10 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/guard-delete.py"'
+    'PreToolUse Bash|PowerShell 10 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/guard-stash-kill.py"'
+    'PreToolUse Bash|PowerShell 10 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/guard-discard.py"'
+    'PreToolUse Bash|PowerShell 10 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/guard-commit.py"'
+    'SessionStart startup 120 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/session-sync.py"'
+) -join "`n"
+Assert-Equal $expectedHooks $commandHooks 'the command hooks are the four guards and the session sync, as registered'
 
 $hooks = @()
 foreach ($event in $reg.hooks.PSObject.Properties) {

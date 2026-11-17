@@ -1,10 +1,14 @@
 """Caller-validation refusal tests; WSL and other unsupported platforms are simulated rows."""
+import ast
+import inspect
+import itertools
 import json
 import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+import textwrap
 import types
 import unittest
 from unittest.mock import patch
@@ -14,6 +18,97 @@ from ouro.worktrees import Tree
 from ouro.runtime import process as owned_process
 
 HINT = str  # stands in for Run.wait_hint: the wait's text names its commands
+
+GRANTED = "python3 granted.py"
+ALLOWED = [GRANTED]
+U = {"cmd": "python3 other.py", "reason": "sandbox"}  # well-formed and ungranted: the grant alone would clear it
+STOP = "stop: open decision, exit 3"
+ARRAY, MALFORMED, INVALID = "validation_pending must be an array", "malformed validation_pending record", "invalid validation command"
+UNPARSEABLE, DUPLICATE_ENV = "invalid validation command: ", "duplicate validation environment assignment"
+NO_EXECUTABLE, DUPLICATE = "validation command has no executable", "duplicate validation command: `"
+CONFLICT, NOT_GRANTED = "validation command conflicts with gates_run", "validation command not granted: `"
+
+
+def req(cmd, reason="sandbox"):
+    return {"cmd": cmd, "reason": reason}
+
+
+def pend(*items, gates=()):
+    """One commit's Ouro-Build facts: these requests, and a gates_run naming `gates`."""
+    return {"validation_pending": list(items), **({"gates_run": [{"cmd": g, "exit": 0} for g in gates]} if gates else {})}
+
+
+G = req(GRANTED)
+# One request no grant would clear, and the error `validation.record` or `validation.command` raises for it.
+BAD_ITEMS = (
+    ("not-a-dict", GRANTED, MALFORMED),
+    ("missing-reason", {"cmd": GRANTED}, MALFORMED),
+    ("missing-cmd", {"reason": "sandbox"}, MALFORMED),
+    ("extra-field", {**G, "note": 1}, MALFORMED),
+    ("empty-reason", req(GRANTED, ""), MALFORMED),
+    ("blank-reason", req(GRANTED, "  "), MALFORMED),
+    ("non-string-reason", req(GRANTED, 1), MALFORMED),
+    ("non-string-cmd", req(["python3"]), MALFORMED),
+    ("empty-cmd", req(""), INVALID),
+    ("blank-cmd", req("   "), INVALID),
+    *((f"metacharacter-{ord(c):02x}", req(f"python3 granted.py {c} x"), INVALID) for c in "\n\r\x00;&|<>`$"),
+    ("unparseable", req('python3 "unterminated'), UNPARSEABLE),
+    ("duplicate-env", req("A=1 A=2 python3 granted.py"), DUPLICATE_ENV),
+    ("no-executable", req("A=1 B=2"), NO_EXECUTABLE),
+)
+# One commit's facts no grant would clear, and the error `validation.requests` raises for them.
+BAD_RECORDS = (
+    *((name, pend(item), error) for name, item, error in BAD_ITEMS),
+    ("not-an-array", {"validation_pending": GRANTED}, ARRAY),
+    ("object-not-an-array", {"validation_pending": {}}, ARRAY),
+    ("null-not-an-array", {"validation_pending": None}, ARRAY),
+    ("duplicate", pend(G, G), DUPLICATE),
+    ("duplicate-argv", pend(G, req("python3  granted.py")), DUPLICATE),
+    ("gates-run-conflict", pend(G, gates=[GRANTED]), CONFLICT),
+)
+# (name, via, records oldest first, expected outcome). `branch` runs Run.build_facts over one commit per record (None:
+# a commit with no Ouro-Build line); `fresh` runs validation.requests over one BUILD answer with the grant, as Run.build
+# does. The outcome is the source message prefix of the DriverError raised, STOP, or None for accepted.
+REQUEST_CASES = (
+    ("no-record", "branch", [None], None),
+    ("empty-list", "branch", [pend()], None),
+    ("granted", "branch", [pend(G)], None),
+    ("ungranted", "branch", [pend(U)], STOP),
+    *((name, "branch", [facts], error) for name, facts, error in BAD_RECORDS),
+    # An error beside an ungranted request in one list is raised, in either order.
+    *((f"{name}-after-ungranted", "branch", [pend(U, item)], error) for name, item, error in BAD_ITEMS),
+    *((f"{name}-before-ungranted", "branch", [pend(item, U)], error) for name, item, error in BAD_ITEMS),
+    ("duplicate-ungranted", "branch", [pend(U, U)], DUPLICATE),
+    ("ungranted-conflicts-with-gates-run", "branch", [pend(U, gates=[U["cmd"]])], CONFLICT),
+    # An error in any commit is raised before an ungranted request in another, older or newer.
+    *((f"ungranted-commit-then-{name}", "branch", [pend(U), facts], error) for name, facts, error in BAD_RECORDS),
+    *((f"{name}-then-ungranted-commit", "branch", [facts, pend(U)], error) for name, facts, error in BAD_RECORDS),
+    # A gates_run conflicts only with its own commit's fresh requests: an earlier valid request is inherited.
+    ("gates-run-inherited", "branch", [pend(G), pend(G, gates=[GRANTED])], None),
+    ("gates-run-in-earlier-commit", "branch", [pend(gates=[GRANTED]), pend(G)], None),
+    ("ungranted-inherited-by-gates-run", "branch", [pend(U), pend(U, gates=[U["cmd"]])], STOP),
+    # Well-formed across commits: an ungranted request in any commit stops, naming the oldest such commit.
+    ("ungranted-then-granted", "branch", [pend(U), pend(G)], STOP),
+    ("granted-then-ungranted", "branch", [pend(G), pend(U)], STOP),
+    ("ungranted-repeated", "branch", [pend(U), pend(U)], STOP),
+    ("fresh-granted", "fresh", [pend(G)], None),
+    ("fresh-ungranted", "fresh", [pend(U)], NOT_GRANTED),
+)
+
+
+def source_outcomes():
+    """Each DriverError message prefix and each stop the request checks hold, read from their source."""
+    from ouro.run import Run
+    found = set()
+    for fn in (validation.command, validation.record, validation.requests, Run.require_granted):
+        for n in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(fn)))):
+            if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call) and getattr(n.exc.func, "attr", getattr(n.exc.func, "id", None)) == "DriverError":
+                message = n.exc.args[0]
+                parts = message.values if isinstance(message, ast.JoinedStr) else [message]
+                found.add("".join(p.value for p in itertools.takewhile(lambda p: isinstance(p, ast.Constant), parts)))
+            elif isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "stop_issue":
+                found.add(f"stop: {n.args[0].value}, exit {n.args[2].value}")
+    return found
 
 
 class ValidationTests(unittest.TestCase):
@@ -66,13 +161,48 @@ class ValidationTests(unittest.TestCase):
                     receipt.assert_not_called()
                     lease.assert_not_called()
 
-    def test_requests_name_the_command_and_the_cause(self):
-        granted = {"cmd": "python3 granted.py", "reason": "sandbox"}
-        for name, value, cause in (("ungranted", [{"cmd": "python3 other.py", "reason": "sandbox"}], "not granted: `python3 other.py`"),
-                                   ("duplicate", [granted, granted], "duplicate validation command: `python3 granted.py`")):
-            with self.subTest(name), self.assertRaises(sh.DriverError) as raised:
-                validation.requests(value, ["python3 granted.py"])
-            self.assertIn(cause, str(raised.exception))
+    def test_every_request_error_is_raised_before_an_ungranted_stop(self):
+        from ouro.run import Run
+        sources = source_outcomes()
+        self.assertTrue(all(sources) and STOP in sources, sources)
+        names = [case[0] for case in REQUEST_CASES]
+        self.assertEqual(len(names), len(set(names)), "row names are unique")
+        tree = self.fixture({})
+        comments = []
+        run = Run.__new__(Run)
+        run.tree, run.n, run.labels = tree, 1, ["agent-ready"]
+        run.env = types.SimpleNamespace(default="main", slug="owner/repo", write=lambda *a: None,
+                                        comment_issue=lambda n, body: comments.append(body))
+        run.claim = types.SimpleNamespace(update=lambda *a, **k: None)
+        run.validation_commands, run.ci_commands = lambda: ALLOWED, lambda **kw: set()
+        for name, via, records, expected in REQUEST_CASES:
+            with self.subTest(name):
+                comments.clear()
+                tree.git("update-ref", "refs/remotes/origin/main", "HEAD")  # the row's branch: only its own commits
+                shas = []
+                for r in records if via == "branch" else ():
+                    tree.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty",
+                             "-qm", name + ("" if r is None else "\n\nOuro-Build: " + json.dumps(r)))
+                    shas.append(tree.head())
+                try:
+                    with patch("ouro.run.say"), patch("ouro.run.argv_for", lambda *a: list(a)):
+                        if via == "fresh":
+                            validation.requests(records[0]["validation_pending"], ALLOWED, records[0].get("gates_run") or [])
+                        else:
+                            Run.build_facts(run, evidence=False)
+                    got = None
+                except sh.DriverError as ex:
+                    hits = [s for s in sources if str(ex).startswith(s)]
+                    got = max(hits, key=len) if hits else "unattributed: " + str(ex)
+                except sh.Stopped as ex:
+                    got = f"stop: {comments[0].splitlines()[0].removeprefix('**Stop:** ')}, exit {ex.args[0]}"
+                self.assertEqual(got, expected)
+                if expected == STOP:
+                    sha, cmd = next((sha, p["cmd"]) for sha, r in zip(shas, records) if r
+                                    for p in r["validation_pending"] if p["cmd"] not in ALLOWED)
+                    self.assertIn(f"The BUILD commit {sha[:7]} requested caller validation of `{cmd}`", comments[0])
+        # A DriverError or stop added to the request checks without a row of its own fails here.
+        self.assertEqual(sources - {case[3] for case in REQUEST_CASES}, set())
 
     @unittest.skipUnless(os.name == "posix", "kernel platform detection")
     def test_platform_facts_ignore_environment_and_fail_closed(self):

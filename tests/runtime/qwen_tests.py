@@ -121,7 +121,7 @@ class QwenTests(unittest.TestCase):
                 self.assertRaisesRegex(sh.DriverError, "a capability contract is required"):
             qwen._execute("BUILD", "p", "m", ["read_file"], ".", 30, None, {}, developer.Settings("qwen"), {})
         builds = developer.Settings("claude", roles={"builder": {"backend": "qwen"}, "reviewer": {"backend": "qwen"}})
-        for settings in (developer.Settings("qwen"), builds, dataclasses.replace(builds, serves=("builder",))):
+        for settings in (developer.Settings("qwen"), builds, dataclasses.replace(builds, serves={"builder": None})):
             with self.subTest(settings=settings), patch.object(sh, "argv_for", side_effect=sh.DriverError("reached the CLI check")), \
                     self.assertRaisesRegex(sh.DriverError, "reached the CLI check"):
                 qwen.preflight(settings, None)
@@ -365,34 +365,71 @@ class QwenTests(unittest.TestCase):
                 qwen.preflight(developer.Settings("qwen", {"builder": "deepseek-v4-pro"}, roles={"triager": {"model": "default"}}), READ)
         self.assertEqual(calls, ["deepseek-v4-pro", "qwen3-coder-small"])
 
-    def test_a_run_on_qwen_alone_proves_every_role_model_and_triage_the_triagers(self):
+    def test_a_run_proves_exactly_the_contract_and_model_pairs_its_command_dispatches(self):
         from ouro import node, run, triage
+        from ouro.runtime import claude
         replies = {"--version": sh.R(0, "0.26.6\n", "", []), "--help": sh.R(0, " ".join(qwen.FLAGS), "", [])}
         calls = []
 
         def execute(name, prompt, model, tools, root, *rest):
-            calls.append(model)
+            calls.append((next((label for label, _, contract, _ in qwen.LIVE if contract == tools), "read"), model))
             return {"finding": "ouro-ready"}, "s", {"model": model, "tool_calls": [
                 {"tool": "read", "path": "readiness.txt", "error": None},
                 {"tool": "run", "path": None, "command": qwen.LISTED, "error": None},
                 {"tool": "write", "path": qwen.WRITTEN, "error": None}],
                 "hook": [{"tool": t, "granted": True} for t in ("read_file", "run_shell_command", "write_file")]}, None
-        cfg = developer.Settings("qwen", {role: "model-b" for role in ("builder", "builder_trivial", "reviewer")},
-                                 roles={"triager": {"model": "model-a"}})
+        cfg = developer.Settings("qwen", roles={role: {"model": role} for role in developer.ROLES})
         usage = len(node.USAGE)
+        runner = object.__new__(run.Run)
+        runner.build_commands = lambda: ("- `python3 check.py`", ["python3 check.py"])
         with patch.object(sh, "argv_for", side_effect=lambda *a: list(a)), \
                 patch.object(sh, "run", side_effect=lambda argv, **k: replies[argv[-1]]), \
                 patch.dict(os.environ, {"OURO_NODE_STUB": "", "OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "http://x/v1", "OPENAI_MODEL": ""}), \
-                patch.object(qwen, "hook_proof"), patch.object(qwen, "_execute", side_effect=execute):
-            runner = object.__new__(run.Run)
+                patch.object(qwen, "hook_proof"), patch.object(qwen, "_execute", side_effect=execute), \
+                patch.object(claude, "preflight", return_value=None):
+            # Qwen Code alone, a distinct model per role: the roles Run.contracts names, each at its own contract.
             runner.env = SimpleNamespace(runtime=cfg, dry=False)
-            runner.preflight()
-            self.assertEqual(calls, ["model-a", "model-b", "model-b", "model-b", "model-b"])  # then commands, PROBE, BUILD
+            for labels, flow, merged, expected in (
+                    ([], "standard", False, [("read", "builder"), ("read", "reviewer"), ("read", "triager"),
+                                             ("PROBE", "reviewer"), ("BUILD", "builder")]),
+                    (["trivial"], "express", False, [("read", "builder_trivial"), ("read", "reviewer"), ("read", "triager"),
+                                                     ("BUILD", "builder_trivial")]),
+                    (["checkpoint"], "standard", False, [("read", "checkpointer"), ("commands", "checkpointer")]),
+                    (["trivial"], "standard", True, [("read", "triager")])):
+                with self.subTest(labels=labels, flow=flow, merged=merged):
+                    del calls[:]
+                    runner.labels, runner.flow, runner.followup_only = labels, flow, merged
+                    runner.preflight()
+                    self.assertEqual(calls, expected)
+                    self.assertEqual({model for _, model in calls}, set(runner.contracts(merged)))
             del calls[:]
             env = SimpleNamespace(runtime=cfg, gh_json=Mock(side_effect=sh.DriverError("past the preflight")))
             with self.assertRaisesRegex(sh.DriverError, "past the preflight"):
                 triage.triage(env, 1, False)
-            self.assertEqual(calls, ["model-a"])
+            self.assertEqual(calls, [("read", "triager")])
+            # A diff that tightens an express run to standard proves the reviewer's model at PROBE before REVIEW.
+            del calls[:]
+            runner.env = SimpleNamespace(runtime=cfg, ob=SimpleNamespace(gate_paths=lambda gates: []))
+            runner.flow, runner.size, runner.notes, runner.gate_entries = "express", "M", [], lambda: []
+            runner.tree, runner._note = SimpleNamespace(changed=lambda: ["src/app.py"]), lambda **k: None
+            runner.rederive()
+            self.assertEqual((runner.flow, calls), ("standard", [("read", "reviewer"), ("PROBE", "reviewer")]))
+            # Mixed: builder and reviewer on Qwen Code; an express run reads its review, so no PROBE call.
+            runner.env = SimpleNamespace(runtime=developer.Settings("claude", roles={
+                "builder": {"backend": "qwen", "model": "qb"}, "reviewer": {"backend": "qwen", "model": "qr"}}), dry=False)
+            for flow, expected in (("express", [("read", "qb"), ("read", "qr"), ("BUILD", "qb")]),
+                                   ("standard", [("read", "qb"), ("read", "qr"), ("PROBE", "qr"), ("BUILD", "qb")])):
+                with self.subTest(flow=flow):
+                    del calls[:]
+                    runner.labels, runner.flow, runner.followup_only = [], flow, False
+                    runner.preflight()
+                    self.assertEqual(calls, expected)
+            # Unscoped (inspect --check): builder and builder_trivial on distinct models each get the BUILD proof.
+            del calls[:]
+            qwen.preflight(developer.Settings("qwen", roles={"builder": {"model": "mb"}, "builder_trivial": {"model": "mt"},
+                                                             "reviewer": {"model": "mr"}}), None)
+            self.assertEqual(calls, [("read", "mb"), ("read", "mr"), ("read", "mt"), ("commands", "mb"), ("PROBE", "mr"),
+                                     ("BUILD", "mb"), ("BUILD", "mt")])
         del node.USAGE[usage:]
 
     def test_preflight_proves_each_served_contract_live_and_refuses_a_missing_or_ungranted_tool(self):
@@ -435,12 +472,15 @@ class QwenTests(unittest.TestCase):
                 return qwen.preflight(settings, capabilities)
         self.assertEqual(len(preflight("granted", developer.Settings("qwen"), None)), 4)  # the read, then commands, PROBE and BUILD
         self.assertEqual(seen, [("default", None), *[("yolo", "TRUST_FOLDER")] * 3])
-        self.assertEqual(len(preflight("granted", dataclasses.replace(developer.Settings("qwen"), serves=("reviewer",)), None)), 2)
+        self.assertEqual(len(preflight("granted", dataclasses.replace(developer.Settings("qwen"), serves={"reviewer": PROBE}), None)), 2)
+        self.assertEqual(len(preflight("granted", dataclasses.replace(developer.Settings("qwen"), serves={"reviewer": READ}), None)), 1)
         self.assertEqual(len(preflight("granted", developer.Settings("qwen"), READ)), 1)  # a READ contract makes no live call
         for mode in ("missing", "ungranted"):
             with self.subTest(mode=mode), self.assertRaisesRegex(
                     sh.DriverError, r"the commands contract's run proof failed \(call observed False, hook observed False\)"):
                 preflight(mode, developer.Settings("qwen"), None)
+        with self.assertRaisesRegex(sh.DriverError, r"the PROBE contract's run proof failed"):
+            preflight("ungranted", dataclasses.replace(developer.Settings("qwen"), serves={"triager": READ, "reviewer": PROBE}), None)
         with tempfile.TemporaryDirectory() as root:
             run = {"tool": "run", "path": None, "command": qwen.LISTED, "error": None}
             write = {"tool": "write", "path": qwen.WRITTEN, "error": None}

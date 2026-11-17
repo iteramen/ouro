@@ -220,6 +220,7 @@ class RuntimeTests(unittest.TestCase):
         spec = schema.SCHEMAS["TRIAGE"]
         self.assertEqual(spec["properties"]["verdict"]["enum"], list(triage.VERDICTS))
         self.assertEqual(node.SCHEMAS["TRIAGE"]["properties"]["verdict"]["enum"], list(triage.VERDICTS))
+        self.assertEqual(set(node.SCHEMAS["TRIAGE"]["properties"]), set(spec["properties"]))
         blocked = {**sample(spec), "verdict": "BLOCKED", "size": "M", "flow": "full", "question": ""}
         schema.validate(blocked, spec)
         schema.validate_answer("TRIAGE", blocked)

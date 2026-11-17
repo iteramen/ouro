@@ -63,6 +63,7 @@ class Coordination:
 class Reply:
     value: dict | None = None
     notice: str = ""
+    reason: str = ""
 
     @property
     def available(self):
@@ -176,7 +177,7 @@ class Board:
 
     @staticmethod
     def unavailable(reason):
-        return Reply(notice=f"Coordination unavailable ({reason}); continuing without board evidence.")
+        return Reply(notice=f"Coordination unavailable ({reason}); continuing without board evidence.", reason=reason)
 
     def rpc(self, method, params, key, deadline, cancelled, notify=False):
         def remaining():
@@ -295,7 +296,7 @@ def values(result):
 
 def payload(reply):
     if not reply.available:
-        raise Unavailable("transport unavailable")
+        raise Unavailable(reply.reason or "transport unavailable")
     found = values(reply.value)
     if not found or any(v != found[0] for v in found) or "error" in found[0]:
         raise Unavailable("malformed tool result")
@@ -329,10 +330,14 @@ class Claim:
         self.noticed = False
         self.terminal = False
         self.prepared = None
+        if self.config and not os.environ.get(self.config.credential_env):
+            say(f"Coordination off: {self.config.credential_env} is unset; this run makes no board calls.")
 
-    def notice(self):
+    def notice(self, cause):
         if not self.noticed:
-            say("Coordination unavailable; continuing without complete board evidence.")
+            if not isinstance(cause, (str, Unavailable)):
+                cause = type(cause).__name__  # a local error's text can carry a path
+            say(f"Coordination unavailable ({self.safe(cause)}); continuing without complete board evidence.")
             self.noticed = True
 
     def safe(self, value):
@@ -437,8 +442,8 @@ class Claim:
             if str(result.get("threadId")) != ident or not isinstance(result.get("added"), dict):
                 raise Unavailable("malformed reply")
             self.close(ident, deadline)
-        except Unavailable:
-            self.notice()
+        except Unavailable as ex:
+            self.notice(ex)
         return True
 
     def close(self, ident, deadline):
@@ -539,12 +544,8 @@ class Claim:
         return dict(author=self.config.person, via=self.env.runtime.backend, session=self.data["identity"]["session"])
 
     def ready(self):
-        if not self.config or self.env.dry:
-            return False
-        if not os.environ.get(self.config.credential_env):
-            self.notice()
-            return False
-        return True
+        # A missing credential was said once, at bind.
+        return bool(self.config and not self.env.dry and os.environ.get(self.config.credential_env))
 
     def survey(self, kind, deadline, scope=None):
         owned, conflicts, incomplete = self.discover(deadline, scope)
@@ -552,7 +553,7 @@ class Claim:
             holders = ", ".join(f"{c['holder']} (thread {self.safe(c['thread'])})" for c in conflicts)
             raise Refused(f"known {kind} claim held by {holders}; the invoking person may use --override-claim")
         if incomplete:
-            self.notice()
+            self.notice("incomplete discovery")
         return owned, conflicts, incomplete
 
     def enter(self, create=True):
@@ -582,8 +583,8 @@ class Claim:
                 self.owned = thread_id(created.get("id"))
                 self.data["thread"] = self.owned
                 self.save()
-        except (Unavailable, OSError, ValueError, TypeError, RecursionError, DriverError):
-            self.notice()
+        except (Unavailable, OSError, ValueError, TypeError, RecursionError, DriverError) as ex:
+            self.notice(ex)
 
     def prepare(self, base, head, paths, areas, stage, *, check=True):
         """Reusable prepared-change boundary; the caller supplies Git scope and reviewed policy areas."""
@@ -603,8 +604,8 @@ class Claim:
                 raise Unavailable("ownership unavailable")
             self.owned = owned[0]
             self.update("direct prepared", deadline=deadline, conflicts=conflicts)
-        except (Unavailable, OSError, ValueError, TypeError, RecursionError, DriverError):
-            self.notice()
+        except (Unavailable, OSError, ValueError, TypeError, RecursionError, DriverError) as ex:
+            self.notice(ex)
 
     def update(self, outcome, close=False, deadline=None, conflicts=()):
         if not self.owned or self.env.dry or (self.terminal and not close):
@@ -625,5 +626,5 @@ class Claim:
             if close:
                 self.close(self.owned, deadline)
                 self.owned = None
-        except (Unavailable, OSError, ValueError, TypeError, RecursionError, DriverError):
-            self.notice()
+        except (Unavailable, OSError, ValueError, TypeError, RecursionError, DriverError) as ex:
+            self.notice(ex)

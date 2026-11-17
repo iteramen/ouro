@@ -8,16 +8,20 @@ from .sh import DriverError
 ACCEPTANCE = ("python3 ", "python ", "pwsh ", "dotnet ", "npm ", "npx ", "pytest", "bash ", "go test")
 
 
-def acceptance_text(body):
-    """The approved body's acceptance/test/verification sections, including prose requirements."""
-    level, text = 0, []
+def sections(body):
+    """Each body line but the headings that open or close a section, with whether an acceptance/test/verification section holds it."""
+    level = 0
     for line in body.splitlines():
         h = re.match(r"(#{2,3})\s+(.*)", line)
         if h and (not level or len(h.group(1)) <= level):
             level = len(h.group(1)) if re.search(r"\b(acceptance|tests?|testing|verif\w*)\b", h.group(2), re.I) else 0
-        elif level:
-            text.append(line)
-    return "\n".join(text)
+        else:
+            yield bool(level), line
+
+
+def acceptance_text(body):
+    """The approved body's acceptance/test/verification sections, including prose requirements."""
+    return "\n".join(line for held, line in sections(body) if held)
 
 
 def acceptance_spans(body):
@@ -45,10 +49,13 @@ def named_commands(body):
 DECLARED_ACCEPTANCE = re.compile(r"(?mi)^[ ]{0,3}(?:[-*][ ]+)?(?:Acceptance command:|\*\*Acceptance command:\*\*)\s*`([^`\n]+)`[ \t]*$")
 
 
-def acceptance_declarations(text):
-    """An explicit field is prose, never a fenced or indented historical example."""
-    result, fence = [], None
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+FIELD = re.compile(r"(?i)^[ ]{0,3}(?:[-*][ ]+)?(?:Acceptance command:|\*\*Acceptance command:\*\*)[ \t]*(.*?)[ \t]*$")
+
+
+def prose(pairs):
+    """The (held, line) pairs whose line is prose: not inside a fence, not an indented block."""
+    fence = None
+    for held, line in pairs:
         marker = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
         if marker:
             value = marker.group(1)
@@ -58,8 +65,34 @@ def acceptance_declarations(text):
                 fence = None
             continue
         if fence is None and not line.startswith(("    ", "\t")):
-            result.extend(DECLARED_ACCEPTANCE.findall(line))
-    return result
+            yield held, line
+
+
+def acceptance_declarations(text):
+    """An explicit field is prose, never a fenced or indented historical example."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return [cmd for _, line in prose((False, line) for line in lines) for cmd in DECLARED_ACCEPTANCE.findall(line)]
+
+
+def unread_fields(body, allowed):
+    """Each `Acceptance command:` line that grants nothing, as neither an acceptance span nor a declaration, with its fix."""
+    problems, rows = [], list(sections(body))
+    for (i, held), line in prose(((i, held), line) for i, (held, line) in enumerate(rows)):
+        field = FIELD.match(line)
+        if not field or DECLARED_ACCEPTANCE.match(line):
+            continue  # a declaration: acceptance_problems judges its command
+        span = re.search(r"`([^`\n]+)`", field.group(1))
+        cmd = span.group(1).strip() if span else field.group(1)
+        where, quoted, move = held, bool(span), "move the line under an `## Acceptance` heading"
+        if not cmd:  # a bare label's command is its next line, read as a span or a shell fence where that line sits
+            where, below = next(((h, ln) for h, ln in rows[i + 1:] if ln.strip()), (held, ""))
+            quoted = bool(re.match(r"```(?:sh|bash|shell|powershell|ps1)?[ \t]*$|.*`[^`\n]+`", below))
+            move = "move the line and its command under an `## Acceptance` heading"
+        if (where and quoted) or cmd in allowed:
+            continue
+        fixes = ([] if quoted else ["put the command in backticks"]) + ([] if where else [move])
+        problems.append((f"`{cmd}`: " if cmd else "") + "this `Acceptance command:` line grants nothing as written; " + " and ".join(fixes))
+    return problems
 
 
 def declared_source(body, declared):
@@ -77,11 +110,14 @@ def acceptance_problems(body, caller_commands=()):
                 if cmd not in caller_commands:
                     raise DriverError("leading environment assignments require an already-approved caller validation command")
                 continue  # caller handoff only; acceptance_commands never makes this a worker grant
+            if cmd not in allowed and cmd.startswith(ACCEPTANCE):  # a runner a held line would grant: the line sits outside the sections
+                raise DriverError("this `Acceptance command:` line is outside an Acceptance, Tests or Verification heading, so it grants nothing; "
+                                  "move the line under an `## Acceptance` heading")
             if cmd not in allowed:
                 raise DriverError("this explicit command is outside the approved acceptance runner forms")
         except DriverError as ex:
             problems.append(f"`{cmd}`: {ex}")
-    return problems
+    return problems + unread_fields(body, allowed)
 
 
 def empty_list(body):

@@ -39,20 +39,26 @@ def command(cmd):
     return argv, env
 
 
+def record(item):
+    """One request's argv and env: exactly a string `cmd` and a non-empty `reason`, and a cmd `command` accepts."""
+    if (not isinstance(item, dict) or set(item) != {"cmd", "reason"}
+            or not isinstance(item["reason"], str) or not item["reason"].strip()
+            or not isinstance(item["cmd"], str)):
+        raise sh.DriverError("malformed validation_pending record")
+    return command(item["cmd"])
+
+
 def requests(value, allowed, gates=(), *, inherited=()):
-    """Fresh answers are exclusive; history may repeat a caller obligation from earlier valid records."""
+    """Fresh answers are exclusive; history may repeat a caller obligation from earlier valid records.
+    `allowed=None` checks everything but the grant."""
     if not isinstance(value, list):
         raise sh.DriverError("validation_pending must be an array")
     seen = set()
     for item in value:
-        if (not isinstance(item, dict) or set(item) != {"cmd", "reason"}
-                or not isinstance(item["reason"], str) or not item["reason"].strip()
-                or not isinstance(item["cmd"], str)):
-            raise sh.DriverError("malformed validation_pending record")
+        argv, env = record(item)
         cmd = item["cmd"]
-        argv, env = command(cmd)
         identity = (tuple(argv), tuple(sorted(env.items())))
-        if cmd not in allowed:
+        if allowed is not None and cmd not in allowed:
             raise sh.DriverError(f"validation command not granted: `{cmd}`")
         if identity in seen:
             raise sh.DriverError(f"duplicate validation command: `{cmd}`")

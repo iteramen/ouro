@@ -197,7 +197,8 @@ def file_proof(answer, usage, root):
 
 WRITTEN = "proof.txt"
 ASKS = {"run": f"Run `{LISTED}` with run_shell_command.", "write": f"Write {WRITTEN} with the content ouro-ready using write_file."}
-# (label, the roles it serves, its contract, the calls its live proof must show granted): one CLI call per served contract.
+# (label, the roles it serves, its contract, the calls its live proof must show granted): one CLI call per distinct
+# model among the served roles whose contract in the run is wider than READ.
 LIVE = (("commands", ("checkpointer",), Capabilities(commands=(LISTED,)), ("run",)),
         ("PROBE", ("reviewer",), PROBE, ("run",)),
         ("BUILD", ("builder", "builder_trivial"), builder([LISTED]), ("run", "write")))
@@ -217,20 +218,18 @@ def contract_proof(label, calls, usage, root):
                                  f"(call observed {ran}, hook observed {hooked}); the tool is missing or not granted")
 
 
-def live_proofs(settings, roles, root):
-    """One live CLI call per contract a served role needs beyond READ, each through the hook in a trusted `root`."""
+def live_proofs(settings, needs, root):
+    """One live CLI call per distinct (contract, model) pair among `needs`, {role: contract}, for each role whose
+    contract is wider than READ, each through the hook in a trusted `root`."""
     proofs = []
     for label, served, contract, calls in LIVE:
-        role = next((r for r in served if r in roles), None)
-        if role is None:
-            continue
-        model = settings.model(role, "")
-        with diagnostics.attempt("CHECKPOINT", "qwen", model) as diagnostic:
-            _, session, usage, cost = _execute(
-                "CHECKPOINT", " ".join(ASKS[c] for c in calls) + " Then return done as finding, with stop null.",
-                model, contract, root, 180, None, {}, settings, diagnostic)
-        contract_proof(label, calls, usage, root)
-        proofs.append((session, usage, cost))
+        for model in dict.fromkeys(settings.model(role, "") for role in served if needs.get(role, READ) != READ):
+            with diagnostics.attempt("CHECKPOINT", "qwen", model) as diagnostic:
+                _, session, usage, cost = _execute(
+                    "CHECKPOINT", " ".join(ASKS[c] for c in calls) + " Then return done as finding, with stop null.",
+                    model, contract, root, 180, None, {}, settings, diagnostic)
+            contract_proof(label, calls, usage, root)
+            proofs.append((session, usage, cost))
     return proofs
 
 
@@ -248,6 +247,7 @@ def preflight(settings, capabilities):
                              f"(version {'.'.join(map(str, version)) or 'unknown'}, missing {', '.join(missing) or 'none'}); update it")
     # Without a planned scope, a READ contract is ouro triage's preflight (the triager's model alone); any other is a run's, every role's.
     roles = settings.serving("qwen", ("triager",)) if capabilities == READ else settings.serving("qwen")
+    needs = {role: settings.serves.get(role, capabilities) for role in roles}
     models = sorted({settings.model(role, "") for role in roles})
     unset = [n for n in (*CREDENTIALS, *(("OPENAI_MODEL",) if "default" in models else ())) if not os.environ.get(n)]
     if unset:
@@ -264,8 +264,7 @@ def preflight(settings, capabilities):
                     model, READ, root, 180, None, {}, settings, diagnostic)
             file_proof(answer, usage, root)
             proofs.append((session, usage, cost))
-        if capabilities != READ:
-            proofs += live_proofs(settings, roles, root)
+        proofs += live_proofs(settings, needs, root)
     return proofs
 
 

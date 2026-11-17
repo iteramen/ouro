@@ -124,11 +124,15 @@ binding and onboarding installer.
    { "statusLine": { "type": "command", "command": "python3 \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/marketplaces/ouro/bin/ouro-version.py\"" } }
    ```
 
-   A run in progress has its own line: `bin/ouro-run-status.py` beside `ouro-version.py`,
-   run from the repository the run is bound to. It reads `<git-common-dir>/ouro-run/<issue>.json`
-   (the Live progress section of [docs/architecture.html](architecture.html))
+   A run in progress has its own line, which the plugin draws dimmed above the prompt with no
+   setup: `hooks/band/register.tsx`, a Claude Code mod `hooks/hooks.json` registers, runs
+   `bin/ouro-run-status.py` in the session's working directory and shows what it prints. It
+   redraws about every ten seconds while a line shows, and otherwise looks again when the prompt
+   area redraws, as at a turn's start or end. It shows local runs only: the script reads
+   `<git-common-dir>/ouro-run/<issue>.json` of the session's repository
+   (the Live progress section of [docs/architecture.html](architecture.html)), never `gh`,
    and prints nothing when none can be read, so a `statusLine` command can run both
-   scripts. A status line you already have keeps its own entry: its command runs
+   scripts too. A status line you already have keeps its own entry: its command runs
    `ouro-run-status.py` with the session's working directory and appends the line it prints,
    if any. A finished run shows a one-line summary, such as `ouro #<issue> done ✓`, for
    5 minutes after the file's last update, then nothing. The file is observational: the driver never reads it, and a failed write

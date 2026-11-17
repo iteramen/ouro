@@ -64,8 +64,12 @@ hard-linked files, nested mounts or special files; admission refuses unsupported
 dispatch and again before each command. Canonical aliases of the root use the same boundary.
 External processes must not mutate that private copy or its invocation-stable configuration inputs
 while it is in use. Claude and Qwen Code PROBE commands run without that write boundary, unless
-the binding sets `ship.review_sandbox = true`: Claude Code refuses only `git push`, `git commit`
-and `gh` there, and Qwen Code's commands answer to ouro's allow-list hook alone.
+the binding sets `ship.review_sandbox = true`: a Claude PROBE grants both of Claude Code's shell
+tools, `Bash` and `PowerShell`, and refuses only `git push`, `git commit` and `gh` there, in each
+tool's spelling; Qwen Code's commands answer to ouro's allow-list hook alone. A Claude PROBE grants
+no file-edit tool, so a review mutates and restores its copy with shell commands. A REVIEW answer
+that carries refused calls prints one line in the run's log naming each refused tool and its
+command or path.
 That key refuses a run before any tracker call when the reviewer role's backend has no sandbox
 route on the host (Codex has one on Linux and macOS, Qwen Code on Linux alone), its route's prerequisites are missing (Claude
 on Linux and WSL2: `bwrap` and `socat` on PATH; Qwen Code: `/usr/bin/bwrap`), or the host is native
@@ -75,6 +79,8 @@ PROBE review node then launches inside Claude Code's sandbox, with `allowUnsandb
 `failIfUnavailable` on, no allowed network domain, and `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a
 temp directory private to that launch and deleted when it returns, so its commands write only in
 the review copy and that directory, never in the temp directory the user's Claude sessions share.
+That node is granted `Bash` alone of the two shell tools: Windows, where `PowerShell` serves, has no
+sandbox route.
 A Qwen Code PROBE review node launches under `tools.executionSandbox` (backend `bwrap`,
 `workspace-write` on the review copy, `network: closed`) with deny rules for `git push`,
 `git commit` and `gh`. Qwen Code runs no executable hook there, so the allow-list hook never runs
@@ -569,6 +575,9 @@ never resume automatically.
   add a whole-line field `Acceptance command:` followed by the exact command in backticks.
   Each trusted comment is parsed separately: an unclosed fence cannot hide a later amendment.
   Other quotes in those comments, fenced/indented examples and untrusted comments add no grants.
+  An `Acceptance command:` prose line the run does not read as a grant, its command unbackticked
+  or outside an acceptance/test/verification section, is refused as acceptance with its fix
+  named: add the backticks, or move the line under an `## Acceptance` heading.
   Commands use the single-command grammar; shell operators and leading environment assignments
   are not worker grants. An unreachable
   required acceptance stops as `acceptance unrunnable` before committing or spending a fix round.

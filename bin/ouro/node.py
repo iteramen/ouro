@@ -25,6 +25,7 @@ READ_TOOLS = ["Read", "Grep", "Glob"]
 
 SCHEMAS = {
     "TRIAGE": {"type": "object", "required": ["verdict", "comment"], "properties": {
+        "deliverable": {"type": "string"},  # ahead of verdict: an eighth entry in the run below clones BUILD's (release/duplicates.py)
         "verdict": {"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE"]},
         "size": {"type": "string"}, "flow": {"type": "string"}, "doc_impact": {"type": "string"}, "manual": {"type": "array"}, "labels": {"type": "array"},
         "comment": {"type": "string"}, "question": {"type": "string"}}},
@@ -135,9 +136,14 @@ def widest(settings):
             for role, options in CONTRACTS.items()}
 
 
+def file_only(needs):
+    return READ if all(c == READ for c in needs.values()) else None
+
+
 def plan(settings, needs):
-    """{backend: (settings scoped to its roles, READ or None)} for `needs`, {role: contract}: each backend once,
-    file-only when all its roles are. A role whose backend does not admit its contract is refused; there is no fallback."""
+    """{backend: (settings whose `serves` is {role: contract} for its roles, READ or None)} for `needs`, {role: contract}:
+    each backend once, file-only when all its roles are. A role whose backend does not admit its contract is refused;
+    there is no fallback."""
     groups = {}
     for role, contract in needs.items():
         backend = BACKENDS[settings.backend_of(role)]
@@ -145,22 +151,23 @@ def plan(settings, needs):
             raise sh.DriverError(f"preflight: role {role} selects {backend.label}, which does not admit its "
                                  f"{contract_name(contract)} contract; select another backend in [runtime.roles.{role}]")
         groups.setdefault(backend.name, {})[role] = contract
-    # shortcut: a backend's proof runs at its first role's effort; distinct efforts on one backend are not each proven.
-    return {name: (replace(settings, serves=tuple(roles), effort=settings.effort_of(next(iter(roles)))),
-                   READ if all(c == READ for c in roles.values()) else None)
+    # No backend's preflight reads the effort, so none is proven here; validate_runtime checks each when the settings load.
+    return {name: (replace(settings, serves=roles, effort=settings.effort_of(next(iter(roles)))), file_only(roles))
             for name, roles in groups.items()}
 
 
 def preflight(settings=None, *, capabilities=None, needs=None):
     """The runtime check before any write. `needs`, {role: the widest contract it can need}, plans one preflight per backend
-    its roles select when any is not runtime.backend; otherwise runtime.backend's preflight runs once at `capabilities`."""
+    its roles select when any is not runtime.backend; otherwise runtime.backend's preflight runs once, scoped to `needs`
+    when given (its own preflight refuses a contract it does not admit), else at `capabilities`."""
     if capabilities is not None and not isinstance(capabilities, Capabilities):
         raise sh.DriverError("preflight: a capability contract is required")
     stub = os.environ.get("OURO_NODE_STUB")
     if stub and not needs:
         return
     cfg = settings or developer.load()
-    groups = plan(cfg, needs) if needs and cfg.mixed(needs) else {cfg.backend: (cfg, capabilities)}
+    groups = (plan(cfg, needs) if needs and cfg.mixed(needs) else
+              {cfg.backend: (replace(cfg, serves=dict(needs)), file_only(needs)) if needs else (cfg, capabilities)})
     if stub:
         return
     for backend, (scoped, contract) in groups.items():

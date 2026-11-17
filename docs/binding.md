@@ -291,14 +291,18 @@ Before any tracker write, a run works out the widest contract each role can need
 TRIAGE and FOLLOWUP read (READ); CHECKPOINT reads, and runs commands whenever its brief grants
 any: the issue's acceptance commands and every gate the checkpoint selects; REVIEW reads under
 express and probes (PROBE) under standard and full; BUILD takes full readiness. A run resumed on
-a merged pull request plans FOLLOWUP alone. Each backend's preflight runs once, file-only when
-every role on it only reads, full readiness otherwise. A role whose backend does not admit its
+a merged pull request plans FOLLOWUP alone. Each backend's preflight runs once, with the contract
+of each of its roles the command can dispatch: file-only when every such role only reads, full
+readiness otherwise. A role whose backend does not admit its
 contract is refused there, naming the role, the backend and the contract; there is no fallback to
 another backend. So a `builder` on native Windows Codex, which only reads, refuses a run before it
-writes. A diff that tightens the flow to standard or full after BUILD commits replans REVIEW and refuses
-there a reviewer whose backend does not admit PROBE, before REVIEW, on that run and on every resume.
+writes. A diff that tightens the flow from express or direct to standard or full after BUILD commits
+preflights the reviewer's backend again at PROBE, scoped to the reviewer, before REVIEW, on that run
+and on every resume: a backend that does not admit PROBE refuses the reviewer there, and Qwen Code
+makes the PROBE live call on the reviewer's model.
 `ouro triage` preflights the triager's backend alone, file-only. While every role selects
-`runtime.backend`, each command makes the one preflight it made before role tables existed. The
+`runtime.backend`, each command makes one preflight, of that backend, scoped the same way, and a
+run that such a diff tightens makes the second, reviewer-scoped one as well. The
 attempt diagnostics, the usage table and the progress file's `reviewer` field name the backend
 each node used; a board claim's `platform` stays `runtime.backend`.
 
@@ -376,8 +380,10 @@ Git-hook children; the coordinator keeps it. No repository configuration is requ
 The client, `bin/ouro/coordination.py`, serves the
 [optional issue claim lifecycle and prepared-change scope checks](contract.md#optional-issue-claims).
 A timeout, authentication failure, malformed response or incomplete MCP tool discovery returns
-unavailable evidence with a short fixed notice, never proof that no claim exists; errors expose no
-response bodies, headers, credentials or endpoint URLs. Board text and self-announced identities
+unavailable evidence with a short notice naming its fixed cause, never proof that no claim exists;
+errors expose no response bodies, headers, credentials or endpoint URLs. An unset `credential_env`
+variable is said once, when the run binds its coordination config, as one line naming the
+variable; the run then makes no board calls and prints no unavailable notice for it. Board text and self-announced identities
 are data, with no verified identity or shipping authority.
 
 ### Follow-up assignees
@@ -418,8 +424,9 @@ override is applied to force success.
 Codex workers require CLI 0.163.0+ and saved authentication. Preflight checks the selected CLI,
 authentication, flags, each selected model's availability, the bridge contract and a structured
 file-read proof; full readiness also checks OS sandbox startup, the Git reads above and a network
-capability proof, all before tracker writes or branch creation. Each distinct selected model gets
-a small file-only call on generated readiness data, reported as PREFLIGHT usage. TRIAGE takes the
+capability proof, all before tracker writes or branch creation. The selected models are those of
+the roles on Codex that the command can dispatch (the plan above), every role's under
+`inspect --check`. Each distinct selected model gets a small file-only call on generated readiness data, reported as PREFLIGHT usage. TRIAGE takes the
 file-only (READ) preflight; delivery runs and `inspect --check` take full readiness, unless the
 roles that select Codex only read (the plan above). A READ result
 never admits commands, probes or edits. Each file proof is classified on its attempt's diagnostics
@@ -515,7 +522,7 @@ the app restart needed to inherit it.
 
 `backend = "qwen"` runs every node contract on Qwen Code 0.26.6+ (npm `@qwen-code/qwen-code`):
 READ, CHECKPOINT's commands, PROBE and BUILD, as `runtime.backend` or per role. Its preflight
-proves the model of each role it serves.
+proves the model of each role it serves that the command can dispatch.
 
 The model is reached through an OpenAI-compatible endpoint named in the launch environment:
 `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` when a role's model is `default`. Any
@@ -580,13 +587,17 @@ approvals and runtime paths inside the node's temporary directory.
   on a denied and a granted tool, a listed command and an unlisted and a chained one, a
   probe's command and its `git push`, and a worktree write, a `.claude/` write and a write outside
   the worktree. It then makes one structured file-read call on generated
-  data per model. That call must read the generated file through the hook and return its exact content.
-  A preflight that is not file-only then makes one live call per contract a role it serves needs,
-  in that scratch directory, trusted as any command or edit node's working directory is, with
-  the model of the first such role: CHECKPOINT's commands
-  (`checkpointer`) and PROBE (`reviewer`) each run a listed shell command, and BUILD (`builder`,
-  `builder_trivial`) runs it and writes one file there. A transcript in which that call is
-  missing, failed or not granted by the hook refuses the backend.
+  data per model of a role it serves. That call must read the generated file through the hook and return its exact content.
+  It then makes one live call per distinct (contract, model) pair among the roles it serves whose
+  contract in the command is wider than READ, in that scratch directory, trusted as any command
+  or edit node's working directory is: CHECKPOINT's commands (`checkpointer`) and PROBE
+  (`reviewer`) each run a listed shell command, and BUILD (`builder`, `builder_trivial`) runs it
+  and writes one file there. The roles are those the command can dispatch: a run resumed on a
+  merged pull request proves the triager's model alone, a checkpoint the checkpointer's, any other
+  run the triager's, its one build role's and the reviewer's, PROBE only under standard and full
+  or once a diff tightens the flow to one of them (the plan above).
+  `inspect --check` proves every role it serves at its widest contract. A transcript in which a live call is
+  missing, failed or not granted by the hook refuses the backend, naming that call's contract.
 - **Answers:** a node's answer is the structured result. When Qwen Code fails a run because the
   model wrote its answer as plain text instead of calling the tool, that text is admitted only
   when it passes the same strict schema check.

@@ -79,7 +79,7 @@ MODELED_WORKFLOW_SECTIONS = frozenset({
     "sec_developer_runtime", "sec_unchanged_finding", "sec_review_cap", "sec_conflict",
     "sec_gate_red", "sec_checks_running", "sec_head_lag",
     "sec_check_flake", "sec_no_pr_workflow", "sec_merge_refused", "sec_express", "sec_flow_tighten",
-    "sec_express_base_moves", "sec_sync_conflict", "sec_spec_trust", "sec_review_none",
+    "sec_express_base_moves", "sec_sync_conflict", "sec_sync_rebase_stops", "sec_spec_trust", "sec_review_none",
     "sec_copilot", "sec_resume", "sec_external", "sec_other_pr", "sec_manual",
     "sec_executable_acceptance", "sec_acceptance_review_corrections", "sec_coordination", "sec_gate_uncovered",
     "sec_review_sandbox",
@@ -326,6 +326,9 @@ BUILD = {"subject": "fix(app): sum the items", "body": "Sum the items in compute
          "residue": [], "door": "two-way: a revert undoes it", "blast_radius": "the total, for callers",
          "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 0\n"}}
 CLEAN = {"verdict": "CLEAN", "findings": [], "false_record_sentences": 0, "files_read": ["src/app.py"]}
+PROBE_TOOLS = ["Read", "Grep", "Glob", "Bash", "PowerShell"]
+PROBE_DENIED = ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)",
+                "PowerShell(git push *)", "PowerShell(git commit *)", "PowerShell(gh *)"]
 AREA_COMMENTS = "read the binding file's comments around `[labels].area`, where a repository may say what each area covers, and follow them."
 
 
@@ -968,6 +971,7 @@ def sec_happy():
     c = happy_case("happy")
     code, out, err = c.ouro("run", "1")
     check("a stop-at-pr run ends at the PR: exit 0", code == 0)
+    check("a REVIEW answer with no refusals prints no refusal line", "[7] REVIEW node round 1" in out and "was refused" not in out)
     progress = json.loads((c.main / ".git" / "ouro-run" / "1.json").read_text(encoding="utf-8"))
     check("the run's progress file records the review, the gate and the pull request",
           progress["exit"] == 0 and progress["outcome"] == "ok" and progress["step"] == 9 and progress["node"] == "merge"
@@ -1012,8 +1016,7 @@ def sec_happy():
     check("the REVIEW brief names no release note when the range changes none", "matches): none\n" in review_brief)
     call = c.node_call("REVIEW")
     check("under standard the sized REVIEW node probes only its detached copy with publishing denied",
-          call["tools"] == ["Read", "Grep", "Glob", "Bash"]
-          and call["denied"] == ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"]
+          call["tools"] == PROBE_TOOLS and call["denied"] == PROBE_DENIED
           and pathlib.Path(call["cwd"]).resolve() != (c.main / ".claude" / "worktrees" / "1-fix-the-total").resolve()
           and not pathlib.Path(call["cwd"]).exists())
     check("the BUILD brief holds the issue body and the anchor's current line", "src/app.py:1: def compute_total(items):" in open(c.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read())
@@ -1037,6 +1040,13 @@ def sec_happy():
     check("the queue's anchors were refreshed", any(s.startswith("issue list") for s in again))
     code, out, err = c.ouro("run", "1")
     check("a third invocation does nothing new and exits 0", code == 0 and not any(s.startswith(("pr create", "pr comment", "issue comment")) for s in c.sigs()[sigs_before:]))
+    cd = Case("reviewdenied")
+    cd.node("BUILD", BUILD)
+    cd.node("REVIEW", {**CLEAN, "_denied": [{"tool_name": "edit", "tool_input": {"file_path": "src/app.py", "old": "a", "new": "b"}},
+                                            {"tool_name": "run", "tool_input": {"command": "gh run view 12\n  --log"}}]})
+    code, out, err = cd.ouro("run", "1")
+    check("a REVIEW answer with refusals prints one line naming each refused tool and its command or path",
+          code == 0 and "  REVIEW round 1 was refused 2 call(s): edit src/app.py; run gh run view 12 --log\n" in out.replace("\r\n", "\n"))
 
 
 def sec_branch_prefix():
@@ -1174,16 +1184,22 @@ def sec_findings_fix():
     ready = [b["body"] for b in c.pr_comments() if b["body"].startswith("**Ready for merge**")]
     check("a ruled FINDINGS record at HEAD opens no fix round and reaches the decision, whose comment carries the Ruled line",
           code == 0 and len(c.prompts("BUILD")) == 1 and len(ready) == 1 and re.search(r"(?m)^Ruled: \S+, round 1$", ready[0]))
-    c = Case("gatefixnone")
-    c.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], "gates/exit.txt": "1"}}, 1)
-    c.node("BUILD", {**BUILD, "subject": "fix(app): nothing", "writes": {}}, 2)
-    c.node("REVIEW", CLEAN)
-    code, out, err = c.ouro("run", "1")
-    stops = stops_of(c)
-    check("a red-gate fix that changes no file stops as `open decision`, exit 3, naming the gate and its evidence log, not an empty commit",
-          code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision") and "gate `python3 gates/check.py` exited 1" in stops[0]
-          and "evidence " in stops[0] and "no file change fixes" in stops[0] and "needs-ruling" in labels_of(c)
-          and "left no change" not in err and len(c.prompts("BUILD")) == 2 and not c.prompts("REVIEW"))
+    portable = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace(
+        "[ship]\n", '[ship]\nvalidation="ci"\nvalidation_checks=["ci"]\n')
+    for name, binding in (("gatefixnone", None), ("gatefixnone-ci", portable)):
+        c = Case(name, binding=binding)
+        c.real_executor = binding is not None  # the portable gate runner needs no caller-validation host
+        c.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], "gates/exit.txt": "1"}}, 1)
+        c.node("BUILD", {**BUILD, "subject": "fix(app): nothing", "writes": {}}, 2)
+        c.node("REVIEW", CLEAN)
+        code, out, err = c.ouro("run", "1")
+        stops = stops_of(c)
+        log = re.search(r"evidence (.+?); the failure in its log", stops[0]) if len(stops) == 1 else None
+        check(f"{name}: a red-gate fix that changes no file stops as `open decision`, exit 3, naming the gate and its evidence log, not an empty commit",
+              code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision") and "gate `python3 gates/check.py` exited 1" in stops[0]
+              and "no file change fixes" in stops[0] and "needs-ruling" in labels_of(c)
+              and "left no change" not in err and len(c.prompts("BUILD")) == 2 and not c.prompts("REVIEW"))
+        check(f"{name}: the evidence log the stop names still exists after the run exits", log is not None and pathlib.Path(log[1]).is_file())
     c = Case("firstbuildnone")
     c.node("BUILD", {**BUILD, "writes": {}})
     code, out, err = c.ouro("run", "1")
@@ -1576,7 +1592,8 @@ def sec_full_paths():
     call = c.node_call("REVIEW")
     check("under full the REVIEW node runs in its own detached worktree copy, not the build worktree", "review-1" in call["cwd"] and call["cwd_exists"] is True
           and pathlib.Path(call["cwd"]).resolve() != (c.main / ".claude" / "worktrees" / "1-fix-the-total").resolve())
-    check("under full its tools are Read, Grep, Glob and Bash, with push, commit and gh denied", call["tools"] == ["Read", "Grep", "Glob", "Bash"] and call["denied"] == ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"])
+    check("under full its tools are Read, Grep, Glob, Bash and PowerShell, with push, commit and gh denied in both shells",
+          call["tools"] == PROBE_TOOLS and call["denied"] == PROBE_DENIED)
     check("the copy is removed afterwards, its registration with it", "review-1" not in git(c.main, "worktree", "list", "--porcelain") and not pathlib.Path(call["cwd"]).exists())
     c2 = happy_case("standardpaths", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"})
     c2.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"]})
@@ -1778,9 +1795,12 @@ def sec_fix_round_scope():
     cd.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
     cd.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- `src/nosuch.py` drops a row\n", "labels": ["gates"]}]})
     code, out, err = cd.ouro("run", "1", "--validate")
-    check("a follow-up the anchor check drops is not filed, and the comment keeps the anchor-check wording",
-          code == 0 and not any(s.startswith("issue create") for s in cd.sigs())
-          and any(c["body"] == "**Follow-ups filed**\n\nnone passed the anchor check\n" for c in cd.pr_comments()))
+    filed = [c["body"] or "" for c in cd.calls() if c["sig"].startswith("issue create")]
+    named = [c["body"] for c in cd.pr_comments() if c["body"].startswith("**Follow-ups filed**")]
+    check("a follow-up whose anchor is dead at the merge is filed with the finding in its body, and the comment and the output name it",
+          code == 0 and len(filed) == 1 and "drops a row" in filed[0] and "src/nosuch.py" in filed[0].partition("did not resolve at the merge commit")[2]
+          and len(named) == 1 and "Fix the helper" in named[0] and "src/nosuch.py" in named[0] and "do not resolve" in named[0]
+          and "'Fix the helper' is filed with anchors that do not resolve" in out)
 
     cg = happy_case("followuplabels", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     cg.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
@@ -2128,6 +2148,15 @@ def sec_check_flake():
     suite = [f"error a{i}" for i in range(300)] + [f"quiet {i}" for i in range(50)] + ["FAIL: the shard total row"] + [f"quiet {i}" for i in range(50)]
     x = recmod.failure_extract("\n".join(suite + [f"error b{i}" for i in range(300)] + [f"late {i}" for i in range(100)])).splitlines()
     check("a suite's FAIL: line amid unmarked lines survives the cut over the cap", "FAIL: the shard total row" in x)
+    tb = ["FAIL: the section raised", "Traceback (most recent call last):", '  File "tests/driver/driver.Tests.py", line 109, in main', "    fn()",
+          '  File "tests/driver/driver.Tests.py", line 2400, in sec_validation_handoff', "    probe(anchor)",
+          '  File "tests/driver/driver.Tests.py", line 300, in probe', "    assert anchor in src, anchor", "AssertionError: the moved anchor", "quiet after"]
+    x = recmod.failure_extract("\n".join("driver\tRun suite\t2026-11-12T10:00:00.0000000Z " + t for t in
+                                         [f"error a{i}" for i in range(300)] + [f"quiet {i}" for i in range(50)] + tb + [f"quiet {i}" for i in range(50)]
+                                         + [f"error b{i}" for i in range(300)])).splitlines()
+    check("a suite's FAIL: line keeps the traceback under it through its final exception line over the cap",
+          any("in sec_validation_handoff" in t for t in x) and any(t.endswith("AssertionError: the moved anchor") for t in x)
+          and not any(t.endswith("quiet after") for t in x))
     cs = happy_case("decideskip", table={"_issue_1": issue(), "_checks_extra": [{"name": "optional", "bucket": "skipping"}]})
     code, out, err = cs.ouro("run", "1")
     check("control: a skipped check is no obstacle: Ready for merge is posted", code == 0 and any(b["body"].startswith("**Ready for merge**") for b in cs.pr_comments()))
@@ -2276,15 +2305,18 @@ def sec_express_base_moves():
     check("a merged base commit whose subject holds 'release: ' is not read as a lease", code == 0 and "-Lease" not in out)
 
 
-MOVER = """import os, pathlib, subprocess, sys, tempfile
+MOVER = """import os, pathlib, subprocess, sys, tempfile, time
 o = os.environ.get('CONFLICT_ORIGIN')
-if o and not pathlib.Path(o + '.done').exists():
-    pathlib.Path(o + '.done').write_text('1')
+moved = int(pathlib.Path(o + '.done').read_text()) if o and pathlib.Path(o + '.done').exists() else 0
+if o and moved < int(os.environ.get('CONFLICT_MOVES', '1')):
+    if moved:
+        time.sleep(1.1)  # the next rebase sync's backup branch is named to the second
+    pathlib.Path(o + '.done').write_text(str(moved + 1))
     d = tempfile.mkdtemp()
     subprocess.run(['git', 'clone', '-q', o, d], check=True)
     pathlib.Path(d, os.environ.get('CONFLICT_FILE', 'src/app.py')).write_bytes(
         pathlib.Path(os.environ['CONFLICT_FROM']).read_bytes() if os.environ.get('CONFLICT_FROM')
-        else b'def compute_total(items):\\n    return sum(items) * 2\\n')
+        else f'def compute_total(items):\\n    return sum(items) * {moved + 2}\\n'.encode())
     subprocess.run(['git', '-C', d, 'commit', '-qam', 'base moves'], check=True)
     subprocess.run(['git', '-C', d, 'push', '-q', 'origin', 'master'], check=True)
 sys.exit(0)
@@ -2318,6 +2350,66 @@ def sec_sync_conflict():
     code, out, err = c3.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c3.origin), "CONFLICT_FILE": ".claude/ouro.toml", "CONFLICT_FROM": str(c3.root / "base.toml")})
     check("a sync conflict in the binding itself goes to the BUILD node as a finding and lands: the brief reads the committed binding, exit 0",
           code == 0 and len(c3.prompts("BUILD")) == 2 and "cannot be read" not in err)
+    rebase = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace("[ship]\n", '[ship]\nsync = "rebase"\n')
+    c4 = Case("syncconflictrebase", binding=rebase, files={"gates/check.py": MOVER})
+    c4.node("BUILD", BUILD, 1)
+    c4.node("BUILD", {**BUILD, "subject": "fix(app): resolve", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) * 2 + 2\n"}}, 2)
+    c4.node("REVIEW", CLEAN)
+    code, out, err = c4.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c4.origin)})
+    pushed = "refs/heads/gates/1-fix-the-total"
+    subjects = git(c4.origin, "log", "--reverse", "--format=%s", f"master..{pushed}").splitlines() if "gates/1-fix-the-total" in c4.branches() else []
+    check("a rebase sync that stops on a conflict goes to the BUILD node as a finding, once, and the driver finishes the rebase: exit 0",
+          code == 0 and len(c4.prompts("BUILD")) == 2 and "Resolve this rebase stopped on a conflict" in (c4.nodes / "BUILD.2.prompt.txt").read_text(encoding="utf-8")
+          and "rebase --continue" in (c4.nodes / "BUILD.2.prompt.txt").read_text(encoding="utf-8"))
+    check("the branch pushed is the base plus the rebased commit, its message kept, and the resolution's record on top: no merge commit",
+          sh("git", "merge-base", "--is-ancestor", "master", pushed, cwd=c4.origin)[0] == 0 and subjects == [BUILD["subject"], "fix(app): resolve"]
+          and git(c4.origin, "rev-list", "--merges", f"master..{pushed}") == "")
+    added = '[[gate]]\nrun = "python3 gates/branch_gate.py"\nci = "echo SKIP: the checks cannot run this gate"\n'
+    c6 = Case("syncconflictrebasegate", binding=rebase, files={"gates/check.py": MOVER})
+    c6.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], ".claude/ouro.toml": rebase + added, "gates/branch_gate.py": "import sys\nsys.exit(0)\n"}}, 1)
+    c6.node("BUILD", {**BUILD, "subject": "fix(app): resolve", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) * 2 + 2\n"}}, 2)
+    c6.node("REVIEW", CLEAN)
+    code, out, err = c6.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c6.origin)})
+    check("a stopped rebase's resolution BUILD reads the branch's binding: its brief names the gate the branch adds, exit 0",
+          code == 0 and len(c6.prompts("BUILD")) == 2 and "- `python3 gates/branch_gate.py`" in (c6.nodes / "BUILD.2.prompt.txt").read_text(encoding="utf-8"))
+    c5 = Case("syncconflictrebase2", binding=rebase, files={"gates/check.py": MOVER})
+    c5.node("BUILD", BUILD, 1)
+    c5.node("BUILD", {**BUILD, "subject": "fix(app): unresolved", "writes": {"src/app.py": "<<<<<<< ours\n"}}, 2)
+    code, out, err = c5.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c5.origin)})
+    stops = [x["body"] for x in (c5.issue_state() or {"comments": []})["comments"] if x["body"].startswith("**Stop:**")]
+    check("a rebase resolution that leaves markers is `open decision`, exit 3, nothing pushed",
+          code == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision") and "gates/1-fix-the-total" not in c5.branches())
+
+
+def rebase_aborted(c):
+    """Whether the run's worktree exists with no rebase stopped in it."""
+    wt = c.main / ".claude" / "worktrees" / "1-fix-the-total"
+    return wt.is_dir() and not any((wt / git(wt, "rev-parse", "--git-path", d)).is_dir() for d in ("rebase-merge", "rebase-apply"))
+
+
+def sec_sync_rebase_stops():
+    """The two rebase-sync stops: a second sync conflict, and a rebase that stops again after the resolution's --continue."""
+    rebase = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace("[ship]\n", '[ship]\nsync = "rebase"\n')
+    c6 = Case("syncconflictrebase3", binding=rebase, files={"gates/check.py": MOVER})
+    c6.node("BUILD", BUILD, 1)
+    c6.node("BUILD", {**BUILD, "subject": "fix(app): resolve", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) * 2 + 2\n"}}, 2)
+    code, out, err = c6.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c6.origin), "CONFLICT_MOVES": "2"})
+    stops = [x["body"] for x in (c6.issue_state() or {"comments": []})["comments"] if x["body"].startswith("**Stop:**")]
+    check("a rebase sync whose base moves again after the resolution conflicts twice: `open decision`, exit 3, the rebase aborted",
+          code == 3 and len(c6.prompts("BUILD")) == 2 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision")
+          and "second attempt" in stops[0] and rebase_aborted(c6))
+    express = {"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: express"))}
+    c7 = Case("syncconflictrebase4", binding=rebase, files={"gates/check.py": MOVER}, table=express)
+    c7.node("BUILD", {**BUILD, "writes": {"docs/note.md": "note, edited\n"}}, 1)
+    c7.node("BUILD", {**BUILD, "subject": "docs: reword the note", "writes": {"docs/note.md": "note, fixed\n"}}, 2)
+    c7.node("BUILD", {**BUILD, "subject": "docs: resolve", "writes": {"docs/note.md": "note, resolved\n"}}, 3)
+    c7.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", "the note is wrong")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
+    c7.node("REVIEW", CLEAN, 2)
+    code, out, err = c7.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c7.origin), "CONFLICT_FILE": "docs/note.md"})
+    stops = [x["body"] for x in (c7.issue_state() or {"comments": []})["comments"] if x["body"].startswith("**Stop:**")]
+    check("a rebase that stops again on the next commit after the resolution's --continue: `open decision`, exit 3, the rebase aborted",
+          code == 3 and len(c7.prompts("BUILD")) == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision")
+          and "stopped again" in stops[0] and rebase_aborted(c7))
 
 
 def sec_direct():
@@ -3796,7 +3888,7 @@ def qwen_roles():
     qwen_reviewer = TMP / "qwen-reviewer-developer.toml"
     qwen_reviewer.write_text('[runtime]\nbackend="claude"\n[runtime.roles.reviewer]\nbackend="qwen"\nmodel="deepseek-v4-pro"\n',
                              encoding="utf-8")
-    probe_tools = ["Read", "Grep", "Glob", "Bash"]
+    probe_tools = PROBE_TOOLS
     cs = happy_case("qwenreviewerstandard")
     code, out, err = cs.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(qwen_reviewer)})
     check("a reviewer on Qwen Code serves a standard-flow run: REVIEW probes on Qwen Code while BUILD runs on Claude",
@@ -3849,7 +3941,7 @@ def qwen_roles():
 
 
 def role_invariance():
-    """A developer binding with no [runtime.roles] table: every node's backend, settings, preflight call and argv as before."""
+    """A developer binding with no [runtime.roles] table: every node's backend, settings and argv as before, one preflight call."""
     from unittest import mock
     from ouro import developer as devmod
     for cfg in (devmod.Settings(), devmod.Settings("codex", {"builder": "gpt-fixture"}, "high")):
@@ -3858,9 +3950,11 @@ def role_invariance():
         seen = []
         runner = runmod.Run.__new__(runmod.Run)
         runner.env = types.SimpleNamespace(runtime=cfg, dry=False)
+        runner.labels, runner.flow, runner.followup_only = ["agent-ready"], "standard", False
         with mock.patch.object(nodemod, "preflight", side_effect=lambda *a, **k: seen.append((a, k))):
             runner.preflight()
-        check(f"without a role table a {cfg.backend} run makes the one full preflight call it always made", seen == [((cfg,), {})])
+        check(f"without a role table a {cfg.backend} run makes one preflight call, scoped to the roles the run dispatches",
+              seen == [((cfg,), {"needs": {"triager": nodemod.READ, "builder": None, "reviewer": nodemod.PROBE}})])
     argvs, usage = [], len(nodemod.USAGE)
     envelope = {"session_id": "s-invariant", "structured_output": {"verdict": "CLEAN", "findings": []}}
     with mock.patch.object(shmod, "argv_for", side_effect=lambda *a: list(a)), mock.patch.dict(os.environ, {"OURO_NODE_STUB": ""}), \
@@ -4166,8 +4260,9 @@ def sec_validation_inheritance():
             ('duplicate-inherited', pending, [{**legacy, 'validation_pending': pending + pending[:1]}], 'duplicate'),
             ('malformed-inherited', pending, [{**legacy, 'validation_pending':
                 [{'cmd': VALIDATION_CMDS[0], 'reason': ''}]}], 'malformed'),
+            # A fresh conflict is raised before the ancestor's ungranted stop: no grant would clear it.
             ('invalid-ancestor', [], [{'validation_pending':
-                [{'cmd': 'python3 unapproved.py', 'reason': 'caller'}]}, legacy], 'not granted')):
+                [{'cmd': 'python3 unapproved.py', 'reason': 'caller'}]}, legacy], 'conflicts')):
         c = validation_case('record-' + name, answer={'validation_pending': initial or pending})
         validation_run(c)
         wt = validation_wt(c)
@@ -4581,7 +4676,7 @@ def sec_validation_handoff():
     # subprocess canary; no production helper is monkeypatched by the fixture.
     mutations = {
         'barrier': ('bin/ouro/run.py', '            if pending:\n', '            if False and pending:\n'),
-        'allowlist': ('bin/ouro/validation.py', 'if cmd not in allowed:', 'if False:'),
+        'allowlist': ('bin/ouro/validation.py', 'if allowed is not None and cmd not in allowed:', 'if False:'),
         'head': ('bin/ouro/validation.py', '        head = tree.head()\n',
                  '        head = tree.git("rev-list", "--reverse", f"origin/{tree.env.default}..HEAD").out.split()[0]\n'),
         'failure': ('bin/ouro/validation.py', 'return 124 if limited else code', 'return 124 if limited else 0'),
@@ -4647,8 +4742,10 @@ def sec_ci_validation():
     def receipts(c):
         return list(c.main.rglob("ouro-validation/*/receipt.json"))
 
-    def case(name, *, token=False, scoped=False, merge=False, flow="standard", table=None, acceptance=None, answer=None):
+    def case(name, *, token=False, scoped=False, merge=False, flow="standard", table=None, acceptance=None, answer=None, sync=None):
         binding = BINDING.format(policy="merge-on-green" if merge else "stop-at-pr", review="adversarial-review")
+        if sync:
+            binding = binding.replace("[ship]\n", f'[ship]\nsync = "{sync}"\n')
         binding = binding.replace('run = "python3 gates/check.py"\nci = "echo SKIP: the checks cannot run this gate"',
                                   f'run = "{windows}"\nci = "echo external Windows build workflow"\n'
                                   + ('paths = ["src/"]' if scoped else 'cheap = true'))
@@ -4765,8 +4862,8 @@ def sec_ci_validation():
 
     pending_ci = {"_rollup": [{**success, "status": "IN_PROGRESS", "conclusion": None}]}
 
-    def built(name):  # a BUILD committed and pushed, its draft waiting on CI
-        c = case(name, token=True, table=pending_ci, answer={"gates_run": [{"cmd": windows, "exit": 0}]})
+    def built(name, sync=None):  # a BUILD committed and pushed, its draft waiting on CI
+        c = case(name, token=True, table=pending_ci, answer={"gates_run": [{"cmd": windows, "exit": 0}]}, sync=sync)
         code, out, err = c.ouro("run", "1")
         wt = pathlib.Path(c.node_call("BUILD")["cwd"])
         check(name + ": the first run waits on CI", code == 0 and "waiting for CI validation" in out)
@@ -4802,6 +4899,23 @@ def sec_ci_validation():
           code == 0 and "CI gate coverage changed" not in out + err and "sync conflict: the BUILD node gets it" in out
           and len(c.prompts("BUILD")) == 1 and "Resolve this merge conflict" in (c.nodes / c.prompts("BUILD")[0]).read_text(encoding="utf-8")
           and sh("git", "merge-base", "--is-ancestor", landed, head, cwd=wt)[0] == 0
+          and git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total") == head
+          and "<<<<<<<" not in (wt / "src/app.py").read_text(encoding="utf-8") and "waiting for CI validation" in out)
+
+    c, wt, before = built("gate-conflict-rebase", sync="rebase")
+    c.write("src/app.py", "def compute_total(items):\n    return sum(items) - 999\n")
+    add_gate(c.main)
+    git(c.main, "push", "-q", "origin", "master")
+    landed = git(c.main, "rev-parse", "HEAD")
+    code, out, err = c.ouro("run", "1")
+    head = git(wt, "rev-parse", "HEAD")
+    check("a resume whose rebase sync stops on a conflict hands the BUILD node the conflict, as the push step does; the driver finishes the "
+          "rebase and the push takes the lease the stop line printed",
+          code == 0 and "CI gate coverage changed" not in out + err and "sync conflict: the BUILD node gets it" in out
+          and len(c.prompts("BUILD")) == 1 and "Resolve this rebase stopped on a conflict" in (c.nodes / c.prompts("BUILD")[0]).read_text(encoding="utf-8")
+          and sh("git", "merge-base", "--is-ancestor", landed, head, cwd=wt)[0] == 0
+          and sh("git", "merge-base", "--is-ancestor", before, head, cwd=wt)[0] != 0
+          and git(wt, "rev-list", "--merges", f"{landed}..{head}") == ""
           and git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total") == head
           and "<<<<<<<" not in (wt / "src/app.py").read_text(encoding="utf-8") and "waiting for CI validation" in out)
 
@@ -5189,7 +5303,7 @@ def sec_ci_validation():
 
 # Heaviest first, by the slower CI leg's section time: the pool starts sections in this order.
 SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("run: full class gates by paths", sec_full_paths),
-            ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: a pending validation the binding no longer grants", sec_validation_gate_removed), ("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: another branch's pull request", sec_other_pr),
+            ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: a pending validation the binding no longer grants", sec_validation_gate_removed),("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: rebase sync stops", sec_sync_rebase_stops), ("run: another branch's pull request", sec_other_pr),
             ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: a developer's [[ship.person]] entry", sec_ship_person), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
             ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: ship.review_sandbox", sec_review_sandbox),("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
             ("run: node garbage", sec_node_garbage), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]

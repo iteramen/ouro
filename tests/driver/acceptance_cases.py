@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import re
 from unittest.mock import patch
 
 
@@ -49,8 +50,7 @@ print('mutation counterfactual red; source restored')
             not any(name in str(tools) for name in ("obsolete.py", "history.py", "forbidden.py", "quoted-history.py", "fenced-history.py", "indented-history.py", "untrusted.py")))
     review = c.node_call("REVIEW")
     h.check("sized review has a separate scratch probe with publishing denied and removes it",
-            review["tools"] == ["Read", "Grep", "Glob", "Bash"]
-            and review["denied"] == ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"]
+            review["tools"] == h.PROBE_TOOLS and review["denied"] == h.PROBE_DENIED
             and "review-1" in review["cwd"] and not pathlib.Path(review["cwd"]).exists())
 
     # Exercise the real driver review method and capability bridge against real
@@ -230,6 +230,67 @@ def review_corrections(h):
     reply = {"verdict": "APPROVE", "files_read": ["src/app.py"], "critiques": [],
              "stop": {"reason": "acceptance unrunnable", "question": ""}}
     code, out, err = case.ouro("run", "1", "--validate", extra=case.grok({"stdout": json.dumps(reply), "exit": 0}))
+    named = re.search(r"verdict\.json and stdout\.txt are in ([^\r\n]+)\)", out + err)
     h.check("a malformed external acceptance stop is a driver error without replacement or empty fixes",
             code == 1 and "malformed acceptance stop" in out + err and not h.stops_of(case)
-            and len(case.grok_calls()) == 1 and len(case.prompts("BUILD")) == 1 and not case.prompts("REVIEW"))
+            and len(case.grok_calls()) == 1 and len(case.prompts("BUILD")) == 1 and not case.prompts("REVIEW")
+            and named is not None and (pathlib.Path(named.group(1)) / "verdict.json").is_file())
+
+    unread_fields(h)
+
+
+def unread_fields(h):
+    problems = h.runmod.acceptance_problems
+    dotnet = "dotnet test X.csproj -c Debug --filter FullyQualifiedName~Y"
+    notes = h.ISSUE_BODY + "\n## Notes\nThe owner's grant:\nAcceptance command: " + dotnet + "\n"
+    found = problems(notes)
+    h.check("a bare Acceptance command line under another heading names both fixes",
+            len(found) == 1 and found[0].startswith("`" + dotnet + "`: ")
+            and "put the command in backticks" in found[0] and "move the line under an `## Acceptance` heading" in found[0])
+    found = problems(h.ISSUE_BODY + "\n## Acceptance\n- **Acceptance command:** " + dotnet + "\n")
+    h.check("a bare Acceptance command line under an Acceptance heading names the backticks alone",
+            len(found) == 1 and "put the command in backticks" in found[0] and "## Acceptance" not in found[0])
+    for name, body in (("whole-line field", "\nAcceptance command: `" + dotnet + "`\n"),
+                       ("field with trailing prose", "\nAcceptance command: `" + dotnet + "` passes\n")):
+        found = problems(h.ISSUE_BODY + body)
+        h.check("a backticked " + name + " outside an Acceptance heading names the move, not the runner forms",
+                len(found) == 1 and found[0].startswith("`" + dotnet + "`: ")
+                and "move the line under an `## Acceptance` heading" in found[0]
+                and "backticks" not in found[0] and "runner forms" not in found[0])
+    label = "this `Acceptance command:` line grants nothing as written; "
+    for name, heading, below, fix in (
+            ("outside an Acceptance heading before a sh fence names the move alone", "Notes", "```sh\n" + dotnet + "\n```\n",
+             "move the line and its command under an `## Acceptance` heading"),
+            ("outside an Acceptance heading before a bare next line names both fixes", "Notes", dotnet + "\n",
+             "put the command in backticks and move the line and its command under an `## Acceptance` heading"),
+            ("under an Acceptance heading before a sh fence under another heading names the move alone", "Acceptance",
+             "## Notes\n```sh\n" + dotnet + "\n```\n", "move the line and its command under an `## Acceptance` heading"),
+            ("under an Acceptance heading before a bare next line names the backticks alone", "Acceptance", dotnet + "\n",
+             "put the command in backticks"),
+            ("under an Acceptance heading before a text fence names the backticks alone", "Acceptance", "```text\n" + dotnet + "\n```\n",
+             "put the command in backticks")):
+        body = h.ISSUE_BODY + "\n## " + heading + "\nAcceptance command:\n" + below
+        h.check("a label line " + name, problems(body) == [label + fix] and dotnet not in h.runmod.acceptance_commands(body))
+    for name, body in (("a whole-line field under Acceptance", h.ISSUE_BODY + "\n## Acceptance\nAcceptance command: `" + dotnet + "`\n"),
+                       ("a bold bullet field under Verification", h.ISSUE_BODY + "\n### Verification\n* **Acceptance command:** `" + dotnet + "`\n"),
+                       ("a span under Tests", h.ISSUE_BODY + "\n## Tests\nAcceptance command: `" + dotnet + "` passes\n"),
+                       ("a trusted comment's field", h.runmod.declared_source(h.ISSUE_BODY, [dotnet])),
+                       ("a bare line whose command a trusted comment grants", h.runmod.declared_source(notes, [dotnet])),
+                       ("fenced and indented examples", h.ISSUE_BODY + "\n## Anchors\n```text\nAcceptance command: " + dotnet
+                        + "\n```\n    Acceptance command: " + dotnet + "\n\tAcceptance command: `" + dotnet + "`\n"),
+                       ("a quoted field inside a list item", h.ISSUE_BODY + "\n## What happened\n2. Granted:\n   `Acceptance command: " + dotnet + "`\n"),
+                       ("a label line before a sh fence", h.ISSUE_BODY + "\n## Acceptance\nAcceptance command:\n```sh\n" + dotnet + "\n```\n"),
+                       ("a bold label line before a bash fence", h.ISSUE_BODY + "\n## Acceptance\n**Acceptance command:**\n```bash\n" + dotnet + "\n```\n"),
+                       ("a label line before a span on the next line", h.ISSUE_BODY + "\n## Acceptance\nAcceptance command:\n`" + dotnet + "`\n"),
+                       ("a label line ending another section before a sh fence opening Acceptance",
+                        h.ISSUE_BODY + "\n## Notes\nAcceptance command:\n## Acceptance\n```sh\n" + dotnet + "\n```\n")):
+        h.check("granted forms and examples yield no unread-field problem: " + name, problems(body) == [])
+    h.check("a non-runner declaration keeps the runner-forms message",
+            problems(h.runmod.declared_source(h.ISSUE_BODY, ["gh issue close 1"]))
+            == ["`gh issue close 1`: this explicit command is outside the approved acceptance runner forms"])
+
+    case = h.happy_case("acceptance-unread-field", table={"_issue_1": h.issue(body=notes)})
+    code, out, err = case.ouro("run", "1")
+    h.check("an unread Acceptance command line stops the run before BUILD, naming its fix",
+            code == 3 and not case.prompts("BUILD") and case.branches() == ["master"]
+            and any(h.stop_comment_ok(stop, "acceptance unrunnable") and "put the command in backticks" in stop for stop in h.stops_of(case)))

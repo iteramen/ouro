@@ -939,7 +939,7 @@ def main() -> int:
         stop = verdict["stop"]
         if (not isinstance(stop, dict) or stop.get("reason") != "acceptance unrunnable"
                 or not isinstance(stop.get("question"), str) or not stop["question"].strip()):
-            print("external-audit: malformed acceptance stop; no approval", file=sys.stderr)
+            print(f"external-audit: malformed acceptance stop; no approval (reply kept in {out})", file=sys.stderr)
             return 1
         print("  ACCEPTANCE UNRUNNABLE: " + stop["question"])
         return 2  # A meaningful block is never APPROVE, including with no files_read.

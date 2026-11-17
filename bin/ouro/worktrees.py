@@ -208,11 +208,15 @@ def close(env):
                 if identity(record) != lease.record_identity:
                     raise ValueError("creation record replaced")
                 data = read_record(record)
-                expected = provenance(env, Path(data["path"]), data["branch"])
-                if any(data.get(k) != v for k, v in expected.items()):
-                    raise ValueError("creation identity changed")
-                data["settled"] = True
-                write_record(record, data)
+                path = Path(data["path"])
+                if not os.path.lexists(path) and all(Path(r["worktree"]).resolve() != path for r in registrations(env)):
+                    record.unlink()  # A landing removed the tree and its registration: nothing is left to settle.
+                else:
+                    expected = provenance(env, path, data["branch"])
+                    if any(data.get(k) != v for k, v in expected.items()):
+                        raise ValueError("creation identity changed")
+                    data["settled"] = True
+                    write_record(record, data)
         except (OSError, ValueError, KeyError, TypeError, sh.DriverError):
             sh.say("  worktree cleanup: shutdown evidence uncertain; creation record retained")
         finally:

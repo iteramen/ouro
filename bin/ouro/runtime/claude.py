@@ -31,10 +31,13 @@ def tools_for(capabilities):
     if capabilities.edit:
         tools = ["Edit", "Write", *tools]
     tools += [f"Bash({c})" for c in capabilities.commands]
-    if capabilities.probe:
-        tools.append("Bash")
-    denied = ["Bash(git push *)", "Bash(git commit *)", "Bash(gh *)"] if capabilities.probe else None
-    return tools, denied
+    if not capabilities.probe:
+        return tools, None
+    shells = ("Bash", "PowerShell")  # PowerShell is Claude Code's shell tool on Windows
+    # shortcut: a sandboxed probe keeps Bash alone, the shell SANDBOX is tested with; Windows, where PowerShell
+    # serves, has no sandbox route. Grant PowerShell there too once Claude Code's sandbox is shown to confine it.
+    granted = shells[:1] if capabilities.sandbox else shells
+    return [*tools, *granted], [f"{s}({c} *)" for s in shells for c in ("git push", "git commit", "gh")]
 
 
 def denials(native):

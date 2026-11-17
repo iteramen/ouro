@@ -84,7 +84,11 @@ class ReviewSandboxTests(unittest.TestCase):
                                                 "network": {"allowedDomains": []}}})
         self.assertEqual(cwd, "/review-copy", "the sandbox's write scope is the cwd, the review copy")
         self.assertIn("Bash", sandboxed[sandboxed.index("--allowedTools") + 1].split(","))
-        self.assertEqual(sandboxed[sandboxed.index("--disallowedTools") + 1], "Bash(git push *),Bash(git commit *),Bash(gh *)")
+        self.assertNotIn("PowerShell", sandboxed[sandboxed.index("--allowedTools") + 1].split(","),
+                         "a sandboxed probe grants Bash alone of the two shells")
+        self.assertIn("PowerShell", plain[plain.index("--allowedTools") + 1].split(","))
+        self.assertEqual(sandboxed[sandboxed.index("--disallowedTools") + 1],
+                         "Bash(git push *),Bash(git commit *),Bash(gh *),PowerShell(git push *),PowerShell(git commit *),PowerShell(gh *)")
         self.assertNotIn("--settings", plain, "without the key a PROBE review launches as before")
 
     def test_qwen_has_a_route_on_linux_alone_and_needs_usr_bin_bwrap(self):

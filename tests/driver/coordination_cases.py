@@ -138,6 +138,9 @@ def exercise(h):
         extra = settings(c, endpoint)
         code, out, err = run(c, dict(extra, **{ENV: ""}))
         check("configured no-key run makes no board calls or correlation cache", code == 0 and not b.calls and not (c.main / ".git/ouro-claims").exists())
+        check("a missing credential is one line at bind naming its variable, never a degradation notice",
+              len(named := [line for line in out.splitlines() if ENV in line]) == 1 and "Coordination off" in named[0]
+              and "Coordination unavailable" not in out + err)
 
         dry = h.happy_case("claim-dry")
         code, out, err = run(dry, settings(dry, endpoint), "--dry-run")
@@ -266,14 +269,16 @@ def exercise(h):
                       and b.threads[owned]["thread"]["status"] == "closed"
                       and recs[-1]["outcome"].startswith("stopped:" if scenario == "revert" else "landed:"))
 
-    for mode in ("drop", "auth", "incomplete", "malformed"):
+    for mode, reason in (("drop", "timeout"), ("auth", "authentication failed"),
+                         ("incomplete", "incomplete discovery"), ("malformed", "malformed listing")):
         with board() as (b, endpoint):
             b.mode = mode
             c = h.happy_case("claim-" + mode)
             extra = settings(c, endpoint)
             code, out, err = run(c, extra)
-            check(f"{mode} board evidence fails open with a bounded sanitized notice",
-                  code == 0 and "Coordination unavailable" in out and KEY not in out + err and endpoint not in out + err)
+            check(f"{mode} board evidence fails open with a bounded sanitized notice naming its reason",
+                  code == 0 and f"Coordination unavailable ({reason})" in out and KEY not in out + err and endpoint not in out + err
+                  and "Coordination off" not in out)
             if mode != "drop":
                 check(f"{mode} evidence never creates a false clear claim", not b.threads)
             if mode == "drop":
@@ -345,7 +350,7 @@ def exercise(h):
         h.sh(h.sys.executable, h.STUB, "pr", "merge", "7", "--squash", "--subject", "fixture merge", "--delete-branch", env=c.env())
         code, out, err = run(c, extra)
         check("board cleanup failure cannot fail shipping or expose response body",
-              code == 0 and "Coordination unavailable" in out and KEY not in out + err and b.threads["1"]["thread"]["status"] == "open")
+              code == 0 and "Coordination unavailable (tool failure)" in out and KEY not in out + err and b.threads["1"]["thread"]["status"] == "open")
         b.mode = ""
         code, out, err = run(c, extra)
         check("resume retries owned claim cleanup without a duplicate post", code == 0 and b.threads["1"]["thread"]["status"] == "closed" and len(b.threads) == 1)
@@ -384,7 +389,7 @@ def exercise(h):
         b.mode = "auth"
         code, out, err = run(c, dict(extra, OURO_WATCH_LIMIT="3"))
         check("board outage with pending default checks leaves part unticked and worktree resumable",
-              code == 0 and "still running" in out and "Coordination unavailable" in out
+              code == 0 and "still running" in out and "Coordination unavailable (authentication failed)" in out
               and "- [ ] 1." in (c.issue_state() or h.issue(body=parts_body))["body"]
               and (c.main / ".claude/worktrees/1-fix-the-total-p1").exists()
               and b.threads["1"]["thread"]["status"] == "open")

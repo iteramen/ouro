@@ -25,7 +25,7 @@ class Settings:
     coordination: Coordination | None = None
     assignees: list = field(default_factory=list)
     roles: dict = field(default_factory=dict)
-    serves: tuple = ()  # the roles one backend's preflight proves, set by node.plan; empty means the backend's own default
+    serves: dict = field(default_factory=dict)  # {role: contract} one backend's preflight proves, set by node.preflight; empty means the backend's own default
 
     def backend_of(self, role):
         return self.roles.get(role, {}).get("backend", self.backend)
@@ -38,7 +38,7 @@ class Settings:
         return any(self.backend_of(role) != self.backend for role in roles)
 
     def serving(self, backend, default=ROLES):
-        """The roles a preflight of `backend` proves: those node.plan scoped it to, else `default`, each that selects it."""
+        """The roles a preflight of `backend` proves: those node.preflight scoped it to, else `default`, each that selects it."""
         return [role for role in (self.serves or default) if self.backend_of(role) == backend]
 
     def of(self, role):

@@ -23,6 +23,12 @@ restart. A dirty, diverged or other-branch checkout is left as it is, with one l
 a linked worktree and an unbound repository are untouched. It never stashes, resets or rebases.
 `tests/hooks/session_sync_tests.py` is its test.
 
+## Band
+
+`hooks/band/register.tsx`, the one entry under `modules` in `hooks.json`, is a Claude Code mod
+that draws `bin/ouro-run-status.py`'s line above the prompt: display only, no buttons. The
+Live progress section of `docs/architecture.html` says what it reads and when it redraws.
+
 ## How a guard fails
 
 A guard refuses by exit 2, with the reason on stderr, which Claude Code shows the session. Every

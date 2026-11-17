@@ -450,7 +450,7 @@ class Run:
         """The node runtime's check, where a node can follow and before anything this run writes; a dry run asks no node."""
         if not self.env.dry:  # a runtime fault is a driver error, never a stop or a spent fix round
             cfg = self.env.runtime
-            if mixed(cfg):
+            if isinstance(cfg, developer.Settings):
                 node.preflight(cfg, needs=self.contracts(self.followup_only))
             else:
                 node.preflight(cfg)
@@ -1040,7 +1040,7 @@ class Run:
         recheck = [cmd for cmd, call in latest.items() if cmd in gates and inputs
                    and call.get("inputs") == inputs and not call.get("error")
                    and type(call.get("exit")) is int and call["exit"] == 0]
-        self.tree.git("add", "-A")
+        self.stage()
         self.tree.git("commit", "-q", "--allow-empty", "-F", f)
         execution.retain(self.tree, self.execution_grants, recheck=recheck)
         self.committed_here.add(self.tree.head())
@@ -1049,6 +1049,17 @@ class Run:
         if findings is None and track:
             self.rederive()
         return self.tree.head()
+
+    def stage(self):
+        """`git add -A`. A sync's stopped rebase is then finished, each commit keeping its message and author, so the
+        BUILD record rides a commit of its own; a rebase that stops again is the second conflict."""
+        e = self.env
+        self.tree.git("add", "-A")
+        if self.rebasing():
+            r = e.run(argv_for("git", "rebase", "--continue"), cwd=self.tree.path, env={"GIT_EDITOR": "true"})
+            if self.rebasing():
+                self.tree.git("rebase", "--abort", check=False)
+                self.stop_issue("open decision", f"The rebase onto `origin/{e.default}` stopped again after the BUILD node resolved its first conflict.\n\n{r.text}", 3)
 
     def no_change(self, findings, red):
         """A BUILD that left no change: an `open decision` stop in a red command's fix round, a driver error otherwise."""
@@ -1063,14 +1074,15 @@ class Run:
         derived = derive_flow(self.tree.changed(), gate_files)
         new = tighter(self.flow, derived)
         if new != self.flow:
-            old = self.flow
+            old, proven = self.flow, self.review_contract()
             self.add_note(f"Flow tightened from {self.flow} to {new} by the diff's paths.")
             self.flow = new
             if new != "direct":
                 self._note(lane="pr")
-            if mixed(e.runtime):  # preflight planned REVIEW at the body's flow
+            # preflight proved REVIEW at the body's flow
+            if isinstance(e.runtime, developer.Settings) and self.review_contract() != proven:
                 try:
-                    node.plan(e.runtime, {"reviewer": self.review_contract()})
+                    node.preflight(e.runtime, needs={"reviewer": self.review_contract()})
                 except DriverError as err:
                     raise DriverError(f"the diff tightens Flow from {old} to {new}: {err}") from None
         if self.size == "S":
@@ -1148,10 +1160,10 @@ class Run:
     def gate_entries(self, tree=True, rev="HEAD"):
         """The [[gate]] entries of the binding at the tree's HEAD (or `rev`), as CI reads them; the main checkout's when `tree` is off, or there is no worktree yet (a dry run), or the commit has none. `tree` may name another Tree.
 
-        During a sync's merge conflict HEAD is the pre-sync tip, so the merge's index entry stands for it; a binding that is itself conflicted has none, and the check waits for the merge commit."""
+        During a sync's conflict HEAD is the pre-sync tip (a merge) or the base plus the commits replayed so far (a rebase), so the sync's index entry stands for the result; a binding that is itself conflicted has none, and the check waits for the sync's commit."""
         tree = self.tree if tree is True else tree
         live = tree and tree.path.is_dir()
-        if live and rev == "HEAD" and tree.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0:
+        if live and rev == "HEAD" and (tree.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0 or self.rebasing(tree)):
             rev = ""  # `:path` is the index's stage-0 entry
         r = tree.git("show", f"{rev}:.claude/ouro.toml", check=False) if live else None  # the commit's, not the file's: a sync conflict leaves markers in the file
         if r is None or r.code != 0:
@@ -1159,7 +1171,7 @@ class Run:
         try:
             return self.env.ob.tomllib.loads(r.out).get("gate", [])
         except ValueError as x:
-            raise DriverError(f"the .claude/ouro.toml at {rev or 'the merge index'} cannot be read: {x}")
+            raise DriverError(f"the .claude/ouro.toml at {rev or 'the sync index'} cannot be read: {x}")
 
     def bound_gates(self, tree=True):
         """Every [[gate]], `<ouro>` replaced by the plugin root: its paths, never the issue's labels, decide whether a change runs it."""
@@ -1229,7 +1241,8 @@ class Run:
                 self.stop_issue("gate uncovered", f"The driver cannot run the gate `{run}`: `{argv[0] if argv else ''}` is not on PATH.", 3)
             argv[0] = exe
             r = self.env.run(argv, cwd=tree.path, **({"timeout": validation.TIMEOUT} if ci else {}))
-            log = self.env.scratch / f"gate-{i}.log"
+            log = tree.admin() / "ouro-gates" / f"gate-{i}.log"  # Git-private: a stop names it after the run's scratch is gone
+            log.parent.mkdir(exist_ok=True)
             sh.write_bytes(log, r.out + r.err)
             say(f"[5] gate `{run}`: exit {r.code}")
             rec_gates.append({"cmd": run, "exit": r.code, "sha": head})
@@ -1336,16 +1349,22 @@ class Run:
         e = self.env
         r = self.env.run(script("Sync-Branch.ps1"), cwd=self.tree.path)
         if r.code != 0:
+            rebasing = self.rebasing()
             merging = self.tree.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0
-            if not merging:
+            if not (merging or rebasing):
                 raise DriverError(f"{sh.cmdline(r.argv)} failed (exit {r.code}): {r.text}")
             if self.sync_tried:
-                self.tree.git("merge", "--abort", check=False)
+                self.tree.git("rebase" if rebasing else "merge", "--abort", check=False)
                 self.stop_issue("open decision", f"The branch conflicts with `{e.default}` and the second attempt did not resolve it.\n\n{r.text}", 3)
             self.sync_tried = True
+            lease = re.search(r"(?m)The lease for Push-Branch\.ps1 is (\S+)\s*$", r.out)  # the resolved rebase's next sync finds nothing to rebase and prints none
+            if lease:
+                self.sync_lease = lease.group(1)
             say("[6] sync conflict: the BUILD node gets it as a finding, once")
             conflicted = [x for x in self.tree.git("diff", "--name-only", "--diff-filter=U", "-z").out.split("\0") if x]
-            self.build(findings=f"Resolve this merge conflict with `origin/{e.default}` in the tree and leave no markers:\n{r.text}")
+            kind = ("rebase stopped on a conflict" if rebasing else "merge conflict")
+            self.build(findings=f"Resolve this {kind} with `origin/{e.default}` in the tree and leave no markers"
+                       + (" (the driver stages the resolution and runs `git rebase --continue`)" if rebasing else "") + f":\n{r.text}")
             left = [x for x in conflicted if re.search(r"(?m)^<{7} ", (self.tree.path / x).read_text(encoding="utf-8", errors="replace"))]
             if left:
                 self.stop_issue("open decision", "The resolution still holds conflict markers in: " + ", ".join(left), 3)
@@ -1354,6 +1373,11 @@ class Run:
         if lease:
             self.sync_lease = lease.group(1)
         return True
+
+    def rebasing(self, tree=None):
+        """A rebase stopped in the tree (the run's, or `tree`): git's state directory, which a rebase writes in place of MERGE_HEAD."""
+        tree = tree or self.tree
+        return any((tree.path / tree.git("rev-parse", "--git-path", d).out.strip()).is_dir() for d in ("rebase-merge", "rebase-apply"))
 
     def open_pr(self, head):
         e = self.env
@@ -1400,9 +1424,10 @@ class Run:
         return {}
 
     def require_granted(self, sha, pending, allowed):
-        """A committed caller obligation the invoking binding does not grant is the owner's to clear, not a driver error."""
-        for p in pending if isinstance(pending, list) else []:
-            if isinstance(p, dict) and isinstance(p.get("cmd"), str) and p["cmd"] not in allowed:
+        """A committed caller obligation the invoking binding does not grant is the owner's to clear, not a driver error.
+        `pending` is a list `validation.requests` has already accepted, grant aside."""
+        for p in pending:
+            if p["cmd"] not in allowed:
                 self.stop_issue("open decision", f"The BUILD commit {sha[:7]} requested caller validation of `{p['cmd']}`, "
                                 "which the invoking binding does not grant: a `[[gate]]` or acceptance change since that BUILD can remove it. "
                                 "The request lives in that commit's record, so a sync does not clear it. Grant the command again in the "
@@ -1418,12 +1443,14 @@ class Run:
         pending = {}
         allowed = self.validation_commands()
         for s, x in reversed(facts):  # oldest first: a later answer's edit replaces an earlier one, a later silence keeps it
-            self.require_granted(s, x.get("validation_pending"), allowed)
-            newest = {p["cmd"]: p for p in validation.requests(x.get("validation_pending", []), allowed,
+            # Grant aside: every error a grant would not clear is raised for the whole branch before an ungranted stop.
+            newest = {p["cmd"]: p for p in validation.requests(x.get("validation_pending", []), None,
                                                                x.get("gates_run") or [], inherited=pending)}
             pending = {**newest, **{cmd: p for cmd, p in pending.items() if cmd not in newest}}
             for m in x.get("manual") or []:
                 manual[m["path"]] = {"path": m["path"], "edit": str(m.get("edit") or "") or manual.get(m["path"], {}).get("edit", "")}
+        for s, x in reversed(facts):
+            self.require_granted(s, x.get("validation_pending", []), allowed)
         requested = list(pending.values())
         covered = self.ci_commands()
         caller = [p for p in requested if p["cmd"] not in covered]
@@ -1467,6 +1494,10 @@ class Run:
         ans = self.reader_round(rnd, head, records) if self.primary == "reader" else None
         if ans is None:
             ans = self.node_review(pr, head, records, rnd)
+        refused = [(d.get("tool_name"), d.get("tool_input") or {}) for d in ans.get("_denied") or [] if isinstance(d, dict)]
+        refused = [" ".join(f"{tool} {inp.get('command') or inp.get('file_path') or ''}".split())[:160] for tool, inp in refused]
+        if refused:  # a review that could not probe shows outside its findings
+            say(f"  REVIEW round {rnd} was refused {len(refused)} call(s): " + "; ".join(refused))
         self.acceptance_answer(ans, "REVIEW")
         facts = self.build_facts()
         ans["validation_results"], ans["validation_attempts"] = facts["validation_results"], facts["validation_attempts"]
@@ -1578,7 +1609,8 @@ class Run:
         stop = found.get("stop") if isinstance(found, dict) else None
         if stop is not None and (not isinstance(stop, dict) or stop.get("reason") != "acceptance unrunnable"
                                  or not isinstance(stop.get("question"), str) or not stop["question"].strip()):
-            raise DriverError("the configured external reader returned a malformed acceptance stop; no fix round or replacement review was started")
+            raise DriverError("the configured external reader returned a malformed acceptance stop; no fix round or replacement review was started"
+                              f" (its verdict.json and stdout.txt are in {verdict.parent})")
         if r.code not in (0, 2) or not (found and sess):
             why = next((line.strip() for line in reversed(r.err.splitlines()) if line.strip()), "")
             self.add_note(f"The external reader ({cli}) was unavailable (exit {r.code}" + (f": {why[:200]}" if why else "")
@@ -1950,7 +1982,6 @@ class Run:
             say("[11] FOLLOWUP node")
             ans = node.run_node("FOLLOWUP", prompt, node.model(e, "triager", node.DEFAULT_BUILDER), node.READ, str(e.main), node.TIMEOUTS["FOLLOWUP"], runtime=e.runtime)
             items, filed = [it for it in ans.get("issues") or [] if str(it.get("title") or "").strip()], []
-        dropped = False
         for i, it in enumerate(items):
             try:
                 entry = self.file_follow_up(it, sha, areas, types)
@@ -1960,19 +1991,20 @@ class Run:
                     e.comment_pr(n, "**Follow-ups filed**\n\n" + "\n".join(f"- {f}" for f in filed)
                                  + f"\n\nNot filed, a resume files them: {x}\n\n{rest}\n\n{PENDING_MARK}{pending_json(items[i:])} -->\n")
                 raise
-            if entry:
-                filed.append(entry)
-            dropped = dropped or not entry
-        e.comment_pr(n, "**Follow-ups filed**\n\n" + ("\n".join(f"- {x}" for x in filed) or ("none passed the anchor check" if dropped else "none")) + "\n")
+            filed.append(entry)
+        e.comment_pr(n, "**Follow-ups filed**\n\n" + ("\n".join(f"- {x}" for x in filed) or "none") + "\n")
 
     def file_follow_up(self, it, sha, areas, types):
-        """Files one of the node's issues and returns its comment entry, or None when the anchor check drops it."""
+        """Files one of the node's issues and returns its comment entry; an item whose anchors do not resolve at the merge
+        commit is filed with those findings in its body and its entry, for triage to re-point."""
         e = self.env
         title, body = str(it.get("title") or "").strip(), str(it.get("body") or "")
         body = re.sub(r"(?m)^(?:Size|Flow|Doc impact on close):[^\n]*\n?", "", body)  # triage stamps these lines
-        if self.env.dead_anchors(body, sha):
-            say(f"  dropped follow-up {title!r}: an anchor does not resolve at {sha[:7]}")
-            return None
+        dead, note = self.env.dead_anchors(body, sha), ""
+        if dead:
+            note = f" — {title}, filed with anchors that do not resolve at {sha[:7]}: {'; '.join(dead)}"
+            say(f"  follow-up {title!r} is filed with anchors that do not resolve at {sha[:7]}: {'; '.join(dead)}")
+            body = body.rstrip("\n") + f"\n\nThese anchors did not resolve at the merge commit {sha[:7]}:\n\n" + "\n".join(f"- {x}" for x in dead) + "\n"
         f = e.body_file("followup.md", body)
         ledger = title == "Cleanup" or title.startswith("Cleanup: ")
         labels = ["needs-triage"]
@@ -1993,7 +2025,7 @@ class Run:
                     e.write(f"reopen ledger #{num}", argv_for("gh", "issue", "reopen", num, "-R", e.slug, "--comment", body))
                 else:
                     e.write(f"append to ledger #{num}", argv_for("gh", "issue", "comment", num, "-R", e.slug, "--body-file", f))
-                return f"#{num} {hit['title']} ({how})"
+                return f"#{num} {hit['title']} ({how})" + note
             area = title[len("Cleanup: "):] if title != "Cleanup" else ""
             known = next((str(x) for x in areas if str(x).lower() == area.lower()), None) if area else None
             labels += ["umbrella"] + ([known] if known else [])
@@ -2001,7 +2033,7 @@ class Run:
                        *[a for who in e.runtime.assignees for a in ("--assignee", who)])
         r = e.write(f"file follow-up {title!r}", argv)
         unlabelled = f", without the label {area!r}, which [labels].area does not declare" if ledger and area and not known else ""
-        return (r.out.strip().splitlines()[-1] if r.out.strip() else title) + (f" (ledger filed{unlabelled})" if ledger else "")
+        return (r.out.strip().splitlines()[-1] if r.out.strip() else title) + (f" (ledger filed{unlabelled})" if ledger else "") + note
 
     def tick_part(self):
         if not self.k:

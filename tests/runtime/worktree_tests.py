@@ -265,6 +265,37 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertIn("unsettled", self.sweep())
         self.assertTrue((self.path / "tracked").exists())
 
+    def test_landed_removal_retires_record_and_recreation_stays_eligible(self):
+        self.create()
+        worktrees.use(self.env, self.path)
+        self.git("worktree", "remove", str(self.path))
+        self.git("branch", "-D", self.branch)
+        self.env._worktrees_settled = True
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            worktrees.close(self.env)
+        self.assertNotIn("shutdown evidence uncertain", output.getvalue())
+        self.assertFalse(self.record.exists())
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.create()  # Actual use + ensure_worktree on the same path, then a settling close.
+        self.assertNotIn("stale creation record", output.getvalue())
+        self.assertNotIn("shutdown evidence uncertain", output.getvalue())
+        self.assertIs(worktrees.read_record(self.record)["settled"], True)
+
+    def test_changed_identity_at_shutdown_prints_notice_and_retains_record(self):
+        self.create()
+        worktrees.use(self.env, self.path)
+        data = worktrees.read_record(self.record)
+        worktrees.write_record(self.record, {**data, "directory": [0, 0]})
+        self.env._worktrees_settled = True
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            worktrees.close(self.env)
+        self.assertIn("shutdown evidence uncertain; creation record retained", output.getvalue())
+        self.assertIs(worktrees.read_record(self.record)["settled"], False)
+        self.assertTrue(self.path.exists())
+
     def test_removed_tree_recreation_and_resume_keep_stale_cleanup_evidence(self):
         self.create()
         retained = self.record.read_bytes()
