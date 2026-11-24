@@ -74,7 +74,7 @@ That key refuses a run before any tracker call when the reviewer role's backend 
 route on the host (Codex has one on Linux and macOS, Qwen Code on Linux alone), its route's prerequisites are missing (Claude
 on Linux and WSL2: `bwrap` and `socat` on PATH; Qwen Code: `/usr/bin/bwrap`), or the host is native
 Windows, WSL1 or outside Linux, WSL2 and macOS; the refusal names the backend, the platform and the
-missing piece. Codex's route is its own boundary, on Linux and macOS. A Claude
+missing piece. Codex's route is its own boundary. A Claude
 PROBE review node then launches inside Claude Code's sandbox, with `allowUnsandboxedCommands` off,
 `failIfUnavailable` on, no allowed network domain, and `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a
 temp directory private to that launch and deleted when it returns, so its commands write only in
@@ -85,28 +85,31 @@ A Qwen Code PROBE review node launches under `tools.executionSandbox` (backend `
 `workspace-write` on the review copy, `network: closed`) with deny rules for `git push`,
 `git commit` and `gh`. Qwen Code runs no executable hook there, so the allow-list hook never runs
 and its grant check does not discard that node's answer: the sandbox and the deny rules are its
-boundary. Every other Qwen Code node keeps the hook and the check.
+boundary. The preflight's PROBE live call launches the same way, and its transcript alone must
+show the listed command ran. Every other Qwen Code node keeps the hook and the check.
 On every backend, with or without `ship.review_sandbox`, a PROBE review node launches without git
 or GitHub credentials: the token, ssh-agent and askpass variables are removed, `gh` gets an empty
 private configuration directory, git's credential helpers and configured askpass are cleared, its
-ssh transport has no identity, and the review copy has no remote
-([binding](binding.md#the-developer-binding) lists each). A push or a `gh` call that keeps these
-overrides, whatever command shape reaches it, finds no helper, askpass, agent, ssh key or `gh`
-login to authenticate with; the name-based refusals stay the first layer. The overrides redirect,
-they neither delete the stored credentials nor confine the commands: a command that drops an
-override or names a credential source itself (`git -c credential.helper=store`) authenticates
-again; on Claude and Codex git still sends a matching `~/.netrc` entry to an http(s) remote, even
-on a plain `git push` that keeps every override, and `~/.git-credentials`, `~/.ssh` and
-`~/.config/gh` stay readable;
+ssh transport has no identity, its home is a directory private to the node, and the
+review copy has no remote ([binding](binding.md#the-developer-binding) lists each). A push or a `gh` call that keeps these
+overrides, whatever command shape reaches it, finds no helper, askpass, agent, ssh key, `~/.netrc`
+entry or `gh` login to authenticate with; the name-based refusals stay the first layer. The
+overrides redirect, they neither delete the stored credentials nor confine the commands: a command
+that drops an override or names a credential source itself (`git -c credential.helper=store`, the
+path of the developer's `~/.netrc`) authenticates again;
 unsandboxed commands still write outside the copy and reach the network; and a raw `ssh` with an
 explicit key, a credential a repository's own config holds (a persisted `http.<url>.extraheader`)
-and `git -C` against another checkout are not covered. The harness's own model login, and the READ,
-CHECKPOINT and BUILD environments, are untouched.
+and `git -C` against another checkout are not covered. Claude Code and Codex find their own state
+past the private home: Claude Code through a declared `CLAUDE_CONFIG_DIR`, else through a link to
+the developer's `~/.claude` and a copy of their `~/.claude.json` in it (`docs/binding.md`), and
+Codex through `CODEX_HOME`; their API variables, and the
+READ, CHECKPOINT and BUILD environments, are untouched.
 Before worker dispatch and each command, read-only app-server `config/read`
 (with layers and canonical cwd) and `configRequirements/read` inspect the same executable,
 environment and permission overrides used for launch. Two fresh resolutions must agree on effective
-configuration. The MCP bridge preserves an explicitly declared `CODEX_HOME` verbatim so admission
-inspects the caller's configuration home and still detects aliases. Resolutions compare effective
+configuration. The MCP bridge is handed `CODEX_HOME`, an explicitly declared one verbatim and
+otherwise the caller's `~/.codex`, so admission inspects the caller's configuration home under the
+node's private `HOME` and still detects aliases. Resolutions compare effective
 values, opaque layer identities/versions and file provenance. The selected profile must exactly match
 the owned-root/protected-root grants, read-only parent and disabled network; merged extra grants,
 aliases, unknown permission fields, requirements, non-file managed layers or drift refuse before mutation.
@@ -120,6 +123,13 @@ bytes and metadata, and owned-copy mutation/red/restoration/green. New cross-bou
 creation alone also accepts EXDEV, with no destination link and unchanged source inode, bytes and
 metadata. Generated before/after fixtures and provider/native receipts survive failures; policy
 refusals are distinct from OS denials.
+The opt-in `python3 tests/runtime/live.py --qwen-sandbox` qualification does the same for the Qwen
+Code sandboxed PROBE review node, on native Linux with `/usr/bin/bwrap`: a real Qwen Code review
+node, launched with the sandbox settings in a standalone review copy, must get EPERM/EACCES/EROFS
+for writes outside the copy and into its common git dir, with those bytes, metadata and entries
+unchanged, no connection to a host listener, a refusal of each of the `git push`, `git commit` and
+`gh` deny rules with no such process started (PATH shims log every git and gh start), and a write
+inside the copy. Its receipts survive failures. No CI leg runs either qualification.
 Production adoption requires successful qualification on the actual host boundary.
 
 ### Optional issue claims
@@ -217,6 +227,10 @@ responsible for its foreground run through its reported outcome.
   its own, at its own Flow, on a branch cut from the default branch after the previous part
   merged, its pull request's body opening `Part k/n of #N` and carrying `Fixes #N` only when k
   equals n; text parts (documentation, skill text, rules, comments) share a cycle with any part.
+  A part's own acceptance goes under a heading `Acceptance (part k)`, and a trusted declaration
+  of it is spelled `Acceptance command (part k):`; part k's run reads the untagged acceptance
+  sections and declarations and its own, and skips those tagged for another part. A run that is
+  no checklist part, and triage, read every one.
   A run refuses, before it makes a branch, when an open pull request from another branch carries
   `Fixes #N`, or the `Part k/n of #N` line of the part it takes, on its own line.
   The issue's own `Flow:` line is the loosest class among the parts and its `Size:` measures the
@@ -242,29 +256,34 @@ responsible for its foreground run through its reported outcome.
   `agent-ready` issue starts by re-verifying every anchor: a dead anchor line under the body's
   `Anchors` heading whose fragments all grep in exactly one other tracked file of the same suffix
   is re-pointed at it, the body edited and its `Anchors @` stamp set to the tip; every other dead
-  anchor stops that issue's run. A
+  anchor stops that issue's run. Triage rewrites no anchor fragment: for a
+  dead line whose file is still tracked, its `needs-ruling` question carries the full replacement
+  anchor line, posted only when every quoted fragment on it greps in that file at the tip, and
+  otherwise says no replacement was found; whoever answers the question applies the line. A
   Deliverable clause naming a file the repository no longer has is stale, not a ruling: triage
   grades the issue by the clauses that remain, and its comment says the clause is not delivered,
   which amends the Deliverable (§7).
-  **An anchor line is checked against its own file.** On a list item whose first backticked
-  span names a tracked file, every double-quoted fragment of 12 to 120 characters is grepped in
-  that one file, plain words as much as code, and a miss is dead however the fragment is spelled.
+  **A quoted fragment is checked only on an anchor line, against its own file.** An anchor line
+  is a list item under the body's `Anchors` heading (a `#` line outside a fence matching
+  `#+\s*Anchors\b`, its section ending at the next `#` line outside a fence, the section the
+  re-point reads; a fence closes only on a bare backtick run at least as long as the one that
+  opened it) whose first backticked span names a tracked file. On it, every double-quoted
+  fragment of 12 to 120 characters is grepped in that one file, plain words as much as code, and
+  a miss is dead however the fragment is spelled. Every other double-quoted string in the body
+  is prose and is not checked. A backticked path is resolved wherever it stands.
   A path span contains a directory separator and a file suffix: spell a top-level file as
-  `./README.md`. A bare filename in an evidence list item is rejected with that correction,
-  independently of the quoted fragment or other valid anchors; an ordinary inline file mention
-  is not an evidence row. Quoted fragment contents never supply the path's directory separator.
-  Anywhere else a fragment is checked only if it looks like code, and then anywhere in the
-  repository. A backticked span holding a double quote is a command, not a fragment, and is
-  skipped on either kind of line. A path span may hold a brace set, which expands and has each
-  expansion checked, and on an anchor line a fragment is grepped in every expansion that
+  `./README.md`. A bare filename on an anchor line is rejected with that correction,
+  independently of the quoted fragment or other valid anchors; an ordinary inline file mention,
+  or a list item outside the `Anchors` section, is not an anchor line. Quoted fragment contents never supply the path's directory separator.
+  A backticked span holding a double quote is a command, not a fragment, and is skipped. A path
+  span may hold a brace set, which expands and has each expansion checked, and on an anchor line a fragment is grepped in every expansion that
   resolves and is dead only when none holds it; a comma-less or unbalanced set stays as written
   and a later one still expands, an expansion with a rooted, home or parent prefix is skipped as its plain span is,
   and the span whose brace sets take a body past 64 expansions, counted across its distinct spans, is a finding to trim, not checked; a span with no brace set counts none. A fragment is matched within one line of its cited file, then once more in that file's text as
   a reader joins it (comment leaders dropped from its lines, consecutive lines of one kind joined,
   a blank line, a bare leader or a change between comment lines and plain lines ending a run,
   whitespace collapsed), so a phrase a comment or a paragraph wraps greps when the quote carries
-  no leader; one split by string concatenation does not, and its finding says so. A fragment
-  with no cited file is matched within one line, repo-wide.
+  no leader; one split by string concatenation does not, and its finding says so.
   **A citation into another repository is written `<repo>:<path>`, with its fragment in
   backticks instead of — never inside — the double quotes.** The gate verifies only the repo it
   runs in, so both spellings mark the citation as belonging to another tree and it is skipped
@@ -289,18 +308,50 @@ responsible for its foreground run through its reported outcome.
   A child is written as a list item — bulleted, numbered, or a task-list item, at any indent —
   whose first token is its own issue number; anything else in the body is a mention, not a
   child.
-- **A finding outside the change under review has a severity floor.** It becomes an issue of its
-  own only if it can lose data, post to or delete from the wrong place, break a gate, or mislead
-  an unattended run. Everything else — wording, cosmetics, a list incomplete but not false, an
-  edge no input reaches — goes as one line into the area's **cleanup issue**, titled
+- **Every leftover of a landing gets one route before the merge, and a finding outside the change
+  under review has a severity floor.** A leftover is an L finding of the review or an item of the
+  BUILD node's residue. A residue item that opens with `Part <k>/<n> of #<N>`, where `#<N>` is the
+  issue being run and `<k>` another of its parts, is none: that part's checklist box holds the work,
+  so the driver drops the item from the BUILD record, with one line naming it, before anything
+  routes or files it. The REVIEW node routes each leftover `fix-now` (a defect or gap in the change, or
+  a trivial bug next to it, that needs no decision: fixed in the pull request, §7), `issue` (a
+  discovered bug that is not trivial, or an open decision), `idea` (new scope, heavier work
+  that adds capability: its own issue) or `ledger`, and gives it a `reason`: empty, `own-change` (a defect or gap in
+  what the change adds or changes), `open-decision`, or the floor's `data-loss`, `wrong-place`,
+  `breaks-gate` or `misleads-run`. The floor: an issue of its own only if it can lose data, post
+  to or delete from the wrong place, break a gate, or mislead an unattended run, so the driver files
+  an `issue` with no reason as `ledger`, and says so. A residue item's route is tied to it by its
+  position in the record's `## Follow-up` list, which the REVIEW answer names, so a reworded entry
+  keeps its route. An item with no route is filed as an `issue`; the run says that, and the
+  `**Follow-ups filed**` comment lists it, beside each route whose position names no item or
+  repeats an earlier one. Everything else — wording, cosmetics, a list incomplete but not false, an
+  edge no input reaches — is `ledger`: one line into the area's **cleanup issue**, titled
   `Cleanup: <area>` with the area spelled as `[labels].area` declares it, or `Cleanup` where a
   repo declares no area. It is found by exact title in any state — an open match wins, a
   closed-only match is reopened rather than duplicated, and none means it is filed — and carries
   `umbrella` (§4) — a ledger, not a curated index — plus that area label. Only the session
   appends to it, as it lands, in comments and never the body, so two landings cannot overwrite
   each other; the body changes only when this section's threshold does. At about five unswept
-  lines (the sweep threshold) triage proposes one child issue whose deliverable is those lines
-  fixed; that sweep is **one deliverable** — a fixed, listed set of below-floor lines in one area.
+  lines (the sweep threshold) triage SPLITs the ledger into child issues, grouped as this section
+  fuses parts: lines that change the same file or mechanism go in one child, and a line that is an
+  open decision or is blocked on a different trigger goes in a child of its own. Each child is
+  **one deliverable** — a fixed, listed set of below-floor lines in one area — and a checklist when
+  more than one of its parts carries a risk surface. The TRIAGE node names each child's lines by
+  their comment ids; the driver writes the body, copying those comments from the ledger byte for
+  byte, with a `Part of #N` line and a title that holds `sweep` and `ledger line`. A ledger comment
+  whose first line is `**Sweep** at <sha>`, trimmed and compared case-sensitively, is the **sweep
+  mark**: the lines before it are swept. It counts only when its author is the job token's bot or
+  a login in `[owner].ruling_approvers`. Before any write, triage refuses a split that names a
+  comment the ledger does not hold, one no newer than its newest sweep mark, one two children
+  both name, or a child body in which the anchor gate finds a dead anchor. Outside `--dry-run` the
+  same command files the children with `needs-triage`, posts the sweep mark on the ledger naming
+  them, and triages each child with a fresh TRIAGE node; a child the node asks a question about is
+  posted `needs-ruling` with that question. A child is no ledger, so its own SPLIT is the owner's
+  to file. A write that fails partway is a driver error naming the children already filed. A
+  re-triage resumes it and files no child twice: an open issue the bot or an approver filed whose
+  body starts with that `Part of #N` line stands for the ledger comments it copies that are newer
+  than the newest sweep mark, no new child covers them, and the sweep mark names it and the same
+  command triages it.
 
 ### A deliverable may be a finding — `checkpoint`
 
@@ -327,6 +378,14 @@ the measurement. A `STALE` on an issue without `checkpoint` leaves its labels un
 A narrowed `needs-ruling` removes `checkpoint` with `agent-ready`, as `BLOCKED` and `SPLIT` do.
 `trivial` leaves with `agent-ready` under any verdict that removes it, and stays under any that
 keeps it.
+A `DUPLICATE` names, in `duplicate_of`, the closed issue the work already landed under. The driver
+accepts it only for an issue in the brief's related-work list that is closed when re-read and has
+a merged pull request closing it whose merge commit is on the default branch; any other is a
+driver error naming the failed condition. It moves the labels as `NEEDS-RULING` does, with the
+question *close as a duplicate of #N?* and the lookup's lines for #N; the driver closes nothing.
+A report created after a release tag holding the fix is not a duplicate by that alone: the
+comment says whether the body shows the reporter ran a build holding it, and with no version
+named the question asks, since a regression or an incomplete fix reads the same.
 A `**Checkpoint finding**` comment, and the `**Triage**` verdict it is measured against, count
 only from a trusted author: the job token's bot or a login in `[owner].ruling_approvers`.
 
@@ -353,6 +412,25 @@ an issue is executable, or it is waiting on exactly one identifiable thing.
 **answer**, a block by an **event**. If no answer the owner could give would start the work, it
 is `blocked`: triage's BLOCKED verdict sets it, and triage promotes no issue whose body's first
 line still names an `**Unblocks when:**` trigger.
+Triage clears a fired trigger before its node grades the issue, and only a mechanical one: a first
+line that names exactly one issue reference, by the unblock reference rule of
+`bin/Get-CompileProgram.ps1` (a `#N` right after a word character, `/`, `.` or `-` is part of
+another reference), where that issue is closed as completed, or is closed (not as not planned) by
+a pull request whose merge commit is an ancestor of `origin/<default>`, and where the text right
+after that reference, less an optional `part <k>`, starts with one of `lands`, `landed`,
+`has landed`, `merges`, `is merged`, `closes`, `is closed`, `ships` or `has shipped`, ignoring
+case. The driver deletes the
+line in a body edit made before the `**Triage**` comment, the comment names the line and the
+evidence, and the rest of the issue is graded as any other. Every other trigger stays: prose with
+no reference, several references, an open issue, one closed as not planned, and a line whose
+named issue has landed but whose wording waits for something more, such as `#N has run for a
+week`; for that last one the comment names the line, says the issue has landed and that the line
+does not say only that it lands, so the owner clears it once its event has happened. A failed
+read of the referenced issue leaves the line in place, and the comment says so.
+After a landing that closes issue N has refreshed the queue's anchors, the driver triages each
+open `blocked` issue whose first line's trigger names `#N` by that reference rule, in number
+order, and prints one line per issue with its verdict. A triage that fails is reported on its
+line and does not fail the landing. The anchor gate's own issue list stays the `agent-ready` ones.
 
 The **default working view** is
 `is:open -label:blocked -label:idea -label:umbrella -label:architecture`.
@@ -387,7 +465,8 @@ needs none: its `**Triage**` comment is the mark.
 
 **`Size: S/M/L`** is a body line, assigned at triage if the filer omitted it. `S` and `M`
 execute. **`L` is a SPLIT verdict**: triage labels the issue `umbrella`, removes the state label it
-held, and says in its comment's last line that the owner files the children by hand; the issue
+held, and says in its comment's last line who files the children: the owner, by hand, except on
+a cleanup ledger, whose children the driver files and triages in the same command (§3); the issue
 stays that umbrella or is rewritten as several single-deliverable issues before any of them
 can be `agent-ready`. No verdict removes `umbrella`, and a promotion the node holds on an issue
 that carries it is posted as `needs-ruling` instead: an umbrella is never run. No comment, ruling or label
@@ -396,9 +475,10 @@ lets an `L` ride on `agent-ready`. An `L` that triage finds no split lines for g
 owner-driven session re-triages it to `human-ready` while the owner drives it, and the driver
 never runs it.
 
-**`S` and `M` differ in the review.** One BUILD node builds either. Who reviews each, by
-`[ship].review`, is the one table in `docs/binding.md` "Choosing ship.review"; every `M` takes a
-REVIEW node there, before the PR is marked ready, whatever the binding names.
+**`S` and `M` differ in the review.** One BUILD node builds either. Who reviews each, by the
+running developer's `[review].reviewer`, else `[ship].review`, is the one table in
+`docs/binding.md` "Choosing ship.review"; every `M` takes a REVIEW node there, before the PR is
+marked ready, whatever the binding names.
 
 **`Flow: direct|express|standard|full`** is a body line beside `Size:`, stamped at triage. `Size` picks
 the build path, `Flow` the ceremony around it, and `trivial` (§5) stays the autonomy grant,
@@ -428,6 +508,10 @@ reads.
   overlap before launching helpers or spending the fix/revert allowance.
   Branch protection can instead require a direct PR vehicle, which merges once its checks are
   green; a run that finds one already open waits for the person to merge or close it.
+  A person may also publish with no issue: `bin/Push-Direct.ps1` without `-Issue`, under the same
+  floor and protection rules, its PR vehicle named `direct/<12-character head sha>` in place of
+  `direct/<N>`. The person watches default-branch CI after it; the driver's coordination and
+  fix/revert lane run only for an issue, and no driver command publishes issue-less.
   Planning packets and CI results are never caller receipts.
   Explicit issue acceptance outside the mandatory floor uses the ordinary PR flow; matching
   acceptance pins both the planned head and origin base through publication. A CI-owned
@@ -521,10 +605,17 @@ BUILD may report optional `validation_pending` records `{cmd, reason}` for appro
 its environment cannot execute. A fresh answer cannot list a command in both `gates_run` and
 `validation_pending`. Caller obligations persist across changed heads and worker executions;
 history may hold both for a command only when an earlier branch record holds a valid request.
-CI-covered requests use the named exact-head CI checks; other requests require caller validation
-at the current head. These requests are neither passes nor owner decisions. A genuine `stop` wins.
-Pending validation returns exit 0 without rebuilding, spending a fix round, changing labels,
-reviewing or landing. Only `ouro run N [--part K] --validate` executes the current trusted
+CI-covered requests use the named exact-head CI checks; a request for a gate the checks run whose
+paths the diff does not touch waits on nothing, since nothing requires that gate; other requests
+require caller validation at the current head. The PR record and the review brief show a CI-covered
+request the declared checks proved at the current head under `validation_met`, with that head and
+those checks, one they have not proved yet as awaiting them, and one for an unselected gate as
+awaiting nothing; the commits' `Ouro-Build` trailers keep every
+request as written, and the validation wait reads those. These requests are neither passes nor
+owner decisions. A genuine `stop` wins.
+Pending validation returns exit 4 without rebuilding, spending a fix round, changing labels,
+reviewing or landing: a wait re-running the same command does not clear, unlike a wait on checks
+or a merge, which returns 0. Only `ouro run N [--part K] --validate` executes the current trusted
 acceptance/binding commands in the invoking driver's context, in order, without a shell or
 expanded builder permissions. Malformed, duplicate, unknown or fresh conflicting requests fail
 before commit/execution; historical overlaps without prior inherited provenance also fail.
@@ -564,22 +655,45 @@ never resume automatically.
   run, a notice gate excepted, which the builder runs when its own uncommitted changes, new files
   included, touch them; that run is
   the builder's and §7's second re-run. A gate the binding marks `cheap` is on the list whatever
-  the checks run. In CI mode the brief separates CI-owned obligations from local checks and does
-  not require their CI-only toolchain locally. An empty local list is allowed when declared CI
+  the checks run, in both validation modes. In CI mode the brief separates CI-owned obligations
+  from local checks and does not require their CI-only toolchain locally; a cheap gate the checks
+  run, and each gate with paths the checks run, a notice gate excepted, are local checks there,
+  granted to the builder as in local mode and not listed as CI-owned, and the checks stay their
+  proof: the builder's run proves nothing, and one it reports as `validation_pending` waits on
+  those checks alone. A gate without paths the checks run, and a notice gate, stay CI-owned. An
+  empty local list is allowed when declared CI
   validation covers the required gates; otherwise an empty list stops a worktree BUILD with `gate uncovered`, including
   a resumed run, naming any command-like span the acceptance holds (a runner, after any
   leading `NAME=value` words), and triage says so in its comment: such a run would ship code no
   node ran, and spend every fix round on a check no node can act on.
+- **The bug-fix base check.** On a run whose issue carries the `bug` label, under a binding with
+  `ship.test_first_for_bugs = true` ([binding](binding.md)), the driver checks each head after its
+  build and before the gates: on a scratch copy of the head with every changed file outside
+  `ship.test_paths` put back to its `origin/<default>` version, it runs each selected gate whose
+  `paths` hold a changed test file, each bounded to 3600 seconds, and at least one must go red: a
+  nonzero exit, never a timeout. That is the one exception to
+  the rule that the driver runs no gate the pull request's checks run: only on that copy, and
+  its results prove nothing about the head. All green, or no gate to run, is a fix-round
+  finding: the change's tests pass without the fix, so they do not prove it. The direct lane
+  runs the check after its build too, and has no fix round: its finding moves the run to the
+  ordinary pull-request flow, whose fix round answers it. The record names
+  the gate that went red; a diff that changes no test file, or no file outside the test paths,
+  skips the check, and the record says which.
 - **Explicit acceptance grants.** Exact commands in the issue's acceptance/test/verification
   sections are BUILD grants. The newest trusted triage and later trusted spec amendments may
   add a whole-line field `Acceptance command:` followed by the exact command in backticks.
+  A checklist part's section and field carry its part tag, `Acceptance (part k)` and
+  `Acceptance command (part k):`, and grant to that part's run alone (§3).
   Each trusted comment is parsed separately: an unclosed fence cannot hide a later amendment.
   Other quotes in those comments, fenced/indented examples and untrusted comments add no grants.
   An `Acceptance command:` prose line the run does not read as a grant, its command unbackticked
   or outside an acceptance/test/verification section, is refused as acceptance with its fix
   named: add the backticks, or move the line under an `## Acceptance` heading.
   Commands use the single-command grammar; shell operators and leading environment assignments
-  are not worker grants. An unreachable
+  are not worker grants. A command is granted only when it starts with a runner the driver
+  knows: a built-in one, or a prefix the binding's `ship.acceptance_runners` declares
+  ([binding](binding.md)), which run and triage both read; any other explicit command is
+  refused as outside the approved acceptance runner forms. An unreachable
   required acceptance stops as `acceptance unrunnable` before committing or spending a fix round.
   Triage applies the same check: a field it would declare that the run refuses is posted as prose,
   not a grant, and a body whose acceptance the run refuses gets NEEDS-RULING, not PROMOTE.
@@ -607,7 +721,15 @@ never resume automatically.
   not wait on the pull request's checks.
 - **After the merge.** full: the default branch's push runs on the merge commit are watched to
   their verdicts, and each workflow whose push filters select that commit must show one; until
-  it does, the run keeps its worktree and its checklist part for the resume. express and
+  it does, the run keeps its worktree and its checklist part for the resume. The watch is
+  skipped, with one line saying so, when the pull request was merged at a green head and both
+  hold: the merge commit's tree equals that head's, and the merge commit's first parent is an
+  ancestor of that head (the base did not move). The head is green when the driver merged it
+  itself once its checks read green, or, for a merge a resumed run reads (the owner's merge on
+  GitHub), when the pull request's checks, re-read at its head, show one passed and none outside
+  pass or skipping. A merge that misses either condition, a head with no check or a check not
+  green, a checks read that fails, or a merge the driver cannot decide, is watched. The accepted
+  gap: on a skipped landing a workflow that runs only on push is not watched. express and
   standard: cleanup, and the run's URL goes in the report.
 
 Flow is re-derived from the diff after the commit, the way Size is below, and only tightens:
@@ -699,10 +821,7 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
 - **Deterministic done-condition + STOP rule in every dispatch.** A builder that cannot meet its
   done-condition STOPs and reports; an honest STOP routes the call to a human, silent tuning buries
   it. An approved command blocked only by execution environment uses §4's `validation_pending`
-  handoff; a specification/model decision still STOPs. **Every dispatch also carries a turn budget: 100 turns.** Reaching it is that same STOP —
-  report what is done, what is outstanding, and the evidence so far. A dispatch's cost grows faster
-  than its turn count, since every turn re-reads all the ones before it, so the budget bounds the
-  one thing that runs away.
+  handoff; a specification/model decision still STOPs.
 - **Unmoved findings.** A verification that re-raises an H or M finding a fix must answer (so
   not an OUTSIDE one, which is unrelated to the original PR) of the verification before it unchanged
   (the same file, claim and evidence) is a STOP before the cap: `**Stop:** open
@@ -727,6 +846,32 @@ these rules. The guards the plugin ships are listed in `hooks/README.md`.
   the REVIEW node verifies any. A further valid finding from such a reviewer after that
   round is not fixed in this change: it is answered on its thread and goes where the severity
   floor (§3) sends it.
+  The REVIEW node routes every leftover, each L finding and each residue item of the PR record,
+  `fix-now`, `issue`, `idea` or `ledger`, with a reason (§3). It is `fix-now` when the defect or
+  gap is in what this change adds or changes (its own lines, a test it lacks for its own code, a
+  doc, skill or changelog sentence it made false), or is a trivial bug found next to it, even in
+  a file the change does not touch, and the fix needs no decision. When the standing verdict is
+  CLEAN and its record holds a `fix-now` item with a reason, the change takes **one fix-now
+  round** before the merge decision, outside the five: the BUILD node is handed that record's
+  `fix-now` items, with a reason or without, the commit is pushed, the checks run on it, and the
+  REVIEW node verifies it as any fix. A `fix-now` item with no reason opens no round. Its
+  commit's `Ouro-Build` trailer names it, which keeps it out of the cap's count, and the PR
+  record names it in its own line, apart from the `Review:` line's rounds, with the paths that
+  commit touched outside the change's own files. An H or M fix round is handed the `fix-now`
+  items of the record it answers, and those open no fix-now round. The bound on a fix-now
+  commit is the change's Flow class (§4), as the driver derives it from the changed paths: one
+  that raises it is not pushed, the branch stays at the reviewed head, and its items go to the
+  FOLLOW-UP node. After the round, a `fix-now` item the verification finds still standing and
+  any new leftover go to the FOLLOW-UP node, with no second fix-now round, and so do the other
+  routes' items of the record the round answered; a new H or M finding blocks, through the
+  ordinary fix rounds. The FOLLOW-UP node is handed each item with the route it is filed under:
+  the review's, except that an `issue` with no reason is `ledger`, an item with no route is
+  `issue`, and a `fix-now` item no round fixed is `issue` with a reason and `ledger` without one.
+  The node writes each item's title and body and decides nothing else: the driver files every
+  item it was handed under that route, whatever the node answers, and with the item's own text
+  where the node wrote none. An `issue` is filed with `needs-triage`, an `idea` as its own issue
+  with the `idea` state label and no other, and a `ledger` item as one line on the area's cleanup
+  issue (§3); the `**Follow-ups filed**` comment names each entry's route.
   An approver's `**Ruling**` comment on the pull request (first line, trimmed) ends the fix
   rounds for the findings of the review record it follows, the newest one posted before it, and
   no later record (the bot's own `**Ruling**` is not one); the next verification is not handed
@@ -906,6 +1051,17 @@ the first one outside any fenced block, and the week is the week of the landing:
 | Review findings | The H, M and L totals over the lines holding numbers |
 | Fix rounds per region | The median and the maximum of `rounds`, a pull request being a region |
 | CI flake rate | Over the Actions run list and each re-run's earlier attempts, by the week a failed attempt started: flaky is a `failure` attempt followed by a `success` of its run, or of a later run of the same workflow on the same head SHA; failed is any other `failure`; a `cancelled` or `skipped` attempt is neither. Flaky over flaky plus failed |
+
+After them it prints **direct publications**, one row per ISO week, report-only, split into those
+naming an issue and the issue-less rest. A plain push is a first-parent commit on the default
+branch in the window whose subject ends in no `(#PR)`, that is no pull request's merge commit and
+that no merged direct PR vehicle holds, by the week of its committer date; it names an issue with
+a `Fixes #N` line. A direct PR vehicle is a merged pull request whose head starts with `direct/`,
+counted once by the week of its merge however it merged; it names an issue when its head is
+`direct/<Issue>`, and is issue-less on any other head, `direct/<12 hex>` among them. A rebase-merged vehicle's commits keep
+their own subjects on the first-parent line: each one whose subject and author date match a commit
+of the vehicle is that vehicle's, and is not counted as a plain push. Which gates ran is the
+publisher's printed `direct-checks:` line, not history.
 
 **The `Review:` line** is the one line the loop metrics read for the change's review. It stands alone, at the start of its own line, outside any
 fenced block (a reader skips fenced blocks before matching), directly under the body's `Fixes #<N>`

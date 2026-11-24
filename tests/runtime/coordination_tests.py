@@ -640,11 +640,12 @@ else:
             for cli in ("claude", "codex"):
                 with self.subTest(cli=cli):
                     env = SimpleNamespace(runtime=cfg, run=lambda *a, **k: sh.run(*a, **k), default="main",
-                                          lookup=lambda key: cli if key == "ship.external_cli" else None)
+                                          lookup=lambda key: None)
                     run = driver.Run.__new__(driver.Run)
                     run.env, run.tree, run.ci_execution_checks = env, Tree(env, root, None), []
+                    run.review_keys = {"review": "external-audit", "external_cli": cli, "external_model": None, "external_effort": None}
                     run.reader_goal = lambda: "public fixture"
-                    run.build_facts = lambda: {"validation_results": [], "validation_attempts": []}
+                    run.build_facts = lambda: {"validation_met": [], "validation_results": [], "validation_attempts": []}
                     run.add_note = self.fail
                     with patch.dict(os.environ, {VARIABLE: KEY, "OURO_TEST_OTHER": "preserved"}), patch.object(
                             driver, "script", return_value=[sys.executable, str(reader), cli]):

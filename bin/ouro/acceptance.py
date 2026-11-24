@@ -8,10 +8,15 @@ from .sh import DriverError
 ACCEPTANCE = ("python3 ", "python ", "pwsh ", "dotnet ", "npm ", "npx ", "pytest", "bash ", "go test")
 
 
+def runners(env):
+    """The built-in runner forms and the binding's `ship.acceptance_runners`, each matched as a prefix exactly as written."""
+    return ACCEPTANCE + tuple(env.lookup("ship.acceptance_runners") or ())
+
+
 def fenced(lines):
     """Whether each line is a fence marker or inside a ``` or ~~~ fence, which closes only on a bare marker of its character at least as long.
 
-    A backtick run followed by another backtick on its line is an inline code span, not a marker (CommonMark's info-string rule)."""
+    A backtick run followed by another backtick on its line is not a marker: a backtick fence's info string holds no backtick (CommonMark)."""
     fence = None
     for line in lines:
         marker = re.match(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$", line)
@@ -26,16 +31,53 @@ def fenced(lines):
             yield fence is not None
 
 
-def sections(body):
-    """Each body line but the headings that open or close a section, with whether an acceptance/test/verification section holds it; a fenced heading is a line."""
-    level = 0
+def headed(body):
+    """Each body line with the heading of the acceptance/test/verification section that holds it (None outside one), or the
+    part-tagged sub-heading inside that section that holds it, and whether it is a heading that opens or closes a section; a fenced heading is a line."""
+    level, title, sub = 0, None, None
     lines = body.splitlines()
     for inside, line in zip(fenced(lines), lines):
         h = None if inside else re.match(r"(#{2,3})\s+(.*)", line)
         if h and (not level or len(h.group(1)) <= level):
             level = len(h.group(1)) if re.search(r"\b(acceptance|tests?|testing|verif\w*)\b", h.group(2), re.I) else 0
+            title, sub = (h.group(2) if level else None), None
+            yield title, True, line
         else:
-            yield bool(level), line
+            if h:
+                sub = h.group(2) if PART_TAG.search(h.group(2)) else None
+            yield sub or title, False, line
+
+
+def sections(body):
+    """Each body line but the headings that open or close a section, with whether an acceptance/test/verification section holds it."""
+    return ((title is not None, line) for title, heading, line in headed(body) if not heading)
+
+
+PART_TAG = re.compile(r"(?i)\(part[ \t]+(\d+)\)")  # `Acceptance (part 2)`, `Acceptance command (part 2):`
+
+
+def tagged_part(text):
+    match = PART_TAG.search(text)
+    return int(match.group(1)) if match else None
+
+
+def field_part(line):
+    """The part an `Acceptance command (part k):` field is tagged for, read from its label alone; None for an untagged line."""
+    label = LABEL_PART.match(line)
+    return int(label.group(1)) if label else None
+
+
+def other_part(part, tag):
+    return part is not None and tag is not None and tag != part
+
+
+def part_body(body, part):
+    """The body as checklist part `part` reads its acceptance: without the sections headed for another part, `Acceptance (part j)`,
+    and without the `Acceptance command (part j):` fields of another part; a run that is no checklist part (`part` None) reads all of it."""
+    if part is None:
+        return body
+    return "\n".join(line for title, _, line in headed(body)
+                     if not other_part(part, title and tagged_part(title)) and not other_part(part, field_part(line)))
 
 
 def acceptance_text(body):
@@ -56,23 +98,29 @@ def quoted_lines(joined):
     return spans
 
 
-def acceptance_commands(body):
+def acceptance_commands(body, runners=ACCEPTANCE):
     """The acceptance spans that start like a runner: what the brief grants."""
-    return list(dict.fromkeys(s for s in acceptance_spans(body) if s.startswith(ACCEPTANCE)))
+    return list(dict.fromkeys(s for s in acceptance_spans(body) if s.startswith(runners)))
 
 
 PREFIXED = re.compile(r"^(?:[A-Za-z_]\w*=\S*\s+)+")  # NAME=value words before a runner, which no grant covers
 
 
-def named_commands(body):
+def named_commands(body, runners=ACCEPTANCE):
     """The acceptance spans that name a command: a runner after any leading NAME=value words."""
-    return list(dict.fromkeys(s for s in acceptance_spans(body) if PREFIXED.sub("", s).startswith(ACCEPTANCE)))
+    return list(dict.fromkeys(s for s in acceptance_spans(body) if PREFIXED.sub("", s).startswith(runners)))
 
 
-DECLARED_ACCEPTANCE = re.compile(r"(?mi)^[ ]{0,3}(?:[-*][ ]+)?(?:Acceptance command:|\*\*Acceptance command:\*\*)\s*`([^`\n]+)`[ \t]*$")
+LABEL = r"[ ]{0,3}(?:[-*][ ]+)?(?:Acceptance command(?:[ \t]+\(part[ \t]+\d+\))?:|\*\*Acceptance command(?:[ \t]+\(part[ \t]+\d+\))?:\*\*)"
 
 
-FIELD = re.compile(r"(?i)^[ ]{0,3}(?:[-*][ ]+)?(?:Acceptance command:|\*\*Acceptance command:\*\*)[ \t]*(.*?)[ \t]*$")
+LABEL_PART = re.compile(r"(?i)^[ ]{0,3}(?:[-*][ ]+)?(?:\*\*)?Acceptance command[ \t]+\(part[ \t]+(\d+)\):")
+
+
+DECLARED_ACCEPTANCE = re.compile(rf"(?mi)^{LABEL}\s*`([^`\n]+)`[ \t]*$")
+
+
+FIELD = re.compile(rf"(?i)^{LABEL}[ \t]*(.*?)[ \t]*$")
 
 
 def prose(pairs):
@@ -83,10 +131,11 @@ def prose(pairs):
             yield held, line
 
 
-def acceptance_declarations(text):
-    """An explicit field is prose, never a fenced or indented historical example."""
+def acceptance_declarations(text, part=None):
+    """An explicit field is prose, never a fenced or indented historical example; a field tagged for a part other than `part` declares nothing."""
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    return [cmd for _, line in prose((False, line) for line in lines) for cmd in DECLARED_ACCEPTANCE.findall(line)]
+    return [cmd for _, line in prose((False, line) for line in lines) if not other_part(part, field_part(line))
+            for cmd in DECLARED_ACCEPTANCE.findall(line)]
 
 
 def granted_below(rows, allowed):
@@ -99,7 +148,7 @@ def granted_below(rows, allowed):
     return any(s in allowed for s in quoted_lines("\n".join(run)))
 
 
-def unread_fields(body, allowed):
+def unread_fields(body, allowed, runners=ACCEPTANCE):
     """Each `Acceptance command:` line that grants nothing, as neither an acceptance span nor a declaration, with its fix."""
     problems, rows = [], list(sections(body))
     for (i, held), line in prose(((i, held), line) for i, (held, line) in enumerate(rows)):
@@ -115,7 +164,7 @@ def unread_fields(body, allowed):
             move = "move the line and its command under an `## Acceptance` heading"
         if (where and quoted) or cmd in allowed:
             continue
-        if where and not span and not PREFIXED.sub("", cmd).startswith(ACCEPTANCE) and granted_below(rows[i + 1:], allowed):
+        if where and not span and not PREFIXED.sub("", cmd).startswith(runners) and granted_below(rows[i + 1:], allowed):
             continue  # a bare or prose label above prose or a sub-heading, then the command it introduces
         fixes = ([] if quoted else ["put the command in backticks"]) + ([] if where else [move])
         problems.append((f"`{cmd}`: " if cmd else "") + "this `Acceptance command:` line grants nothing as written; " + " and ".join(fixes))
@@ -127,29 +176,29 @@ def declared_source(body, declared):
     return body + ("\n## Acceptance commands\n" + "\n".join(f"Acceptance command: `{cmd}`" for cmd in declared) if declared else "")
 
 
-def acceptance_problems(body, caller_commands=()):
+def acceptance_problems(body, caller_commands=(), runners=ACCEPTANCE):
     problems = []
-    allowed = set(acceptance_commands(body))
-    for cmd in dict.fromkeys(named_commands(body) + acceptance_declarations(body)):
+    allowed = set(acceptance_commands(body, runners))
+    for cmd in dict.fromkeys(named_commands(body, runners) + acceptance_declarations(body)):
         try:
             _, environment = validation.command(cmd)
             if environment:
                 if cmd not in caller_commands:
                     raise DriverError("leading environment assignments require an already-approved caller validation command")
                 continue  # caller handoff only; acceptance_commands never makes this a worker grant
-            if cmd not in allowed and cmd.startswith(ACCEPTANCE):  # a runner a held line would grant: the line sits outside the sections
+            if cmd not in allowed and cmd.startswith(runners):  # a runner a held line would grant: the line sits outside the sections
                 raise DriverError("this `Acceptance command:` line is outside an Acceptance, Tests or Verification heading, so it grants nothing; "
                                   "move the line under an `## Acceptance` heading")
             if cmd not in allowed:
                 raise DriverError("this explicit command is outside the approved acceptance runner forms")
         except DriverError as ex:
             problems.append(f"`{cmd}`: {ex}")
-    return problems + unread_fields(body, allowed)
+    return problems + unread_fields(body, allowed, runners)
 
 
-def empty_list(body):
+def empty_list(body, runners=ACCEPTANCE):
     """Why a run whose BUILD node would get an empty command list stops before the first build: it would ship code no node ran."""
-    named = named_commands(body)
+    named = named_commands(body, runners)
     return (("The acceptance names " + ", ".join(f"`{s}`" for s in named) + ", and the" if named else "The")
             + " BUILD node would get an empty command list: no acceptance command it is granted, and no `[[gate]]` for the area marked `cheap`, "
             "run here, or declaring `paths` (an environment prefix is not a runner the brief grants). A build would ship code no node ran. "

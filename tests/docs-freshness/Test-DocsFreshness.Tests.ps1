@@ -104,7 +104,7 @@ function Assert-NoMatch($Pattern, $Output, $What) {
     else { Write-Host "  FAIL: $What -- unexpected match for '$Pattern' in:`n$Output" -ForegroundColor Red; $script:failures++ }
 }
 function Assert-Equal($Expected, $Actual, $What) {
-    if ($Expected -eq $Actual) { Write-Host "  ok: $What" -ForegroundColor DarkGray }
+    if ($Expected -ceq $Actual) { Write-Host "  ok: $What" -ForegroundColor DarkGray }
     else { Write-Host "  FAIL: $What -- expected '$Expected', got '$Actual'" -ForegroundColor Red; $script:failures++ }
 }
 
@@ -589,7 +589,7 @@ try {
         Remove-Item -LiteralPath $tempIgnoreDir -Recurse -Force
     }
 
-    # A `file:` entry is an unbounded suffix match (EndsWith) -- 'file: README.md' would
+    # A `file:` entry matches a doc's trailing path segments -- 'file: README.md' would
     # otherwise silently exempt every README in the repo from S1/S2/S3, and a dangling entry
     # (its doc moved or was deleted) would silently do nothing. Both must fail loudly at parse
     # time instead.
@@ -605,6 +605,21 @@ try {
         Assert-Equal $true ($ambigMessage -match 'README\.md') 'the ambiguity error names the entry'
     } finally {
         Remove-Item -LiteralPath $tempAmbigDir -Recurse -Force
+    }
+
+    # A `file:` entry matches whole path segments: 'README.md' is not the tail of 'xREADME.md'.
+    $tempSegmentDir = Join-Path ([System.IO.Path]::GetTempPath()) "docs-freshness-ignore-segment-$([guid]::NewGuid())"
+    New-Item -ItemType Directory -Path $tempSegmentDir | Out-Null
+    try {
+        Set-Content -LiteralPath (Join-Path $tempSegmentDir '.docs-freshness-ignore') -Value 'file: README.md'
+        $segmentMessage = ''
+        try { Get-IgnoreList -Root $tempSegmentDir -Docs @('xREADME.md') | Out-Null }
+        catch { $segmentMessage = $_.Exception.Message }
+        Assert-Equal $true ($segmentMessage -match 'resolves to no in-scope doc') 'file: README.md does not match xREADME.md'
+        $one = Get-IgnoreList -Root $tempSegmentDir -Docs @('xREADME.md', 'docs/README.md')
+        Assert-Equal 1 @($one.Files).Count 'control: file: README.md resolves to docs/README.md alone'
+    } finally {
+        Remove-Item -LiteralPath $tempSegmentDir -Recurse -Force
     }
 
     $tempDanglingDir = Join-Path ([System.IO.Path]::GetTempPath()) "docs-freshness-ignore-dangling-$([guid]::NewGuid())"
@@ -628,6 +643,16 @@ try {
     $s2Ignored = @(Get-AnchorFindings -Root $FixtureDir -Docs $docs -IgnoreFiles @('bad/bad-anchor.md'))
     Assert-Equal 0 @($s2Ignored | Where-Object File -eq 'bad/bad-anchor.md').Count `
         'S2 IgnoreFiles entry suppresses the whole file, not just a matching token'
+
+    # At scan time the entry matches whole path segments too: a bare tail of the file name exempts nothing.
+    $s1Tail = @(Get-MarkdownLinkFindings -Root $FixtureDir -Docs $docs -IgnoreFiles @('roken-link.md', 'broken-link.md'))
+    Assert-Equal 0 @($s1Tail | Where-Object File -eq 'bad/broken-link.md').Count 'S1 IgnoreFiles matches a trailing path segment'
+    $s1Tail = @(Get-MarkdownLinkFindings -Root $FixtureDir -Docs $docs -IgnoreFiles @('roken-link.md'))
+    Assert-Equal $true (@($s1Tail | Where-Object File -eq 'bad/broken-link.md').Count -gt 0) 'S1 IgnoreFiles does not match a partial file name'
+    $s2Tail = @(Get-AnchorFindings -Root $FixtureDir -Docs $docs -IgnoreFiles @('ad-anchor.md'))
+    Assert-Equal $true (@($s2Tail | Where-Object File -eq 'bad/bad-anchor.md').Count -gt 0) 'S2 IgnoreFiles does not match a partial file name'
+    $s3Tail = @(Get-CodePathFindings -Root $FixtureDir -Docs $docs -IgnoreTokens $ignore -IgnoreFiles @('issing-path.md'))
+    Assert-Equal $true (@($s3Tail | Where-Object File -eq 'bad/missing-path.md').Count -gt 0) 'S3 IgnoreFiles does not match a partial file name'
 
     # -IgnoreTokens end-to-end through S1/S2/S3 -- only -IgnoreFiles is exercised above, and a
     # token entry is the form a consumer reaches for first.

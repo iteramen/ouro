@@ -30,6 +30,93 @@ def outside(f):
     return isinstance(f, dict) and str(f.get("scope", "")).strip().upper() == "OUTSIDE"
 
 
+ROUTES = ("fix-now", "issue", "idea", "ledger")
+REASONS = ("own-change", "data-loss", "wrong-place", "breaks-gate", "misleads-run", "open-decision")
+
+
+def named(item, key, names):
+    """The leftover's `key` folded, when it is one of `names`; "" otherwise."""
+    r = str(item.get(key, "")).strip().lower() if isinstance(item, dict) else ""
+    return r if r in names else ""
+
+
+def route(item):
+    """The route the review gave a leftover (an L finding or a residue item), one of ROUTES or ""."""
+    return named(item, "route", ROUTES)
+
+
+def reason(item):
+    """The leftover's reason, one of REASONS or ""."""
+    return named(item, "reason", REASONS)
+
+
+def fix_now(f):
+    """A leftover the review routed `fix-now`: an L finding, or a residue item, which carries no severity."""
+    return sev(f) in ("L", "") and route(f) == "fix-now"
+
+
+def filing_route(item):
+    """(route, why) a leftover the fix-now round did not fix is filed under (contract section 7); `why` says why the driver
+    reads it otherwise than the review routed it, "" when the route stands. An H or M finding is an `issue`."""
+    r = route(item)
+    if sev(item) in ("H", "M"):
+        return "issue", ""
+    if not r:
+        return "issue", "it had no route"
+    if r == "issue" and not reason(item):
+        return "ledger", "it was routed `issue` with no reason"
+    if r == "fix-now":
+        return (("issue", "it was routed `fix-now` and is not fixed in this change") if reason(item)
+                else ("ledger", "it was routed `fix-now` with no reason and is not fixed in this change"))
+    return r, ""
+
+
+def routed_residue(ans):
+    """A REVIEW answer's routes for the record's residue items, each with its `item` text."""
+    return [{**x, "item": str(x.get("item") or "")} for x in ans.get("residue") or [] if isinstance(x, dict)]
+
+
+def pinned_residue(entries, items):
+    """A REVIEW answer's residue routes, each tied to the record item its `index` names (1-based, in the record's
+    `## Follow-up` list the review read): its `item` becomes that item's text, so a reworded entry keeps its route
+    after a later round reorders the list. An entry whose index is not an integer inside the list, or repeats an
+    earlier entry's, keeps the reviewer's text and says why under `unmatched`."""
+    out, seen = [], set()
+    for x in entries or []:
+        if not isinstance(x, dict):
+            continue
+        k = x.get("index")
+        if not (isinstance(k, int) and not isinstance(k, bool) and 1 <= k <= len(items)):
+            out.append({**x, "unmatched": f"its index {k!r} names none of the {len(items)} item(s) of the record's Follow-up list"})
+        elif k in seen:
+            out.append({**x, "unmatched": f"its index {k} repeats an earlier entry's"})
+        else:
+            seen.add(k)
+            out.append({**x, "item": str(items[k - 1])})
+    return out
+
+
+def residue_route(records, item):
+    """A residue item's route: the newest record's that routes its text, whitespace folded; {} when none does. The text is
+    the record item's own where the entry's index pinned it, the reviewer's where it did not."""
+    key = " ".join(str(item).split())
+    return next((x for r in reversed(records) for x in r.get("residue") or [] if " ".join(x["item"].split()) == key), {})
+
+
+def untied_routes(records, items):
+    """One sentence per residue route of the newest record that routes any whose index tied it to no record item."""
+    newest = next((r for r in reversed(records) if r.get("residue")), {})
+    keys = {" ".join(str(x).split()) for x in items}
+    return [f"the review's route `{x.get('route')}` for {' '.join(x['item'].split())[:120]!r} is tied to no item: {x['unmatched']}"
+            + (", though its text matches one" if " ".join(x["item"].split()) in keys else ", and its text matches none, so no item takes the route")
+            for x in newest.get("residue") or [] if x.get("unmatched")]
+
+
+def finding_key(f):
+    """A leftover's identity across rounds, less the severity: its file, line and claim (a residue item's text), whitespace folded."""
+    return (str(f.get("file")), str(f.get("line")), " ".join(str(f.get("claim") or f.get("item") or "").split()))
+
+
 def needs_fix(rec):
     """An H or M finding a fix must answer, unless an approver ruled the record; a first review has no fix, so its scope is ignored."""
     verifying = rec.get("round", 1) > 1
@@ -40,14 +127,19 @@ REPO_POLICY = "the repository's [ship]"
 
 
 def ship_policy(env):
-    """(policy, unattended_classes, whose): the viewer's [[ship.person]] entry over [ship], key by key."""
+    """(policy, unattended_classes, whose): the viewer's [[ship.person]] entry over [ship], key by key. `whose` names
+    the policy's source, then the unattended classes' where another source sets them."""
     policy, classes = env.lookup("ship.policy"), env.lookup("ship.unattended_classes")
     people = env.lookup("ship.person") or []
     login = env.viewer() if people else None  # no gh call for a binding without entries
     entry = next((p for p in people if str(p.get("login", "")).lower() == login), None)
     if entry is None:
         return policy, classes, REPO_POLICY
-    return entry.get("policy", policy), entry.get("unattended_classes", classes), f"{login}'s [[ship.person]] entry"
+    src = {k: f"{login}'s [[ship.person]] entry" if k in entry else REPO_POLICY for k in ("policy", "unattended_classes")}
+    classes = entry.get("unattended_classes", classes)
+    whose = src["policy"] + (f", unattended_classes from {src['unattended_classes']}"
+                             if classes is not None and src["unattended_classes"] != src["policy"] else "")
+    return entry.get("policy", policy), classes, whose
 
 
 def may_merge(policy, unattended_classes, issue_labels, flow):
@@ -114,7 +206,7 @@ def parse_review_comment(c, trusted):
         except ValueError:
             ans = {}
     return {"round": int(m.group(1)), "verdict": m.group(2), "sha": m.group(3), "body": body,
-            "findings": ans.get("findings") or [], "false": ans.get("false_record_sentences"), "reader": ans.get("reader")}
+            "findings": ans.get("findings") or [], "residue": routed_residue(ans), "false": ans.get("false_record_sentences"), "reader": ans.get("reader")}
 
 
 def review_records(comments, trusted, approvers=()):
@@ -186,6 +278,43 @@ def review_comment(rnd, ans, sha):
     return "\n".join(lines)
 
 
+USAGE_COLUMNS = ("node", "session", "input", "output", "cache_read", "cache_creation", "cost", "backend", "turns", "effort")  # a new one goes last: usage_rows reads an older table by position
+USAGE_TABLE = re.compile(r"(?m)^\| node \| session \|[^\n]*(?:\n\|[^\n]*)*")  # a drawn table, whatever columns it had
+
+
+def usage_table(rows):
+    """The usage rows as a Markdown table; a missing value, a cost or turn count no backend reported or an effort the host's
+    own settings decided, reads unknown."""
+    if not rows:
+        return ""
+    out = ["| node | session | input | output | cache read | cache creation | cost USD | backend | turns | effort |", "|" + "---|" * len(USAGE_COLUMNS)]
+    out += ["| " + " | ".join("unknown" if u.get(k) is None else str(u[k]) for k in USAGE_COLUMNS) + " |" for u in rows]
+    return "\n".join(out)
+
+
+def usage_rows(fresh, earlier):
+    """The record's usage rows: `earlier`'s (a record's list, or the table a record drew before it kept rows) whose session
+    no row of `fresh` holds, then `fresh`'s, so a resume keeps the rows of earlier invocations and counts none twice."""
+    if isinstance(earlier, str):
+        earlier = [dict(zip(USAGE_COLUMNS, (c.strip() for c in line.strip().strip("|").split("|"))))
+                   for line in earlier.splitlines()[2:] if line.startswith("|")]
+    rows = [{k: u.get(k) for k in USAGE_COLUMNS} for u in fresh]
+    sessions = {u["session"] for u in rows}
+    return [{k: u.get(k) for k in USAGE_COLUMNS} for u in earlier or [] if isinstance(u, dict) and u.get("session") not in sessions] + rows
+
+
+def with_usage(body, fresh):
+    """`body` with `fresh` merged into its record's usage rows and the table drawn from them, the rest as it stands: a
+    merged pull request's body, which nothing redraws."""
+    body = body.replace("\r\n", "\n")
+    rec = read_record(body)
+    rec["usage"] = usage_rows(fresh, rec.get("usage"))
+    table = usage_table(rec["usage"])
+    raw = json.dumps(rec).replace("--", "-\\u002d")
+    body = RECORD.sub(lambda _: f"<!-- ouro-record: {raw} -->", body, count=1)
+    return USAGE_TABLE.sub(lambda _: table, body, count=1) if USAGE_TABLE.search(body) else body.replace("</details>", table + "\n\n</details>", 1)
+
+
 def render_body(rec, review):
     c = rec.get("changes") or []
     gates = rec.get("gates") or []
@@ -215,11 +344,19 @@ def render_body(rec, review):
             for g in rec.get("validation_attempts") or [] if g not in (rec.get("validation_results") or [])]
     out += [f"- CI validation @ {g['sha']}: `{g['name']}` succeeded; {g['url']}"
             for g in rec.get("ci_validation") or []]
+    fix = rec.get("fix_now") if isinstance(rec.get("fix_now"), dict) else {}
+    if fix:
+        beyond = fix.get("outside") or []
+        out.append(f"- Fix-now round, after review round {fix.get('round')} and outside the fix rounds: "
+                   f"{len(fix.get('findings') or [])} leftover(s) handed to the BUILD node"
+                   + (f"; outside the change's own files its commit touched {', '.join(f'`{p}`' for p in beyond)}" if beyond else "")
+                   + ("" if fix.get("kept") else f"; not pushed, since {fix.get('why')}, so they go to the FOLLOW-UP node"))
     if rec.get("note"):
         out.append(f"- {rec['note']}")
     out += [f"- {review}", ""]
-    if rec.get("usage"):
-        out += [rec["usage"], ""]
+    usage = rec.get("usage")
+    if usage:
+        out += [usage_table(usage) if isinstance(usage, list) else usage, ""]
     out += ["</details>", "", "## Follow-up", *[f"- {x}" for x in rec.get("residue", [])], f"<!-- ouro-record: {raw} -->", ""]
     return "\n".join(out)
 
@@ -232,13 +369,28 @@ ERROR_MARK = re.compile(r"\b(error|failed|failure|fatal|panic|traceback|exceptio
 
 def verdict_end(text, i):
     """One past the last line of the `FAIL:` verdict at line `i`: the verdict, and the Python traceback right under it
-    through its final exception line, the first line at column 0 after the indented frames."""
+    through the first line at column 0 after its indented frames. For a chained traceback that is the first exception's
+    line, so `During handling...` and the later traceback fall outside; a multi-line exception message keeps its first line."""
     if i + 1 >= len(text) or not text[i + 1].startswith("Traceback (most recent call last):"):
         return i + 1
     j = i + 2
     while j < len(text) and text[j][:1] in (" ", "\t"):
         j += 1
     return min(j + 1, len(text))
+
+
+GATE_FAILED = re.compile(r"^(?:::error::|##\[error\])gate failed: (.+?)\s*$|^FAIL exit=-?\d+  (.+?)\s*$")  # the gates Action's verdicts
+
+
+def failed_gates(log):
+    """{job name: the gate commands its lines name failed} of a `gh run view --log-failed` text, whose lines gh prefixes
+    with the job's name."""
+    got = {}
+    for line in log.splitlines():
+        job = line.split("\t", 1)[0]
+        if m := GATE_FAILED.match(LOG_PREFIX.sub("", line)):
+            got.setdefault(job, set()).add(m.group(1) or m.group(2))
+    return got
 
 
 def failure_extract(log, cap=200, tail=60):
@@ -272,26 +424,62 @@ def failure_extract(log, cap=200, tail=60):
     return "\n".join(out)
 
 
-def body_sections(body):
-    """{`## ` heading: its section's text} of a pull request body, the record comment cut and line ends as git writes them."""
-    parts = re.split(r"(?m)^(?=## )", RECORD.sub("", (body or "").replace("\r\n", "\n")))
-    return {p.split("\n", 1)[0]: "\n".join(line.rstrip() for line in p.strip().splitlines()) for p in parts if p.startswith("## ")}
+VERIFICATION = re.compile(r"(?ms)^<details><summary>Verification</summary>$.*?^</details>$")
+
+
+DRAWN_HEADINGS = ("## Merge danger", "## Manual steps", "## Summary", "## Changes", "## Follow-up")  # every one render_body draws
+
+
+def body_sections(body, cut=True):
+    """[(`## ` heading, its section's text)] of a pull request body in order, a heading named twice listed twice, each
+    heading and line with trailing whitespace stripped, the record comment cut and line ends as git writes them.
+    With `cut`, the Verification block is cut too: it has no heading of its own, so the section above it would take it in.
+    A `## ` heading inside the block survives the cut, with the block's lines from it to the block's end."""
+    def cut_block(m):
+        at = re.search(r"(?m)^## ", m.group(0))
+        return m.group(0)[at.start():].removesuffix("</details>") if at else ""
+    text = RECORD.sub("", (body or "").replace("\r\n", "\n"))
+    parts = re.split(r"(?m)^(?=## )", VERIFICATION.sub(cut_block, text) if cut else text)
+    return [(p.split("\n", 1)[0].rstrip(), "\n".join(line.rstrip() for line in p.strip().splitlines())) for p in parts if p.startswith("## ")]
 
 
 def drawn_body(rec, review, body=""):
     """render_body, keeping each section of `body` a person edited since the driver drew it: the record holds a digest of
-    each section as drawn, and a section that no longer matches its digest is theirs, kept as they left it."""
+    each section as drawn, and a section that no longer matches its digest is theirs, kept as they left it. A section
+    under a heading the driver does not draw is theirs too, wherever they put it, inside the Verification block included,
+    kept in its order, before `## Follow-up`, with only the lines the person wrote: the drawn lines above the first heading
+    (the part, `Fixes` and review lines), and for a section inside the block the block's drawn lines, whose digests the
+    record holds, are redrawn, never kept inside it. A record an older driver drew may hold no `drawn` table: a heading
+    the driver draws is then never a person's; or no `drawn_lines`: the record's part and `Fixes` lines and a `Review: `
+    line are then the drawn lines."""
     def digest(t):
         return hashlib.sha256(t.encode("utf-8")).hexdigest()[:16]
     drawn = rec.get("drawn") or {}
-    kept = {h: t for h, t in body_sections(body).items() if h in drawn and digest(t) != drawn[h]}
+    body = (body or "").replace("\r\n", "\n")
+    legacy = {rec.get("part_line"), rec.get("fixes_line")} - {None, ""}
+    lines = set(rec.get("drawn_lines") or [digest(x.rstrip()) for x in body.splitlines() if x.rstrip() in legacy or x.startswith("Review: ")])
+    block_lines = set(rec.get("block_lines") or [])
+    block = VERIFICATION.search(body)
+    inside = {x.rstrip() for x in re.findall(r"(?m)^## .*$", block.group(0))} if block else set()
+    blk = "\n".join(x.rstrip() for x in block.group(0).splitlines()) if block else ""
+    had = body_sections(body)
+    # a record an older driver drew holds the digest of `## Changes` with the Verification block in it
+    kept = {h: t for h, t in had if h in drawn and drawn[h] not in (digest(t), digest(f"{t}\n{blk}"))}
     rec["drawn"] = {}
-    fresh = body_sections(render_body(rec, review))
+    text = render_body(rec, review)
+    fresh = dict(body_sections(text))
     rec["drawn"] = {h: digest(t) for h, t in fresh.items()}
+    rec["drawn_lines"] = [digest(x.rstrip()) for x in re.split(r"(?m)^## ", text, maxsplit=1)[0].splitlines() if x.strip()]
+    rec["block_lines"] = [digest(x.rstrip()) for x in VERIFICATION.search(text).group(0).splitlines() if x.strip()]
     out = render_body(rec, review)
     for h, t in kept.items():
         if h in fresh:
             out = out.replace(fresh[h], t, 1)
+    added = ["\n".join(x for x in t.splitlines() if digest(x) not in (lines | block_lines if h in inside else lines)).strip()
+             for h, t in had if h not in fresh and h not in (drawn or DRAWN_HEADINGS)]
+    if added:
+        at = out.rindex("\n## Follow-up\n") + 1  # render_body draws it last, so a summary that quotes the heading comes before it
+        out = out[:at] + "".join(t + "\n\n" for t in added) + out[at:]
     return out
 
 
@@ -373,6 +561,27 @@ def reader_findings(verdict):
     return out
 
 
+def anchor_sections(body):
+    """Each line of `body` and whether it sits under an `Anchors` heading, as the anchor gate scopes one: a `#` line outside a
+    fence opens or ends the section."""
+    anchors, fence = False, ""
+    for line in body.splitlines():
+        if marker := re.match(r"\s*(`{3,})(.*)$", line):  # as the gate reads a fence: a bare run at least as long closes it
+            if not fence:
+                fence = marker.group(1)
+            elif len(marker.group(1)) >= len(fence) and not marker.group(2).strip():
+                fence = ""
+        if line.startswith("#") and not fence:
+            anchors = bool(re.match(r"#+\s*Anchors\b", line))
+        yield line, anchors
+
+
+def anchor_fragments(line):
+    """The quoted fragments of an anchor line that the gate checks: 12 to 120 characters, escapes undone, edge backticks cut."""
+    frags = [f.replace('\\"', '"') for f in re.findall(r'"((?:[^"\\]|\\.)*)"', line)]
+    return [f.strip("`") for f in frags if 12 <= len(f) <= 120]
+
+
 def restamped(e, body, findings):
     """The body with each anchor line under its `Anchors` heading that the findings name re-pointed at the one tracked file of the same
     suffix at the default branch's tip that holds every fragment on it, and the `Anchors @ <sha>` stamp set to that tip; the body as it is
@@ -383,22 +592,16 @@ def restamped(e, body, findings):
         m = re.match(r"path does not resolve: '(.+)'$", f) or re.match(r"fragment no longer greps in '(.+?)': ", f)
         if m:
             dead.add(m.group(1))
-    out, moved, anchors, fenced = [], 0, False, False
-    for line in body.splitlines():
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        if line.startswith("#") and not fenced:
-            anchors = bool(re.match(r"#+\s*Anchors\b", line))
+    out, moved = [], 0
+    for line, anchors in anchor_sections(body):
         m = re.match(r"^(\s*(?:[-*+]|\d+[.)])\s[^`\r\n]*`)([^`\r\n]+)(`.*)$", line) if anchors else None
         span = m.group(2) if m else ""
         base = re.split(r"[:#]", span, 1)[0]  # the gate cuts a span at its first : or # (`path:171`, `path#L171`)
         if span and any(d == base or d.endswith("/" + base) for d in dead):
             files = None
-            for frag in re.findall(r'"((?:[^"\\]|\\.)*)"', line):
-                frag = frag.replace('\\"', '"')
-                if 12 <= len(frag) <= 120:
-                    hits = {entry[len(ref) + 1:] for entry in e.git("grep", "-F", "-l", "-z", "-e", frag.strip("`"), ref, check=False).out.split("\0") if entry.startswith(ref + ":")}
-                    files = hits if files is None else files & hits
+            for frag in anchor_fragments(line):
+                hits = {entry[len(ref) + 1:] for entry in e.git("grep", "-F", "-l", "-z", "-e", frag, ref, check=False).out.split("\0") if entry.startswith(ref + ":")}
+                files = hits if files is None else files & hits
             if files and len(files) == 1 and (new := next(iter(files))) != base and Path(new).suffix == Path(base).suffix:
                 line, moved = m.group(1) + new + span[len(base):] + m.group(3), moved + 1
         out.append(line)

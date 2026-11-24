@@ -79,6 +79,8 @@ class ReviewSandboxTests(unittest.TestCase):
         self.assertFalse(os.path.exists(temp), "the temp root is deleted when the launch returns")
         self.assertNotIn("CLAUDE_CODE_TMPDIR", plain_env)
         self.assertNotIn("TMPDIR", plain_env)
+        for launch in (env, plain_env):
+            self.assertEqual(launch.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "1", "a Claude node never loads auto-memory")
         settings = json.loads(sandboxed[sandboxed.index("--settings") + 1])
         self.assertEqual(settings, {"sandbox": {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
                                                 "network": {"allowedDomains": []}}})
@@ -91,20 +93,30 @@ class ReviewSandboxTests(unittest.TestCase):
                          "Bash(git push *),Bash(git commit *),Bash(gh *),PowerShell(git push *),PowerShell(git commit *),PowerShell(gh *)")
         self.assertNotIn("--settings", plain, "without the key a PROBE review launches as before")
 
-    def test_qwen_has_a_route_on_linux_alone_and_needs_usr_bin_bwrap(self):
+    def test_qwen_has_a_route_on_linux_alone_needs_usr_bin_bwrap_and_is_admitted_with_it(self):
         from ouro.runtime import qwen
         for present in (True, False):
             with patch.object(qwen.os.path, "exists", side_effect=lambda path: present and path == qwen.BWRAP):
                 why = review_sandbox.refusal(developer.Settings("qwen"), "linux")
+                qualifying = review_sandbox.refusal(developer.Settings("qwen"), "linux", qualifying=True)
+                with patch.dict(review_sandbox.UNQUALIFIED, {"qwen": "its qualification fails"}):
+                    unqualified = review_sandbox.refusal(developer.Settings("qwen"), "linux")
+                    own = review_sandbox.refusal(developer.Settings("qwen"), "linux", qualifying=True)
             if present:
-                self.assertIsNone(why)
+                self.assertIsNone(why, "a Qwen Code reviewer with /usr/bin/bwrap is admitted on linux")
+                self.assertIsNone(qualifying)
+                self.assertIn("selects Qwen Code on linux: the Qwen Code sandbox route is not qualified: its qualification fails",
+                              unqualified, "a route listed as unqualified is still refused")
+                self.assertIn("select another backend in [runtime.roles.reviewer], or unset the key", unqualified)
+                self.assertIsNone(own, "the route's own qualification is not refused")
             else:
-                self.assertIn("selects Qwen Code on linux: missing /usr/bin/bwrap, which the Qwen Code sandbox needs", why)
+                for refused in (why, qualifying):
+                    self.assertIn("selects Qwen Code on linux: missing /usr/bin/bwrap, which the Qwen Code sandbox needs", refused)
 
     def test_a_sandboxed_qwen_probe_review_launches_under_the_tool_sandbox_and_answers_without_the_hook(self):
         from ouro import sh
         from ouro.runtime import PROBE, SANDBOXED_PROBE, Capabilities, process, qwen
-        answer = {"verdict": "CLEAN", "findings": [], "false_record_sentences": 0, "files_read": [], "stop": None}
+        answer = {"verdict": "CLEAN", "findings": [], "residue": [], "false_record_sentences": 0, "files_read": [], "stop": None}
         # A shell call no hook granted: under the sandbox no executable hook runs.
         events = [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "c0", "name": "run_shell_command",
                                                                  "input": {"command": "git status"}}]}},
@@ -123,8 +135,9 @@ class ReviewSandboxTests(unittest.TestCase):
             reviewed = qwen._execute("REVIEW", "p", "m", SANDBOXED_PROBE, copy, 5, None, {}, settings, {})
             with self.assertRaisesRegex(sh.DriverError, "run_shell_command ran without the allow-list hook's grant"):
                 qwen._execute("REVIEW", "p", "m", PROBE, copy, 5, None, {}, settings, {})
-            for name, tools in (("BUILD", SANDBOXED_PROBE), ("REVIEW", Capabilities(sandbox=True))):
-                with self.assertRaisesRegex(sh.DriverError, "the tool execution sandbox serves a PROBE review node alone"):
+            for name, tools in (("BUILD", SANDBOXED_PROBE), ("REVIEW", Capabilities(sandbox=True)),
+                                ("CHECKPOINT", Capabilities(commands=("python3 --version",), sandbox=True))):
+                with self.assertRaisesRegex(sh.DriverError, "the tool execution sandbox serves a PROBE review node and its preflight proof alone"):
                     qwen._execute(name, "p", "m", tools, copy, 5, None, {}, settings, {})
         self.assertEqual(len(seen), 2, "a sandbox on any other node is refused before launch")
         (argv, cwd, system), (_, _, plain) = seen

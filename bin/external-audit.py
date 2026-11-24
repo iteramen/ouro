@@ -364,7 +364,7 @@ class Adapter:
     def argv(self, prompt_path: Path, session: str, resume: bool, model: str, effort: str) -> list[str]:
         raise NotImplementedError
 
-    def env(self, session_dir: Path) -> dict[str, str | None]:
+    def env(self, session_dir: Path, model: str = "default") -> dict[str, str | None]:
         """Environment variables laid over the driver's own for the CLI's launch; none by default.
         A None value removes that variable from the CLI's environment. An adapter that needs
         session-scoped state creates it under session_dir here, and cleanup() takes back whatever
@@ -415,7 +415,7 @@ class GrokAdapter(Adapter):
     default_effort = "medium"
     SEEDED = ("auth.json", "config.toml", "models_cache.json")
 
-    def env(self, session_dir: Path) -> dict[str, str]:
+    def env(self, session_dir: Path, model: str = "default") -> dict[str, str]:
         source = Path(os.environ.get("GROK_HOME") or Path.home() / ".grok")
         if not (source / "auth.json").is_file():
             raise RuntimeError(f"no {source / 'auth.json'}: log in to grok first")
@@ -597,15 +597,16 @@ class QwenAdapter(Adapter):
     from the launch environment, and OPENAI_MODEL for --model default. The prompt travels on stdin;
     --output-format json prints one JSON array of events, and the verdict is the last `result`
     event's text. --session-id passes round 1's id (the driver's, as for grok); --resume repeats it,
-    and reads the chat recording round 1 left in the session's home, so recording stays on. env() writes the system settings under <session>/: the allow-list hook (read_file, glob,
-    grep_search) is the boundary, the write and shell tools are denied, and folder trust keeps the
-    repository's own settings, hooks and context files out. It removes every inherited QWEN_*
+    and reads the chat recording round 1 left in the session's home, so recording stays on. env()
+    writes the system settings under <session>/: the allow-list hook (read_file, glob, grep_search)
+    is the boundary, the write and shell tools are denied, and folder trust keeps the repository's
+    own settings, hooks and context files out. It removes every inherited QWEN_*
     variable and points the home, trust and approval files there too. A tool that ran without the
     hook's grant discards the verdict; a denied call is a warning. The isolation is
     ouro/runtime/qwen_isolation.py beside this script, imported here and not at the top: a vendored
     copy carries this script alone, so there qwen is refused and every other adapter still runs.
     No effort route. Its stdout is stdout.txt itself, not a pipe: Qwen Code 0.26.6 cuts a piped
-    `-o json` stream short (at 72-80 KB) and still exits 0."""
+    `-o json` stream short and still exits 0."""
 
     name = "qwen"
     binary = "qwen"
@@ -623,14 +624,20 @@ class QwenAdapter(Adapter):
         from ouro.runtime import qwen_isolation
         return qwen_isolation
 
-    def env(self, session_dir: Path) -> dict[str, str | None]:
+    def env(self, session_dir: Path, model: str = "default") -> dict[str, str | None]:
         isolation = self._isolation()
-        unset = [n for n in self.CREDENTIALS if not os.environ.get(n)]
+        needed = self.CREDENTIALS + (("OPENAI_MODEL",) if model in ("", "default") else ())
+        unset = [n for n in needed if not os.environ.get(n)]
         if unset:
-            raise RuntimeError(f"set {', '.join(unset)} in the launch environment (an OpenAI-compatible endpoint and its key)")
+            raise RuntimeError(f"set {', '.join(unset)} in the launch environment (an OpenAI-compatible endpoint and its key, "
+                               "and OPENAI_MODEL where --model is default)")
         evidence = session_dir / "hook.jsonl"
         evidence.unlink(missing_ok=True)  # the session directory outlives the round: each round's grants are its own
-        (session_dir / "system.json").write_text(json.dumps(isolation.settings_for(evidence)), encoding="utf-8")
+        try:
+            settings = isolation.settings_for(evidence)
+        except isolation.DriverError as e:  # a hook command cmd.exe cannot carry: refused with the driver's reason
+            raise RuntimeError(str(e)) from e
+        (session_dir / "system.json").write_text(json.dumps(settings), encoding="utf-8")
         # No developer settings here: the driver launching this script has already removed its coordination credential.
         return isolation.isolated_env(SimpleNamespace(coordination=None), session_dir)
 
@@ -801,7 +808,7 @@ def main() -> int:
     # for the SystemExit that main()'s timeout, interrupt and SIGTERM paths end in.
     atexit.register(adapter.cleanup, out.parent)
     try:
-        child_env = {k: v for k, v in {**os.environ, **adapter.env(out.parent)}.items() if v is not None}
+        child_env = {k: v for k, v in {**os.environ, **adapter.env(out.parent, args.model)}.items() if v is not None}
     except (RuntimeError, OSError) as e:
         print(f"external-audit: {adapter.binary} could not be prepared - {e}; nothing started", file=sys.stderr)
         return 1

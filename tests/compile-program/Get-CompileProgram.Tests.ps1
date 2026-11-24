@@ -16,7 +16,8 @@
     their form and place after the analyzer's batches, the Flow lines, checkpoint, checklist,
     analyzer-batch, in-flight, scope and agent-ready rules that leave an issue out, the first of
     several areas, the group of five and the group of one, the label match, a null body, and the
-    fields of the issue read, seen through a recording gh stand-in.
+    fields of the issue read, seen through a recording gh stand-in; a finish trigger whose `#N`
+    follows `.` or `-` (row 54) and a shared file only one side anchors (row 55).
     It needs pwsh only, so a Windows leg with no bash runs every row.
 #>
 $ErrorActionPreference = 'Stop'
@@ -770,6 +771,25 @@ exit 9
     Assert-Match '(?m)^  #44 t44 -- blocked: \*\*Unblocks when:\*\* #46 and #42 land$' $r.Out 'row 53: one naming an open issue does not'
     Assert-Match '(?m)^  #47 t47 -- blocked: \*\*Unblocks when:\*\* the owner says so$' $r.Out 'row 53: nor one naming none'
     Assert-Match '(?m)^Next moves, in the order above:\n  #40: /ouro:run 40, a session runs it\n  #41: PR #92, landing through its own run\n  #42: owner ruling, needs the owner\n  #43: /ouro:triage 43, needs the owner to approve the label swap\n  #45: /ouro:triage 45, needs the owner to approve the verdict$' $r.Out 'row 53: the moves follow the child list, the unfired blocked ones and the closed one with none'
+
+    # --- row 54: a #N right after `.` or `-` is part of another reference, so it fires no trigger ----------
+    $lbUmb = '{"number":39,"title":"u","state":"OPEN","labels":[{"name":"umbrella"}],"body":"- #43\n- #44\n- #47"}'
+    $lbBlk = '[{"number":43,"title":"t43","body":"**Unblocks when:** the vendor ships v2 (see v1.#46)"},{"number":44,"title":"t44","body":"**Unblocks when:** the vendor ships v2 (see v1-#46)"},{"number":47,"title":"t47","body":"**Unblocks when:** the vendor ships v2 (see #46)"}]'
+    $r = Invoke-Prog $fm @('-Intent', 'finish', '-Target', '39', '-TargetJson', $lbUmb, '-IssuesJson', $fmList, '-BlockedJson', $lbBlk)
+    Assert-Equal 0 $r.Code 'row 54: exit 0'
+    Assert-Match '(?m)^  #43 t43 -- blocked: \*\*Unblocks when:\*\* the vendor ships v2 \(see v1\.#46\)$' $r.Out 'row 54: a #N after `.` names no closed issue, so the trigger has not fired'
+    Assert-Match '(?m)^  #44 t44 -- blocked: \*\*Unblocks when:\*\* the vendor ships v2 \(see v1-#46\)$' $r.Out 'row 54: nor after `-`'
+    Assert-Match '(?m)^  #47 t47 -- blocked, fired: ' $r.Out 'row 54 control: the bare #46 of the same closed issue fires'
+    Assert-Match '(?m)^Next moves, in the order above:\n  #47: /ouro:triage 47, needs the owner to approve the label swap$' $r.Out 'row 54: and only the fired one gets a triage move'
+
+    # --- row 55: a shared file one member names only on its Anchors lines is marked -------------------------
+    $anc = New-Graph @(@(1, 'agent-ready', @('a', 'b', 'c')), @(2, 'agent-ready', @('a', 'b', 'c'))) `
+        -Collisions '[{"a":1,"b":2,"files":["a","b","c"]}]' -Batches '[[1,2]]' -Waves '[[1],[2]]'
+    $anc = $anc.Replace('"number":1,"title":"t1","state":"agent-ready","footprint":["a","b","c"],"unresolved":[]', '"number":1,"title":"t1","state":"agent-ready","footprint":["a","b","c"],"unresolved":[],"anchorOnly":["a","c"]')
+    $anc = $anc.Replace('"number":2,"title":"t2","state":"agent-ready","footprint":["a","b","c"],"unresolved":[]', '"number":2,"title":"t2","state":"agent-ready","footprint":["a","b","c"],"unresolved":[],"anchorOnly":["c","A"]')
+    $r = Invoke-Prog $anc @('-Intent', 'batch')
+    Assert-Equal 0 $r.Code 'row 55: exit 0'
+    Assert-Match '(?m)^batch: 1 2\n  shared: #1 #2 on a \(only an anchor in #1\), b, c \(only an anchor in #1 #2\)$' $r.Out 'row 55: each anchor-only file names the side that only anchors it; the link stays, and a case variant marks nothing'
 
     # --- row 27: the script puts back the console code pages it changed -------------------------------------------------------------
     # CreateNoWindow gives the driver a console of its own, so the run cannot change this suite's.

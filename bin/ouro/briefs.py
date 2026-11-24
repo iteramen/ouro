@@ -2,6 +2,8 @@
 import re
 from pathlib import Path
 
+from . import records
+
 
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 
@@ -27,14 +29,15 @@ def render(name, **vals):
 
 
 def anchors_block(worktree, body):
-    """For each list item that names a file and a quoted fragment: the fragment's current lines."""
+    """For each list item under an `Anchors` heading that names a file, as the anchor gate reads one: each of its quoted
+    fragments' current lines."""
     out = []
-    for line in body.splitlines():
-        m = re.match(r"\s*(?:[-*]|\d+\.)\s+`([^`\s]+/[^`\s]+|[^`\s]+\.\w+)`", line)
+    for line, anchors in records.anchor_sections(body):
+        m = re.match(r"\s*(?:[-*+]|\d+[.)])\s[^`\r\n]*`([^`\s]+/[^`\s]+|[^`\s]+\.\w+)`", line) if anchors else None
         if not m:
             continue
-        rel = m.group(1)
-        frags = re.findall(r'"([^"]{8,120})"', line)
+        rel = re.split(r"[:#]", m.group(1), 1)[0]  # the gate cuts a span at its first : or # (`path:171`, `path#L171`)
+        frags = records.anchor_fragments(line)
         f = Path(worktree) / rel
         if not f.is_file():
             out.append(f"{rel}: not in the tree")

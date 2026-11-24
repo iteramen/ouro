@@ -11,11 +11,13 @@
     same workflow supersedes is neither watched nor judged; a run that appears after the first
     watches is watched too, and the loop ends when a list brings nothing new; the last list is the
     verdict, each run by its own conclusion: success, skipped and neutral pass, a failure stops
-    with the run and its conclusion, and a run still in progress stops. No run after six lists,
-    fifty seconds apart in all, stops with -Pr (a CONFLICTING pull request named as such, else
-    nothing built the head) and is reported with -Sha when no enabled workflow's push filters
-    select the commits; one that does and shows no run in sixty lists stops, and one that starts
-    late is watched; `-Sha none` watches nothing. With -Sha the push runs of every commit are listed on
+    with the run and its conclusion, and a run still in progress stops. With -Pr and no workflow
+    naming pull_request, no run after six lists, fifty seconds apart in all, stops naming the
+    missing workflow; with one, the list is read up to sixty times, a CONFLICTING pull request
+    stops after the sixth, a run that first shows after it is watched, and none in sixty stops
+    as nothing built the head. With -Sha, no run after six lists is reported when no enabled
+    workflow's push filters select the commits; one that does and shows no run in sixty lists
+    stops, and one that starts late is watched; `-Sha none` watches nothing. With -Sha the push runs of every commit are listed on
     the default branch and the newest per workflow and event is taken across them all. Neither
     parameter, or both, stops before any call; a list that fails stops; a tree with no binding
     stops before any call. The child rows pin the entry point: exit 0 and the verdict lines on
@@ -76,27 +78,44 @@ try {
     }
     Add-Workflow 'push.yml' "on:`n  push:`n    branches: [master]`n"
     Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'CONFLICTING' }; "run list --commit $H" = Answer @() }
+    $script:polls = 0
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
     Assert-Match "^no workflow at origin/master names pull_request, so nothing builds #7's head $($H): Install-Ouro\.ps1 -CI adds the one that runs the \[\[gate\]\] list" $r.Stop 'the stop names the missing workflow and the installer flag'
-    Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'after the same six lists'
+    Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'after six lists: with no workflow listening, a minute'
+    Assert-Equal 50 $script:polls 'five pauses of ten seconds between them'
     Assert-NoMatch 'mergeable' ($r.Gh -join "`n") 'and before the mergeable state is read'
     Add-Workflow 'ci.yml' "on:`n  pull_request:`n    branches: [master]`n"
 
-    Write-Host 'no run after a minute stops with -Pr: nothing built the head (run from a subdirectory, where the workflow is still found)'
+    Write-Host 'with a workflow naming pull_request, no run in ten minutes stops with -Pr: nothing built the head (run from a subdirectory, where the workflow is still found)'
     Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'MERGEABLE' }; "run list --commit $H" = Answer @() }
     $script:polls = 0
     Push-Location -LiteralPath (Join-Path $w.Main '.claude')
     try { $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 } } finally { Pop-Location }
-    Assert-Match "^no pull_request run for #7's head $H after a minute - nothing is known to have built the head: push \(or re-push\) it" $r.Stop 'the stop names the zero-run case and what to do'
-    Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'the list is read six times'
-    Assert-Equal 50 $script:polls 'five pauses of ten seconds between them'
-    Assert-Equal 'pr view 7 -R o/n --json mergeable' @($r.Gh)[-1] 'the mergeable state is read once, after the last list'
+    Assert-Match "^no pull_request run for #7's head $H after ten minutes - nothing is known to have built the head: push \(or re-push\) it" $r.Stop 'the stop names the zero-run case, the ten minutes and what to do'
+    Assert-Equal 60 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'the list is read sixty times'
+    Assert-Equal 590 $script:polls 'ten seconds apart'
+    Assert-Equal 1 @($r.Gh | Where-Object { $_ -like '*--json mergeable' }).Count 'the mergeable state is read once'
+    Assert-Equal 'pr view 7 -R o/n --json mergeable' @($r.Gh)[7] 'after the sixth list, the first minute'
 
-    Write-Host 'no run and a CONFLICTING pull request stops naming the conflict and the sync'
+    Write-Host 'with a workflow naming pull_request, a run first listed on the seventh read is watched and judged'
+    Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'MERGEABLE' }
+        "run list --commit $H" = Seq @((Answer @()), (Answer @()), (Answer @()), (Answer @()), (Answer @()), (Answer @()), (Answer @(Run 19 1 pull_request $t2)))
+        'run watch 19' = @{ Exit = 0; Out = '' } }
+    $script:polls = 0
+    $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
+    Assert-Equal '' $r.Stop 'a run listed after the first minute ends without a stop'
+    Assert-Line $r.Gh 'run watch 19 -R o/n --interval 15' 'it is watched'
+    Assert-Line $r.Lines 'run 19 (wf1/pull_request): success' 'and judged'
+    Assert-Equal 60 $script:polls 'six pauses waited for it'
+
+    Write-Host 'no run and a CONFLICTING pull request stops naming the conflict and the sync, after the first minute'
     Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H; mergeable = 'CONFLICTING' }; "run list --commit $H" = Answer @() }
+    $script:polls = 0
     $r = Invoke-Step { Invoke-WatchPullRequestChecks -Pr 7 }
     Assert-Match '^#7 conflicts with master and GitHub runs no pull_request workflow for a conflicting pull request: sync the branch \(Sync-Branch.ps1\)' $r.Stop 'the stop names the conflict and what to do'
-    Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'after the same six lists'
+    Assert-Equal 6 @($r.Gh | Where-Object { $_ -like 'run list*' }).Count 'after six lists, not sixty'
+    Assert-Equal 50 $script:polls 'with no pause after the sixth'
+    Assert-Equal 'pr view 7 -R o/n --json mergeable' @($r.Gh)[-1] 'the conflict read is the seventh read after the head, and the last'
 
     Write-Host 'a failed conclusion stops, naming the run; a run still in progress stops'
     Set-Gh @{ 'pr view 7' = Answer @{ headRefOid = $H }

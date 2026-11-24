@@ -29,7 +29,7 @@ def ci_checks(env, pr, head):
                                   or (row.get("__typename") == "StatusContext" and row.get("context") == name
                                       and row.get("state") == "SUCCESS")) for row in matches):
             return actions_checks(env, pr, head, names, rows)
-        evidence.extend({"name": name, "sha": head, "url": row.get("detailsUrl", row.get("targetUrl", ""))}
+        evidence.extend({"name": name, "sha": head, "url": row.get("detailsUrl", row.get("targetUrl", "")), "conclusion": "SUCCESS"}
                         for row in matches)
     return evidence
 

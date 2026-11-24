@@ -209,7 +209,7 @@ try {
 
         $parsed = Get-AnchorFindings -Text $body
         if (($parsed.PathCount + $parsed.FragCount) -eq 0) {
-            $findings += 'anchor: no parseable anchor in the body (a backticked repo path or a quoted code fragment) - a spec living only in comments or screenshots is not executable'
+            $findings += 'anchor: no parseable anchor in the body (a backticked repo path, or a quoted fragment on an anchor line under an `Anchors` heading) - a spec living only in comments or screenshots is not executable'
         }
 
         # Every Size line counts; lines that repeat one value are checked as that one line.

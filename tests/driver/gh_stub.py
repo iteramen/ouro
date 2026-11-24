@@ -7,7 +7,8 @@ The table maps a call's signature (its arguments, `-R <slug>` removed, joined by
 {"Exit": n, "Out": text-or-json} or {"Seq": [rows]} (the Nth call the key names takes the Nth row, the
 last repeats; a row {"Model": true} lets the stand-in model that call); a key holding `*` is a pattern, and one counter serves every call it matches. A call the table does not name and the stand-in does not
 model exits 1 and names itself; an `issue create` with a `--label` outside the origin's [labels] sets,
-`needs-triage` and `umbrella` exits 1 as gh refuses an unknown label. The stand-in models what the driver and the land scripts read and
+`needs-triage`, `umbrella` and `idea` exits 1 as gh refuses an unknown label; one the table answers with the URL of a seeded `_issue_<N>`
+writes its title, body, labels and the viewer as author into that issue. The stand-in models what the driver and the land scripts read and
 write: issues, one pull request (create, view, list, ready, edit, comment, merge), the viewer, and the runs on each commit it is asked
 about: `_runs` seeds them in first-seen order, one list of per-attempt conclusions per commit (the last entry repeats; "" or
 "in_progress" is a run still going), `run rerun` moves a run to its next attempt, and `run view`, `pr checks` and `run list` answer
@@ -17,15 +18,20 @@ once (a commit on master), as a conflicting head means it did. `_head_lag` is a 
 asks for `headRefOid` (the last repeats): true serves `STALE_HEAD` there in place of the branch tip, as GitHub does for a while after a push.
 Table keys beginning `_` seed that state: `_viewer`, `_issue_<N>`, `_pr`, `_comments_<N>`, `_mergeable`, `_head_lag`, and for the
 GraphQL model an `_issue_<N>`'s `issueType` (`{"name": ...}`, its native type, null when absent), `_edits` (the issue body's edit history, pages keyed by cursor, "" for the first),
-`_prs` (what a pull request search answers), `_threads` (the pull request's review threads), `_copilot_bot` (the bot id Copilot answers to),
+`_prs` (what a pull request search answers, whatever its query; an issue search answers every `_issue_<N>` in its `--state`, and so
+does the REST `api repos/<slug>/issues?per_page=<k>` list, `user` for `author`, its pages slurped),
+`_closers_<N>` (the `closer` objects of issue N's closing events, none when absent), `_threads` (the pull request's review threads), `_copilot_bot` (the bot id Copilot answers to),
 `_copilot_polls` (reads before its review shows) and `_copilot_never`; `_stale_list` makes the run list read a re-run attempt
 as success whatever it concluded, `_checks_extra` adds check rows to `pr checks --json`, and a `budget` plan entry is an attempt
 that fails with a job that never started, as an Actions budget leaves it, a `matrix` one a real failure beside a leg its
-fail-fast cancelled while it queued (`api .../runs/<id>/attempts/<n>[/jobs]` answer them). Copilot's review is made on
+fail-fast cancelled while it queued, a `legs` one two legs that ran and failed (`api .../runs/<id>/attempts/<n>[/jobs]`
+answer them). Copilot's review is made on
 the head the pull request has when it first shows, and keeps that commit.
 `statusCheckRollup` defaults to the modeled run on the actual bare PR head. `_rollup` replaces
 only that check list for negative shapes; `_rollup_stale` changes the head in that rollup read
 only. `ci-observations.jsonl` records these fixture responses, never production evidence.
+`pr merge` commits the head's tree on master; `_merge_tree_differs` commits master's tree in its place, and `_merge_base_moves`
+moves the base (a commit on master) just before the merge.
 """
 import fnmatch
 import json
@@ -105,7 +111,7 @@ def pr_state():
 
 def pr_view(pr, fields):
     live = dict(pr)
-    tip = git("rev-parse", f"refs/heads/{pr['head']}") if origin else ""
+    tip = git("rev-parse", "--verify", "-q", f"refs/heads/{pr['head']}") if origin else ""  # "" once --delete-branch removed it
     live["headRefOid"] = tip or pr.get("headRefOid", "")
     live["headRefName"] = pr["head"]
     live.setdefault("baseRefName", "master")
@@ -150,7 +156,7 @@ def run_on(sha):
 def attempt_conclusion(r, k):
     """Attempt k's conclusion as the API records it: `budget` is a failure whose job never started."""
     c = r["plan"][min(k, len(r["plan"])) - 1]
-    return "failure" if c in ("budget", "matrix") else c
+    return "failure" if c in ("budget", "matrix", "legs") else c
 
 
 def run_row(r):
@@ -193,6 +199,12 @@ def table_answer():
     if row.get("Model"):
         return
     o = row.get("Out", "")
+    m = re.search(r"/issues/(\d+)$", str(o).strip()) if args[:2] == ["issue", "create"] and not row.get("Exit") else None
+    if m and f"_issue_{m.group(1)}" in table:  # GitHub holds what was filed: a later read of that issue sees it
+        iss = issue(m.group(1))
+        iss.update(title=flag("--title"), body=body_text(), state="OPEN", author={"login": table.get("_viewer", "o")},
+                   labels=[{"name": args[k + 1]} for k, a in enumerate(args[:-1]) if a == "--label"])
+        save(f"issue-{m.group(1)}.json", iss)
     print(o if isinstance(o, str) else json.dumps(o))
     sys.exit(row.get("Exit", 0))
 
@@ -210,8 +222,17 @@ if verb == "issue view" and f"_issue_{n}" in table:
 if verb == "issue list" and "--label" in args:
     out([{k: x for k, x in v.items() if k != "issueType"} for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))
          if flag("--label") in [l["name"] for l in v["labels"]] and v.get("state", "OPEN") == "OPEN"])
-if verb == "issue list" and "--search" in args:
-    out([{k: v[k] for k in ("number", "title", "state")} for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))])
+if verb == "issue list" and "--search" in args:  # every issue in --state (gh's default: open), the query unread, the --json fields
+    want = flag("--state") or "open"
+    out([{f: v.get(f) for f in (flag("--json") or "number,title,state").split(",")} for k, v in ((k, issue(k[len("_issue_"):])) for k in table if k.startswith("_issue_"))
+         if want == "all" or v.get("state", "OPEN").lower() == want])
+listed = re.fullmatch(r"repos/[^/]+/[^/]+/issues\?per_page=(\d+)", args[1]) if args[:1] == ["api"] and len(args) > 1 else None
+if listed:  # the REST list, no search index: every open `_issue_<N>` in REST shape, a page per per_page rows, --slurp a list of pages
+    rows = [{"number": v.get("number"), "title": v.get("title"), "body": v.get("body"), "state": "open", "user": {"login": (v.get("author") or {}).get("login")}}
+            for v in (issue(k[len("_issue_"):]) for k in table if k.startswith("_issue_")) if v.get("state", "OPEN") == "OPEN"]
+    per = int(listed.group(1))
+    pages = [rows[k:k + per] for k in range(0, len(rows), per)] or [[]]
+    out(pages if "--paginate" in args and "--slurp" in args else pages[0])
 if verb == "issue comment":
     iss = issue(n)
     iss["comments"].append({"author": {"login": viewer}, "body": body_text(), "createdAt": "2026-06-01T00:00:00Z"})
@@ -237,7 +258,7 @@ if verb == "issue reopen":
     out("")
 if verb == "issue create":
     sets = tomllib.loads(git("show", "master:.claude/ouro.toml") if origin else "").get("labels", {})
-    known = {"needs-triage", "umbrella", *sets.get("area", []), *sets.get("type", [])}
+    known = {"needs-triage", "umbrella", "idea", *sets.get("area", []), *sets.get("type", [])}
     bad = [args[k + 1] for k, a in enumerate(args[:-1]) if a == "--label" and args[k + 1] not in known]
     if bad:
         out(f"could not add label: '{bad[0]}' not found", 1)
@@ -279,7 +300,9 @@ if pr and n == str(pr["number"]):
         save("pr.json", pr)
         out("")
     if verb == "pr merge":
-        tree = git("rev-parse", f"refs/heads/{pr['head']}^{{tree}}")
+        if table.get("_merge_base_moves"):
+            move_base("merge-moved.txt")
+        tree = git("rev-parse", f"refs/heads/{'master' if table.get('_merge_tree_differs') else pr['head']}^{{tree}}")
         parent = git("rev-parse", "refs/heads/master")
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         sha = subprocess.run(["git", "--git-dir", origin, "commit-tree", tree, "-p", parent, "-m", flag("--subject") or "merge"],
@@ -325,6 +348,8 @@ if sig.startswith("api repos/") and "/actions/runs/" in args[1] and "/attempts/"
                      "runner_name": "runner-1" if started else None}]
             if raw == "matrix":  # the leg fail-fast cancelled while it queued: no steps, no runner
                 jobs.append({"name": "build (2)", "conclusion": "cancelled", "steps": [], "runner_name": None})
+            if raw == "legs":  # a second leg that ran and failed beside the first
+                jobs.append({"name": "build (2)", "conclusion": "failure", "steps": [{"name": "run"}], "runner_name": "runner-2"})
             out({"jobs": jobs})
         out({"run_attempt": k, "status": "completed" if done else c or "in_progress", "conclusion": c if done else None})
 if sig.startswith("api repos/") and "/replies" in args[1]:
@@ -342,6 +367,8 @@ if sig.startswith("api graphql"):
 
     if "issueType" in q:
         data({"repository": {"issue": {"issueType": issue(var.get("n", "1")).get("issueType")}}})
+    if "ClosedEvent{closer" in q:
+        data({"repository": {"issue": {"timelineItems": {"nodes": [{"closer": c} for c in table.get(f"_closers_{var.get('n')}", [])]}}}})
     if "userContentEdits" in q:
         page = table.get("_edits", {"": {"nodes": [], "hasNextPage": False, "endCursor": None}})[var.get("c", "")]
         data({"repository": {"issue": {"userContentEdits": {"nodes": page["nodes"], "pageInfo": {

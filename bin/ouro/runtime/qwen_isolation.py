@@ -11,7 +11,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from .process import worker_env
+from .process import DriverError, worker_env
 
 ALLOWED = ("read_file", "glob", "grep_search", "structured_output")
 SHELL = "run_shell_command"
@@ -25,12 +25,46 @@ SANDBOX = {"backend": "bwrap", "filesystem": "workspace-write", "network": "clos
 SANDBOX_DENIED = ("Bash(git push *)", "Bash(git commit *)", "Bash(gh *)")
 
 
+# Qwen Code starts a Windows hook as [ComSpec, /d, /s, /c, command] through Node without verbatim arguments, so a `"`
+# reaches cmd.exe as `\"` and no argument can be quoted: one holding whitespace, a quote or cmd.exe's own syntax
+# (% expands even inside quotes) cannot be passed at all.
+CMD_UNSAFE = frozenset(' \t\r\n"&|<>^%')
+
+
+def hook_shell(env=os.environ, windows=os.name == "nt"):
+    """The shell Qwen Code runs a command hook under, picked as it picks it: bash off Windows and where the environment
+    marks Git Bash, otherwise the ComSpec shell, `cmd` or `powershell`."""
+    if not windows:
+        return "bash"
+    term = env.get("TERM", "")
+    if env.get("MSYSTEM", "").startswith(("MINGW", "MSYS")) or "msys" in term or "cygwin" in term:
+        return "bash"
+    return "powershell" if (env.get("ComSpec") or "cmd.exe").lower().endswith(("powershell.exe", "pwsh.exe")) else "cmd"
+
+
 def hook_command(evidence, policy=None, edit=False):
-    """The hook's command line; a `policy` file also grants the shell, and with `edit` the write tools, which the hook
-    decides per call."""
-    # shortcut: POSIX-quoted, proven on Linux only; Qwen Code's Windows hook shell is cmd.exe, which this quoting does not suit.
+    """The hook's command line, quoted for the hook shell; a `policy` file also grants the shell, and with `edit` the
+    write tools, which the hook decides per call. Under cmd.exe the arguments are joined unquoted, and one cmd.exe
+    could not hand the hook unchanged is refused."""
     allowed = (*ALLOWED, *((SHELL,) if policy else ()), *(WRITES if edit else ()))
-    return shlex.join([sys.executable, str(HOOK), ",".join(allowed), str(evidence), *([str(policy)] if policy else [])])
+    argv = [sys.executable, str(HOOK), ",".join(allowed), str(evidence), *([str(policy)] if policy else [])]
+    shell = hook_shell()
+    if shell == "bash":
+        return shlex.join(argv)
+    if shell == "powershell":
+        raise DriverError("qwen: ComSpec names PowerShell, which Qwen Code would run the allow-list hook under; "
+                          "ouro quotes the hook for cmd.exe or bash only, so set ComSpec to cmd.exe")
+    for arg in argv:
+        if bad := next((c for c in arg if c in CMD_UNSAFE), None):
+            raise DriverError(f"qwen: the allow-list hook's argument {arg!r} holds {bad!r}, which cmd.exe cannot pass to "
+                              "the hook unquoted, and Qwen Code's hook launch leaves no quoting that survives; "
+                              "move it to a path without whitespace, quotes or &|<>^%")
+    return " ".join(argv)
+
+
+def hook_argv(command):
+    """The argv `command` from hook_command starts: the inverse of its quoting for this hook shell."""
+    return shlex.split(command) if hook_shell() == "bash" else command.split(" ")
 
 
 def settings_for(evidence, policy=None, edit=False, sandbox=False):

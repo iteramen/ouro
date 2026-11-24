@@ -49,7 +49,7 @@ $Bin = Join-Path $Base 'bin'
 
 $failures = 0
 function Assert-Equal($Expected, $Actual, $What) {
-    if ($Expected -eq $Actual) { Write-Host "  ok: $What" -ForegroundColor DarkGray }
+    if ($Expected -ceq $Actual) { Write-Host "  ok: $What" -ForegroundColor DarkGray }
     else { Write-Host "  FAIL: $What -- expected '$Expected', got '$Actual'" -ForegroundColor Red; $script:failures++ }
 }
 

@@ -35,8 +35,8 @@
     mode exits 1.
 
     A `.docs-freshness-ignore` file at the repo root excuses individual findings. A
-    `file: <path>` entry exempts one doc, and a bare token suppresses a repo-wide
-    suffix, both for S1 on markdown, S2 and S3. A `file:` entry that resolves to no in-scope doc,
+    `file: <path>` entry exempts one doc, matched on whole path segments, and a bare token
+    suppresses a repo-wide suffix, both for S1 on markdown, S2 and S3. A `file:` entry that resolves to no in-scope doc,
     or to several, stops the run. Each entry must carry a reason: see docs-governance
     section 8, Suppressions.
 .PARAMETER Mode
@@ -447,7 +447,7 @@ function Get-MarkdownLinkFindings {
         # A `file:` ignore entry exempts the whole file -- Test-Suppressed's token-level
         # EndsWith check can't express that, since the token here is the link target, not
         # the referencing doc's own path.
-        if ($IgnoreFiles | Where-Object { $doc -eq $_ -or $doc.EndsWith($_) }) { continue }
+        if ($IgnoreFiles | Where-Object { $doc -eq $_ -or $doc.EndsWith("/$_") }) { continue }
         $full  = Join-Path $rootFull $doc
         $docDir = Split-Path $full -Parent
         foreach ($pl in (Get-ProseLines -FullPath $full)) {
@@ -538,7 +538,7 @@ function Get-AnchorFindings {
     foreach ($doc in $Docs) {
         # A `file:` ignore entry exempts the whole file -- see the matching comment in
         # Get-MarkdownLinkFindings.
-        if ($IgnoreFiles | Where-Object { $doc -eq $_ -or $doc.EndsWith($_) }) { continue }
+        if ($IgnoreFiles | Where-Object { $doc -eq $_ -or $doc.EndsWith("/$_") }) { continue }
         $full   = Join-Path $rootFull $doc
         $docDir = Split-Path $full -Parent
         foreach ($pl in (Get-ProseLines -FullPath $full)) {
@@ -577,7 +577,7 @@ function Get-AnchorFindings {
 # in the repo that happened to share its suffix.
 #
 # A `file:` entry is validated against Docs here, at parse time, using the exact
-# `$doc -eq $entry -or $doc.EndsWith($entry)` rule the finding functions apply at scan
+# `$doc -eq $entry -or $doc.EndsWith("/$entry")` rule the finding functions apply at scan
 # time: it must resolve to EXACTLY one in-scope doc. Nothing warned before this --
 # `file: README.md` would silently exempt every README in the repo (41 of them) from
 # S1/S2/S3, and a dangling entry (its doc moved or was deleted) would silently do nothing.
@@ -595,7 +595,7 @@ function Get-IgnoreList {
             else                            { $tokens += $_ }
         }
     foreach ($entry in $files) {
-        $hits = @($Docs | Where-Object { $_ -eq $entry -or $_.EndsWith($entry) })
+        $hits = @($Docs | Where-Object { $_ -eq $entry -or $_.EndsWith("/$entry") })
         if ($hits.Count -eq 0) {
             throw "docs-freshness-ignore: 'file: $entry' resolves to no in-scope doc -- stale entry, or a typo?"
         }
@@ -655,7 +655,7 @@ function Get-CodePathFindings {
         # A `file:` ignore entry exempts the whole file -- see the matching comment in
         # Get-MarkdownLinkFindings. Originally S1/S2-only; extended here once a real entry
         # (the implementation plan, all 12 of its findings S3) needed it to actually apply.
-        if ($IgnoreFiles | Where-Object { $doc -eq $_ -or $doc.EndsWith($_) }) { continue }
+        if ($IgnoreFiles | Where-Object { $doc -eq $_ -or $doc.EndsWith("/$_") }) { continue }
         $full   = Join-Path $rootFull $doc
         $docDir = Split-Path $full -Parent
         foreach ($pl in $(if ($Html) { Get-HtmlLines -FullPath $full } else { Get-ProseLines -FullPath $full })) {

@@ -7,6 +7,8 @@ from .backends import BACKENDS, NOT_REQUIRED, UNSUPPORTED
 
 PLATFORMS = ("linux", "wsl2", "macos")  # where a harness sandbox can run; native Windows, WSL1 and the rest have none
 WSL_MARKERS = ("/proc/sys/fs/binfmt_misc/WSLInterop", "/run/WSL")
+# A route whose opt-in live qualification has not passed on its host boundary: refused until it does.
+UNQUALIFIED = {}
 
 
 def platform():
@@ -25,10 +27,12 @@ def platform():
     return "wsl2" if re.search(r"microsoft-standard|wsl2", kernel.release, re.I) else "wsl1"
 
 
-def refusal(settings, where=None):
-    """Why ship.review_sandbox = true refuses the reviewer role's backend on platform `where` (this host's by default), else None."""
+def refusal(settings, where=None, *, qualifying=False):
+    """Why ship.review_sandbox = true refuses the reviewer role's backend on platform `where` (this host's by default), else None.
+    `qualifying`: the route's own qualification asks, so an unqualified route is not refused."""
     where = where or platform()
-    backend = BACKENDS[settings.backend_of("reviewer")]
+    name = settings.backend_of("reviewer")
+    backend = BACKENDS[name]
     head = f"ship.review_sandbox = true, and the reviewer role selects {backend.label} on {where}"
     if where not in PLATFORMS:
         return f"{head}: missing a platform with a harness sandbox ({', '.join(PLATFORMS)}); native Windows and WSL1 have none"
@@ -39,4 +43,7 @@ def refusal(settings, where=None):
                 "select a backend that has one in [runtime.roles.reviewer]")
     if missing:
         return f"{head}: missing {' and '.join(missing)}, which the {backend.label} sandbox needs; install what is missing on this host"
+    if name in UNQUALIFIED and not qualifying:
+        return (f"{head}: the {backend.label} sandbox route is not qualified: {UNQUALIFIED[name]}; "
+                "select another backend in [runtime.roles.reviewer], or unset the key")
     return None

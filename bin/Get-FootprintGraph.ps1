@@ -37,7 +37,12 @@
     non-mirrored file with its own, and their count, sorted by count descending and then by number.
 
     The output is one JSON object on stdout, UTF-8, keys in this order: schema, repo, head,
-    mirrored, issues, collisions, batches, waves, unplaced, leverage. Every list is sorted, so the
+    mirrored, issues, collisions, batches, waves, unplaced, leverage. Each issue holds number,
+    title, state, footprint, unresolved and anchorOnly: the footprint files its body names only
+    inside an Anchors section (a `#` line matching `#+\s*Anchors\b` outside a fence, to the next
+    `#` line outside one, as the anchor parser scopes it), read-only evidence, not a file the
+    change writes; an inline `Doc impact on close` line there is not part of the section. Such a
+    file still links. Every list is sorted, so the
     same input gives byte-identical output whatever order the issues arrive in. An issue carrying
     both labels counts as agent-ready; an issue carrying neither is skipped with a warning on
     stderr. An issue carrying `checkpoint` keeps its footprint but links nothing, as a mirrored
@@ -188,24 +193,16 @@ try {
         $mirroredNorm = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($m in $Mirrored) { [void]$mirroredNorm.Add(($m -replace '\\', '/' -replace '^(\./)+', '')) }
 
-        $issues = [System.Collections.Generic.List[object]]::new()
-        foreach ($r in ($raw | Sort-Object { [int]$_.number })) {
-            $names = @($r.labels | ForEach-Object { "$($_.name)" })
-            $state = if ($names -icontains 'agent-ready') { 'agent-ready' } elseif ($names -icontains 'needs-ruling') { 'needs-ruling' } else { '' }
-            if (-not $state) {
-                Write-Diag "warning: issue #$($r.number) carries neither agent-ready nor needs-ruling: skipped"
-                continue
-            }
-            $body = if ($null -eq $r.body) { '' } else { "$($r.body)" }
+        function Get-BodyFootprint([string]$Body) {
             $found = [System.Collections.Generic.List[string]]::new()
             # The parser reads paths only inside backticks, so a body with none has none.
-            if ($body.Contains('`')) { foreach ($p in (Get-AnchorFindings -Text $body).Paths) { $found.Add($p) } }
-            foreach ($chunk in (Get-DocImpactText $body)) {
+            if ($Body.Contains('`')) { foreach ($p in (Get-AnchorFindings -Text $Body).Paths) { $found.Add($p) } }
+            foreach ($chunk in (Get-DocImpactText $Body)) {
                 if ($chunk.Contains('`')) { foreach ($p in (Get-AnchorFindings -Text $chunk).Paths) { $found.Add($p) } }
             }
             # The parser's path rule needs a separator, so a root-level file is read here. The body
             # holds the Doc impact text too, so one scan covers both.
-            foreach ($m in [regex]::Matches($body, '`([^`\r\n]+)`')) {
+            foreach ($m in [regex]::Matches($Body, '`([^`\r\n]+)`')) {
                 $span = $m.Groups[1].Value.Trim()
                 if ($span -match '\s') { continue }
                 $sm = [regex]::Match($span,'^([^:#]+)(?::\d+(?:-\d+)?|#.+)?$')
@@ -221,7 +218,40 @@ try {
                 }
                 $footprint.Add($p)
             }
-            $fp = Get-OrdinalSorted $footprint.ToArray()
+            Get-OrdinalSorted $footprint.ToArray()
+        }
+        # The body less its Anchors sections, scoped as Get-AnchorFindings.ps1 scopes them. An inline
+        # Doc impact line there stays: it names a file the change writes.
+        function Remove-AnchorSection([string]$Body) {
+            $kept = [System.Collections.Generic.List[string]]::new()
+            $inAnchors = $false
+            $fence = ''
+            foreach ($line in $Body -split '\r?\n') {
+                if ($line -match '^\s*(`{3,})(.*)$') {
+                    if (-not $fence) { $fence = $Matches[1] }
+                    elseif ($Matches[1].Length -ge $fence.Length -and -not $Matches[2].Trim()) { $fence = '' }
+                }
+                if ($line.StartsWith('#', [StringComparison]::Ordinal) -and -not $fence) { $inAnchors = $line -cmatch '^#+\s*Anchors\b' }
+                if (-not $inAnchors -or $line -cmatch '^Doc impact on close\b') { $kept.Add($line) }
+            }
+            $kept -join "`n"
+        }
+
+        $issues = [System.Collections.Generic.List[object]]::new()
+        foreach ($r in ($raw | Sort-Object { [int]$_.number })) {
+            $names = @($r.labels | ForEach-Object { "$($_.name)" })
+            $state = if ($names -icontains 'agent-ready') { 'agent-ready' } elseif ($names -icontains 'needs-ruling') { 'needs-ruling' } else { '' }
+            if (-not $state) {
+                Write-Diag "warning: issue #$($r.number) carries neither agent-ready nor needs-ruling: skipped"
+                continue
+            }
+            $body = if ($null -eq $r.body) { '' } else { "$($r.body)" }
+            $fp = Get-BodyFootprint $body
+            $anchorOnly = [string[]]@()
+            if ($body -cmatch '(?m)^#+\s*Anchors\b') {
+                $named = Get-BodyFootprint (Remove-AnchorSection $body)
+                $anchorOnly = [string[]]@($fp | Where-Object { $named -cnotcontains $_ })
+            }
             # A checkpoint run is read-only (contract section 3): it edits no file, so it links nothing.
             $links = if ($names -icontains 'checkpoint') { @() } else { @($fp | Where-Object { -not $mirroredNorm.Contains($_) }) }
             $issues.Add([pscustomobject]@{
@@ -230,7 +260,8 @@ try {
                 state      = $state
                 footprint  = $fp
                 unresolved = [string[]]@($fp | Where-Object { -not $tracked.Contains($_) })
-                linking    = [System.Collections.Generic.HashSet[string]]::new([string[]]@($links), [StringComparer]::Ordinal)
+                anchorOnly = $anchorOnly
+                linking   = [System.Collections.Generic.HashSet[string]]::new([string[]]@($links), [StringComparer]::Ordinal)
             })
         }
 
@@ -294,7 +325,7 @@ try {
             head       = $head
             mirrored   = Get-OrdinalSorted ([string[]]@($mirroredNorm))
             issues     = @($issues | ForEach-Object {
-                [ordered]@{ number = $_.number; title = $_.title; state = $_.state; footprint = $_.footprint; unresolved = $_.unresolved }
+                [ordered]@{ number = $_.number; title = $_.title; state = $_.state; footprint = $_.footprint; unresolved = $_.unresolved; anchorOnly = $_.anchorOnly }
             })
             collisions = $collisions.ToArray()
             batches    = $batches

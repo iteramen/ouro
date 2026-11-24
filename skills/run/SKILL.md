@@ -40,10 +40,10 @@ description: >
 3. **Relay** the driver's message and act on its exit code:
    - `0` landed, waiting on the owner's merge, or waiting on checks: say which; re-run after the
      merge or when the checks finish.
-     Pending environment-blocked validation also waits at exit 0, retaining branch and labels
-     without rebuilding or starting review. Only an explicit `--validate` runs the approved
-     pending commands in the invoking driver's context. It grants no builder permissions.
-     Exact-head receipts allow fresh resumes; changed inputs require validation again.
+   - `4` waiting on the caller: pending validation, branch and labels kept. Re-run with
+     `--validate`, or on native Linux; never loop on the same command. Only `--validate` runs
+     the approved pending commands, in the invoking driver's context, with no builder
+     permissions. Exact-head receipts allow fresh resumes; changed inputs revalidate.
    - `2` refused; relay the reason. A known board conflict names its holder and thread,
      and writes no issue comment or labels.
    - `3` stopped on a ruling, the fix-round cap or a gate nothing can run; the `**Stop:**`

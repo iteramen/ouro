@@ -37,20 +37,23 @@
     and a suffix is checked as a path (rule 1). Neither spelling counts toward the
     shape gate's one-parseable-anchor minimum.
 
-    An ANCHOR LINE is a list item, bulleted or numbered at any indent, whose first backticked
-    span passes rule 1's filters and names tracked files, each matched literally -- spelled as
-    the index spells it, or by a unique literal suffix match, and never as a pattern: one file,
-    or each expansion of a brace set in the span that resolves to one. On it, every
-    double-quoted fragment in the length bounds is grepped in those files, whatever its
-    characters, and is a miss only when none holds it; a miss is looked for once more in each
-    file's text as a reader joins it (comment leaders dropped from its lines, consecutive lines
-    of one kind joined, a blank line, a bare leader or a change between comment lines and plain
-    lines ending a run, whitespace collapsed; the fragment only collapsed, so a quote that
-    carries a leader matches on the first pass alone), and is a finding naming the file only
-    when that misses too, noted as a phrase that string concatenation may split. On every other
-    line a fragment is grepped only if it looks like code, repo-wide, and a miss holding a
-    backtick is skipped as a prose-code composite. A continuation line under an item is judged
-    by itself.
+    A backticked path is resolved wherever it stands in the body (rule 1). A double-quoted
+    fragment is grepped only on an ANCHOR LINE: a list item, bulleted or numbered at any
+    indent, under an Anchors heading, whose first backticked span passes rule 1's filters and
+    names tracked files, each matched literally -- spelled as the index spells it, or by a
+    unique literal suffix match, and never as a pattern: one file, or each expansion of a brace
+    set in the span that resolves to one. The heading is a # line outside a fence matching
+    #+\s*Anchors\b; the next # line outside a fence ends its section, as the driver's re-point
+    reads it. A fence closes only on a bare backtick run at least as long as the one that opened
+    it, so a shorter marker inside a longer fence is text. On an anchor line, every double-quoted fragment in the length bounds is grepped
+    in those files, whatever its characters, and is a miss only when none holds it; a miss is
+    looked for once more in each file's text as a reader joins it (comment leaders dropped from
+    its lines, consecutive lines of one kind joined, a blank line, a bare leader or a change
+    between comment lines and plain lines ending a run, whitespace collapsed; the fragment only
+    collapsed, so a quote that carries a leader matches on the first pass alone), and is a
+    finding naming the file only when that misses too, noted as a phrase that string
+    concatenation may split. A quote on any other line is prose and is not checked. A
+    continuation line under an item is judged by itself.
 #>
 
 function Get-AnchorFindings {
@@ -256,9 +259,9 @@ function Get-AnchorFindings {
         }
     }
 
-    # 2. Quoted fragments must literal-grep in tracked text files. A fragment quoting a
-    # source line that itself contains quotes is written with \" escapes; unescape before
-    # grepping, and count the nested quote as a code-ish char (prose does not nest quotes).
+    # 2. Quoted fragments on an anchor line must literal-grep in its cited file. A fragment
+    # quoting a source line that itself contains quotes is written with \" escapes; unescape
+    # before grepping.
     # Enclosing backticks are body markup, not source text -- strip them before grepping.
     # Quotes pair left to right; the bounds apply after the unescape. A bound in the pattern
     # leaves a phrase unpaired, lending its closing quote to the next one; the trailing \? and
@@ -274,44 +277,42 @@ function Get-AnchorFindings {
             Where-Object   { $_.Length -ge 12 -and $_.Length -le 120 } |
             ForEach-Object { $_ -replace '^`+' -replace '`+$' }
     }
-    # An anchor-shaped line -- a list item, at any indent, whose first backticked span passes
-    # rule 1's filters and resolves -- cites the tracked files its span names (one, or each
-    # expansion of a brace set that resolves), and every fragment on it is verified in them,
-    # whatever its characters: the code-like filter below guesses at prose, and on such a line
-    # the body has said what it quotes. Every other line keeps the filter and the repo-wide
-    # grep. Keyed exactly: fragments and paths are case-sensitive to the grep. A line with no
-    # quote has nothing to verify, so it is not resolved, and each candidate is resolved once.
+    # The fragments of each anchor line (help above), keyed exactly: the grep is case-sensitive.
+    # The Anchors section is scoped as bin/ouro/records.py scopes the re-point, so the two agree.
     $anchorFrags = [System.Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
     $resolved = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $inAnchors = $false
+    # The open fence's marker: only a bare backtick run at least as long closes it, so a shorter
+    # marker inside a longer fence is text.
+    $fence = ''
     # A span that expands to several candidates cites each one that resolves, and a fragment on
     # its line is dead only when none of them holds it.
-    $otherLines = foreach ($line in $Text -split '\r?\n') {
-        $files = @()
-        if ($line.Contains('"') -and $line -match '^\s*(?:[-*+]|\d+[.)])\s' -and $line -match '`([^`\r\n]+)`') {
-            $first = $Matches[1]
-            $bare = $first.Trim()
-            # A bare filename in an evidence row is not the slash-qualified path grammar.
-            # Report it before reading the quotation, even when other evidence would satisfy
-            # the shape minimum. Ordinary inline file mentions stay outside this check.
-            if ($line -match '^\s*(?:[-*+]|\d+[.)])\s+`' -and $bare -notmatch '[/\\\s":#]' -and $bare -notmatch '^[\$%<]' -and $bare -match '\.[A-Za-z0-9]{1,7}\z') {
-                $findings += "anchor path needs a directory separator: '$bare' (use './$bare' for a top-level file)"
-                continue
-            }
-            foreach ($candidate in Get-PathCandidate $first) {
-                if (-not $resolved.ContainsKey($candidate)) { $resolved[$candidate] = Resolve-AnchorPath $candidate }
-                if ($resolved[$candidate]) { $files += $resolved[$candidate] }
-            }
-            $files = @($files | Select-Object -Unique)
+    foreach ($line in $Text -split '\r?\n') {
+        if ($line -match '^\s*(`{3,})(.*)$') {
+            if (-not $fence) { $fence = $Matches[1] }
+            elseif ($Matches[1].Length -ge $fence.Length -and -not $Matches[2].Trim()) { $fence = '' }
         }
-        if (-not $files) { $line; continue }
+        if ($line.StartsWith('#', [StringComparison]::Ordinal) -and -not $fence) { $inAnchors = $line -cmatch '^#+\s*Anchors\b' }
+        if (-not ($line.Contains('"') -and $line -match '^\s*(?:[-*+]|\d+[.)])\s' -and $line -match '`([^`\r\n]+)`')) { continue }
+        if (-not $inAnchors) { continue }
+        $first = $Matches[1]
+        $bare = $first.Trim()
+        # A bare filename on an anchor line is not the slash-qualified path grammar.
+        # Report it before reading the quotation, even when other evidence would satisfy
+        # the shape minimum. Ordinary inline file mentions stay outside this check.
+        if ($line -match '^\s*(?:[-*+]|\d+[.)])\s+`' -and $bare -notmatch '[/\\\s":#]' -and $bare -notmatch '^[\$%<]' -and $bare -match '\.[A-Za-z0-9]{1,7}\z') {
+            $findings += "anchor path needs a directory separator: '$bare' (use './$bare' for a top-level file)"
+            continue
+        }
+        $files = @()
+        foreach ($candidate in Get-PathCandidate $first) {
+            if (-not $resolved.ContainsKey($candidate)) { $resolved[$candidate] = Resolve-AnchorPath $candidate }
+            if ($resolved[$candidate]) { $files += $resolved[$candidate] }
+        }
+        $files = @($files | Select-Object -Unique)
+        if (-not $files) { continue }
         foreach ($frag in Get-QuotedFragments $line) { $anchorFrags["$($files -join "`n")`n$frag"] = @(, $files) + $frag }
     }
-    $fragMatches = Get-QuotedFragments ($otherLines -join "`n") |
-        Where-Object {
-            # Only fragments that look like code: contain a code-ish char, and are not prose
-            # (prose fragments have many spaces and no code punctuation).
-            ($_ -match '[(){}\[\];=_."<>&:!]') -and -not ($_ -match '^[A-Za-z ,''-]+$')
-        } | Sort-Object -Unique -CaseSensitive
     # The file's text as a reader joins it: a run of consecutive comment lines (a leader at line
     # start; a code line that opens with a leader character reads as one too) reads as one line
     # with the leaders dropped, a run of consecutive plain lines as one; a blank line, a bare leader
@@ -357,6 +358,7 @@ function Get-AnchorFindings {
     foreach ($pair in $anchorFrags.Values) {
         $files, $frag = $pair
         $specs = @($files | ForEach-Object { ":(literal)$_" })
+        # no --max-count: git before 2.38 rejects it, and the first hit is all that is read
         $hit = if ($Ref) { git grep -F -e "$frag" $Ref -- @specs 2>$null | Select-Object -First 1 }
                else { git grep -F -e "$frag" -- @specs 2>$null | Select-Object -First 1 }
         $checkedFrags++
@@ -371,19 +373,6 @@ function Get-AnchorFindings {
         if (-not $hit) {
             # the prefix up to the quoted fragment is what the driver re-points by; the note comes after it
             $findings += "fragment no longer greps in '$($files -join "', '")': `"$frag`" (nor with lines joined; a phrase split by string concatenation is not joined)"
-        }
-    }
-    foreach ($frag in $fragMatches) {
-        # no --max-count: git before 2.38 rejects it, and the first hit is all that is read
-        $hit = if ($Ref) { git grep -F -e "$frag" $Ref 2>$null | Select-Object -First 1 }
-               else { git grep -F -- "$frag" 2>$null | Select-Object -First 1 }
-        # Interior backticks may be verbatim (docs contain literal backticks) -- trust a
-        # grep that hits. One that misses is a prose-code composite, not an anchor: skip
-        # it and do not count it, rather than flag it.
-        if (-not $hit -and $frag -match '`') { continue }
-        $checkedFrags++
-        if (-not $hit) {
-            $findings += "fragment no longer greps: `"$frag`""
         }
     }
 

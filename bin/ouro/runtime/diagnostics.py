@@ -1,6 +1,7 @@
 """Bounded metadata for runtime attempts, independent of accepted node accounting."""
 from collections import deque
 from contextlib import contextmanager
+import math
 import re
 import time
 
@@ -16,6 +17,10 @@ def identifier(value):
 
 def count(value):
     return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+
+
+def amount(value):
+    return value if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 2**63 - 1 else None
 
 
 def events(row, output):
@@ -44,10 +49,11 @@ def transport(row, output, code):
 
 
 @contextmanager
-def attempt(name, backend, model):
-    row = dict.fromkeys(("session", "input", "output", "cache_read", "cache_creation", "cost",
-                         "exit", "events", "incomplete_reason"))
-    row.update(node=identifier(name), backend=identifier(backend), model=identifier(model),
+def attempt(name, backend, model, effort=None):
+    """`effort` is the runtime.effort passed to the backend; None means the host's own settings decide it."""
+    row = dict.fromkeys(("session", "turns", "input", "output", "cache_read", "cache_creation", "cost",
+                         "exit", "events", "incomplete_reason", "advisor", "second_model"))
+    row.update(node=identifier(name), backend=identifier(backend), model=identifier(model), effort=identifier(effort),
                provider_completed=None, phase="execution", outcome="failed", failure_class=None)
     start = time.monotonic()
     try:
@@ -73,8 +79,8 @@ def file_proof(session, model, proof):
 def table():
     if not ATTEMPTS:
         return ""
-    keys = ("node", "backend", "model", "session", "elapsed_seconds", "provider_completed",
-            "input", "output", "cache_read", "cache_creation", "cost", "exit", "events",
+    keys = ("node", "backend", "model", "effort", "advisor", "second_model", "session", "elapsed_seconds", "provider_completed",
+            "turns", "input", "output", "cache_read", "cache_creation", "cost", "exit", "events",
             "phase", "outcome", "failure_class", "incomplete_reason")
     rows = ["Runtime attempt diagnostics (adapter return is not workflow acceptance):",
             "| " + " | ".join(keys) + " |", "|" + "---|" * len(keys)]

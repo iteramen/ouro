@@ -4,10 +4,11 @@ import json
 import pathlib
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
 from ouro import developer, node, sh
-from ouro.runtime import PROBE, READ, Capabilities, builder, codex, diagnostics, process
+from ouro.runtime import PROBE, READ, SANDBOXED_PROBE, Capabilities, builder, codex, diagnostics, process
 from ouro.runtime.backends import BACKENDS, CONFINED, NOT_REQUIRED, UNCONFINED, UNSUPPORTED, Backend, Interface
 
 MARKERS = {"worktree_readiness": {NOT_REQUIRED}, "validate_answer": {UNSUPPORTED},
@@ -65,10 +66,12 @@ class BackendInterfaceTests(unittest.TestCase):
                      "runtime.models.builder: Claude requires a supported alias",
                  '[runtime]\nbackend="codex"\n[runtime.models]\nbuilder="opus"':
                      "runtime.models.builder: Claude aliases cannot select Codex models",
-                 '[runtime]\nbackend="claude"\neffort="low"':
-                     "runtime.effort requires Codex and low, medium, high, xhigh or max",
+                 '[runtime]\nbackend="qwen"\neffort="low"':
+                     "runtime.effort requires Claude or Codex and low, medium, high, xhigh or max",
+                 '[runtime]\nbackend="claude"\neffort="none"':
+                     "runtime.effort requires Claude or Codex and low, medium, high, xhigh or max",
                  '[runtime]\nbackend="codex"\neffort="none"':
-                     "runtime.effort requires Codex and low, medium, high, xhigh or max",
+                     "runtime.effort requires Claude or Codex and low, medium, high, xhigh or max",
                  '[runtime]\nbackend="codex"\n[runtime.models]\nbuilder=" x"':
                      "runtime.models.builder must be a non-empty model",
                  '[runtime]\nbackend="claude"\n[runtime.models]\ntriager="gpt-example"':
@@ -85,8 +88,15 @@ class BackendInterfaceTests(unittest.TestCase):
                      "runtime.roles.reviewer.model: Claude aliases cannot select Codex models",
                  '[runtime]\nbackend="claude"\n[runtime.roles.triager]\nbackend="qwen"\nmodel="opus"':
                      "runtime.roles.triager.model: Claude aliases cannot select Qwen Code models",
-                 '[runtime]\nbackend="claude"\n[runtime.roles.builder]\neffort="high"':
-                     "runtime.roles.builder.effort requires Codex and low, medium, high, xhigh or max",
+                 '[runtime]\nbackend="claude"\n[runtime.roles.triager]\nbackend="qwen"\nmodel="m"\neffort="high"':
+                     "runtime.roles.triager.effort requires Claude or Codex and low, medium, high, xhigh or max",
+                 '[runtime]\nbackend="claude"\nadvisor="gpt-example"':
+                     "runtime.advisor must be up, opus, sonnet, haiku or fable",
+                 '[runtime]\nbackend="claude"\n[runtime.roles.builder]\nadvisor="next"':
+                     "runtime.roles.builder.advisor must be up, opus, sonnet, haiku or fable",
+                 '[runtime]\nbackend="codex"\nadvisor="up"': "runtime.advisor: Codex takes no advisor",
+                 '[runtime]\nbackend="claude"\n[runtime.roles.triager]\nbackend="qwen"\nmodel="m"\nadvisor="up"':
+                     "runtime.roles.triager.advisor: Qwen Code takes no advisor",
                  '[runtime]\nbackend="claude"\n[runtime.models]\ntriager="sonnet"\n[runtime.roles.triager]\nbackend="qwen"':
                      "runtime.models.triager: runtime.roles.triager.backend selects Qwen Code; "
                      "name its model as runtime.roles.triager.model"}
@@ -122,6 +132,130 @@ class BackendInterfaceTests(unittest.TestCase):
         self.assertEqual(steps, [{"path": ".claude/rules/x.md", "edit": "a rule"},
                                  {"path": ".codex/config.toml", "edit": '{"old": "a", "new": "b"}'}])
 
+    def test_a_claude_effort_reaches_the_argv_and_the_attempt_row_and_none_passes_no_flag(self):
+        from ouro.runtime import claude
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            return sh.R(0, json.dumps(CLAUDE_REVIEW), "", argv)
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "developer.toml"
+            path.write_text('[runtime]\nbackend="claude"\neffort="high"\n[runtime.roles.reviewer]\neffort="max"\n', encoding="utf-8")
+            pinned = developer.load(path)
+        usage = len(node.USAGE)
+        with patch.object(sh, "argv_for", side_effect=lambda *a: list(a)), patch.object(sh, "run", side_effect=run):
+            for settings in (pinned.of("builder"), developer.Settings()):
+                claude._execute("REVIEW", "p", "opus", ["Read"], ".", 5, None, {}, settings)
+            node._real("REVIEW", "p", "opus", ["Read"], ".", 5, None, pinned)
+        self.assertEqual([u["effort"] for u in node.USAGE[usage:]], ["max"], "the usage row carries the effort the call was given")
+        del node.USAGE[usage:]
+        self.assertEqual(seen[0][:8], ["claude", "-p", "--output-format", "json", "--model", "opus", "--effort", "high"])
+        self.assertEqual(seen[1], ["claude", "-p", "--output-format", "json", "--model", "opus", "--allowedTools", "Read",
+                                   "--permission-mode", "dontAsk", "--json-schema", "{}"])
+        self.assertEqual(seen[2][6:8], ["--effort", "max"], "a role's effort wins over runtime.effort")
+        row = diagnostics.ATTEMPTS[-1]
+        self.assertEqual((row["node"], row["model"], row["effort"]), ("REVIEW", "opus", "max"))
+        self.assertIn("| REVIEW | claude | opus | max |", diagnostics.table())
+
+    def test_claude_preflight_requires_effort_only_when_a_role_it_serves_sets_one(self):
+        from ouro.runtime import claude
+        help_text = " ".join(claude.FLAGS)
+
+        def preflight(settings, listed=help_text):
+            results = [sh.R(0, '{"loggedIn": true}', "", []), sh.R(0, listed, "", [])]
+            with patch.object(sh, "argv_for", return_value=["claude"]), patch.object(sh, "run", side_effect=results):
+                claude.preflight(settings)
+        preflight(developer.Settings())
+        preflight(developer.Settings(roles={"triager": {"backend": "codex", "effort": "high"}}))  # no Claude role sets one
+        for settings in (developer.Settings(effort="high"), developer.Settings(roles={"reviewer": {"effort": "max"}})):
+            with self.assertRaisesRegex(sh.DriverError, "lists no --effort; update Claude Code"):
+                preflight(settings)
+            preflight(settings, help_text + " --effort")
+
+    def test_a_claude_advisor_reaches_one_settings_argument_and_the_attempt_row(self):
+        from ouro.runtime import claude
+        seen, said = [], []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            used = {"claude-fable": {}} if argv[argv.index("--model") + 1] == "fable" else {"claude-opus": {}, "claude-fable": {}}
+            return sh.R(0, json.dumps({**CLAUDE_REVIEW, "modelUsage": used}), "", argv)
+
+        def launched(argv):
+            settings = [i for i, a in enumerate(argv) if a == "--settings"]
+            return [json.loads(argv[i + 1]) for i in settings]
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "developer.toml"
+            path.write_text('[runtime]\nbackend="claude"\nadvisor="up"\n[runtime.roles.reviewer]\nadvisor="sonnet"\n',
+                            encoding="utf-8")
+            pinned = developer.load(path)
+        usage = len(node.USAGE)
+        with tempfile.TemporaryDirectory() as d, patch.object(sh, "argv_for", side_effect=lambda *a: list(a)), \
+                patch.object(sh, "run", side_effect=run), patch.object(sh, "say", side_effect=said.append):
+            claude.execute("CHECKPOINT", "p", "opus", ["Read"], d, 5, None, {}, pinned.of("builder"))
+            claude.execute("CHECKPOINT", "p", "fable", ["Read"], d, 5, None, {}, pinned.of("builder"))
+            node._real("REVIEW", "p", "opus", ["Read"], d, 5, None, pinned)
+            claude.execute("BUILD", "p", "sonnet", builder(["python3 check.py"]), d, 5, None, {}, pinned.of("builder"))
+            claude.execute("CHECKPOINT", "p", "opus", ["Read"], d, 5, None, {}, developer.Settings())
+            node._real("CHECKPOINT", "p", "fable", ["Read"], d, 5, None, pinned)
+        del node.USAGE[usage:]
+        self.assertEqual(launched(seen[0]), [{"advisorModel": "fable"}], "up on opus is fable")
+        self.assertEqual(launched(seen[1]), [], "up on fable passes no advisor")
+        self.assertEqual(said[0], "node CHECKPOINT: runtime advisor up: fable is the top tier, so this node has no advisor")
+        self.assertEqual(launched(seen[2]), [{"advisorModel": "sonnet"}], "a role's alias is passed as written")
+        build = launched(seen[3])
+        self.assertEqual(len(build), 1, "hooks and the advisor share one --settings argument")
+        self.assertEqual((build[0]["advisorModel"], list(build[0]["hooks"])), ("opus", ["PreToolUse"]))
+        self.assertEqual(launched(seen[4]), [], "no advisor configured: the host's settings decide")
+        review, top = diagnostics.ATTEMPTS[-2], diagnostics.ATTEMPTS[-1]
+        self.assertEqual((review["node"], review["effort"], review["advisor"], review["second_model"]),
+                         ("REVIEW", None, "sonnet", True))
+        self.assertEqual((top["advisor"], top["second_model"]), (None, False))
+        self.assertIn("| REVIEW | claude | opus | unknown | sonnet | True |", diagnostics.table())
+        self.assertIn("| CHECKPOINT | claude | fable | unknown | unknown | False |", diagnostics.table())
+
+    def test_a_claude_effort_removes_the_hosts_effort_variable_and_none_leaves_it(self):
+        from ouro.runtime import claude
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(kwargs["env"])
+            return sh.R(0, json.dumps(CLAUDE_REVIEW), "", argv)
+        with patch.dict("os.environ", {"CLAUDE_CODE_EFFORT_LEVEL": "low"}), \
+                patch.object(sh, "argv_for", side_effect=lambda *a: list(a)), patch.object(sh, "run", side_effect=run):
+            for settings in (developer.Settings(effort="max"), developer.Settings()):
+                claude._execute("REVIEW", "p", "opus", ["Read"], ".", 5, None, {}, settings)
+            self.assertNotIn("CLAUDE_CODE_EFFORT_LEVEL", process.child_env(seen[0]), "--effort decides, not the host")
+            self.assertEqual(process.child_env(seen[1])["CLAUDE_CODE_EFFORT_LEVEL"], "low", "no effort: the host's stays")
+
+    def test_a_codex_effort_reaches_the_argv_and_the_attempt_row_and_none_passes_no_override(self):
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv)
+            raise sh.DriverError("captured")
+        with tempfile.TemporaryDirectory() as d, patch.object(sh, "which", side_effect=lambda n: n), \
+                patch.object(process, "run", side_effect=run):
+            for settings in (developer.Settings("codex", effort="high"), developer.Settings("codex")):
+                with self.assertRaises(sh.DriverError):
+                    codex.execute("CHECKPOINT", "p", "default", READ, d, 1, None, {}, settings)
+                self.assertEqual(diagnostics.ATTEMPTS[-1]["effort"], settings.effort)
+        self.assertIn('model_reasoning_effort="high"', seen[0])
+        self.assertEqual(seen[0][seen[0].index('model_reasoning_effort="high"') - 1], "-c")
+        self.assertFalse([a for a in seen[1] if a.startswith("model_reasoning_effort")])
+
+    def test_a_claude_envelope_turn_count_reaches_the_attempt_row_and_a_missing_one_is_unknown(self):
+        for envelope, expected in (({**CLAUDE_REVIEW, "num_turns": 7}, 7), (CLAUDE_REVIEW, None),
+                                   ({**CLAUDE_REVIEW, "num_turns": "7"}, None)):
+            usage = len(node.USAGE)
+            with self.subTest(turns=envelope.get("num_turns")), patch.object(sh, "argv_for", side_effect=lambda *a: list(a)), \
+                    patch.object(sh, "run", return_value=sh.R(0, json.dumps(envelope), "", [])):
+                node._real("REVIEW", "p", "opus", ["Read"], ".", 5, None, developer.Settings())
+                del node.USAGE[usage:]
+                self.assertEqual(diagnostics.ATTEMPTS[-1]["turns"], expected)
+        self.assertIn("| turns |", diagnostics.table())
+
     def test_claude_probe_grants_both_shells_and_denies_publishing_in_each(self):
         from ouro.runtime import SANDBOXED_PROBE, claude
         self.assertEqual(claude.tools_for(PROBE), (
@@ -143,15 +277,17 @@ class BackendInterfaceTests(unittest.TestCase):
             def execute(*args):
                 calls.append(args)
                 args[-1]["session"] = "filled-by-backend"
-                return {"finding": "x"}, "s", {}, None
+                return {"finding": "x"}, "s", {}, 0.25
             fake = dataclasses.replace(backend.interface, execute=execute)
             before, usage = len(diagnostics.ATTEMPTS), len(node.USAGE)
             with self.subTest(backend=name), patch.object(type(backend), "interface", new_callable=PropertyMock, return_value=fake):
                 node._real("CHECKPOINT", "p", "m", [], ".", 1, None, developer.Settings(name))
+            recorded = node.USAGE[-1]["cost"]
             del node.USAGE[usage:]
             self.assertEqual(len(diagnostics.ATTEMPTS), before + 1)
             row = diagnostics.ATTEMPTS[-1]
             self.assertEqual((row["backend"], row["outcome"], row["session"]), (name, "adapter_returned", "filled-by-backend"))
+            self.assertEqual((row["cost"], recorded), (0.25, 0.25))
             self.assertEqual(calls[0][7], node.SCHEMAS["CHECKPOINT"])
 
     def test_the_admits_matrix(self):
@@ -191,10 +327,18 @@ class BackendInterfaceTests(unittest.TestCase):
     def test_the_planner_contract_per_command_and_its_refusal(self):
         from ouro.run import Run
         runner = object.__new__(Run)
+        binding = {}
+        runner.env = SimpleNamespace(lookup=lambda key, default=None: binding.get(key, default))
         runner.labels, runner.flow = [], "express"
         self.assertEqual(runner.contracts(), {"triager": READ, "builder": None, "reviewer": READ})
         runner.labels, runner.flow = ["trivial"], "full"
         self.assertEqual(runner.contracts(), {"triager": READ, "builder_trivial": None, "reviewer": PROBE})
+        # ship.review_sandbox = true plans the sandboxed PROBE the review node launches with, so preflight proves that route.
+        binding["ship.review_sandbox"] = True
+        self.assertEqual(runner.contracts(), {"triager": READ, "builder_trivial": None, "reviewer": SANDBOXED_PROBE})
+        runner.flow = "express"
+        self.assertEqual(runner.contracts()["reviewer"], READ, "an express review reads, sandbox or not")
+        del binding["ship.review_sandbox"]
         runner.labels, runner.build_commands = ["checkpoint"], lambda: ("(none)", [])
         self.assertEqual(runner.contracts(), {"checkpointer": READ})
         runner.build_commands = lambda: ("- `python3 check.py`", ["python3 check.py"])
@@ -223,6 +367,9 @@ class BackendInterfaceTests(unittest.TestCase):
             node.plan(windows, {"triager": READ, "builder": None, "reviewer": PROBE})
         self.assertEqual(str(caught.exception), "preflight: role builder selects Codex, which does not admit its full "
                                                 "contract; select another backend in [runtime.roles.builder]")
+        reviewing = developer.Settings("claude", roles={"reviewer": {"backend": "codex"}})
+        with patch.object(codex, "WINDOWS", True), self.assertRaisesRegex(sh.DriverError, "does not admit its PROBE contract"):
+            node.plan(reviewing, {"reviewer": SANDBOXED_PROBE})
         self.assertEqual(node.widest(cfg), {"triager": READ, "checkpointer": None, "builder": None, "builder_trivial": None,
                                             "reviewer": PROBE})
 

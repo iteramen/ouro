@@ -327,18 +327,19 @@ class Claim:
         self.owned = None
         self.data = None
         self.path = None
-        self.noticed = False
+        self.noticed = set()
         self.terminal = False
         self.prepared = None
         if self.config and not os.environ.get(self.config.credential_env):
             say(f"Coordination off: {self.config.credential_env} is unset; this run makes no board calls.")
 
     def notice(self, cause):
-        if not self.noticed:
-            if not isinstance(cause, (str, Unavailable)):
-                cause = type(cause).__name__  # a local error's text can carry a path
-            say(f"Coordination unavailable ({self.safe(cause)}); continuing without complete board evidence.")
-            self.noticed = True
+        """Print the unavailable notice once per distinct cause, so a later board call's other cause is not hidden."""
+        if not isinstance(cause, (str, Unavailable)):
+            cause = type(cause).__name__  # a local error's text can carry a path
+        if (text := self.safe(cause)) not in self.noticed:
+            say(f"Coordination unavailable ({text}); continuing without complete board evidence.")
+            self.noticed.add(text)
 
     def safe(self, value):
         key = os.environ.get(self.config.credential_env, "")

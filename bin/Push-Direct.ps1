@@ -21,7 +21,8 @@
         forced; a non-fast-forward stops, exit 1), then origin's tip is read back and must be HEAD.
         Prints `pushed <default> to origin at <sha>`. Exit 0.
       - A pull-request requirement and no required approving review: `vehicle: pr`. The commits are
-        pushed to the branch `direct/<Issue>` with Push-Branch.ps1 (printing its `pushed` line), the
+        pushed to the branch `direct/<Issue>`, or `direct/<the head's first 12 hex digits>` with no
+        -Issue, with Push-Branch.ps1 (printing its `pushed` line), the
         local default branch returns to origin's tip (the commits live on the branch), and the
         checkout returns to it. The pull request is the caller's to open and to merge once its
         required checks are green. Exit 0.
@@ -32,7 +33,9 @@
     continue through the driver's CI-backed PR route. Gate diagnostics are prefixed data,
     separate from the publisher's vehicle/pushed/direct-checks records.
 .PARAMETER Issue
-    The issue the commits fix: names the branch under `vehicle: pr`. Required only there.
+    The issue the commits fix: names the branch under `vehicle: pr`. Optional: without it the
+    publication is issue-less, a `vehicle: pr` branch is named for the head, and the person who
+    ran it watches the default branch's CI once the commits are on it.
 .PARAMETER ExpectedHead
     If supplied, require this exact commit before planning or executing checks. Both publication
     vehicles remain pinned to the checked commit; a moved local head is never silently accepted.
@@ -200,12 +203,11 @@ function Invoke-PushDirect {
     }
     Write-Output ('direct-checks: ' + (ConvertTo-Json -InputObject $executed -Depth 10 -Compress))
     if ($prot.Pr) {
-        if (-not $Issue) { throw "$default requires a pull request, and the branch is named for the issue: pass -Issue <N>" }
         if (-not (Get-Command Invoke-PushBranch -CommandType Function).Parameters.ContainsKey('ExpectedHead')) {
             throw 'Push-Branch.ps1 lacks checked-head support; update the direct helper bundle before retrying'
         }
         Write-Output 'vehicle: pr'
-        $vehicle = "direct/$Issue"
+        $vehicle = if ($Issue) { "direct/$Issue" } else { "direct/$($head.Substring(0, 12))" }
         $exists = Invoke-Native git @('show-ref', '--verify', '--quiet', "refs/heads/$vehicle")
         if ($exists.Code -notin 0, 1) { throw 'cannot establish the local PR branch identity - nothing is pushed' }
         if ($exists.Code -eq 0) {

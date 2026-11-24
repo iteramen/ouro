@@ -135,8 +135,8 @@ otherwise.
 ### Suppressions
 
 A finding that is wrong — not a doc that is wrong — goes in the gate's ignore file, one entry per
-line with a reason. Whole-document exemptions are spelled `file: <path>`; a bare token is a
-repo-wide suffix suppression. **An entry without a reason is not a suppression, it is a
+line with a reason. Whole-document exemptions are spelled `file: <path>`, which matches whole path segments; a bare
+token is a repo-wide suffix suppression. **An entry without a reason is not a suppression, it is a
 concealment.**
 
 **It does not cover every signal.** The ignore file reaches S1 on markdown, S2 and S3 — the

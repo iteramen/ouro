@@ -198,6 +198,12 @@ class ProbeBoundaryTests(unittest.TestCase):
             with patch.object(tools.process, "run", side_effect=self.rpc(response)):
                 accepted = tools.probe_configuration(root, {"CODEX_HOME": str(root / ".codex")}, launch)
             self.assertEqual(accepted[0], response)
+            # Codex 0.171.0 reports transparent_tcp, null.
+            current = copy.deepcopy(response)
+            current["config"]["permissions"]["ouro"]["network"]["transparent_tcp"] = None
+            with patch.object(tools.process, "run", side_effect=self.rpc(current)):
+                self.assertEqual(tools.probe_configuration(
+                    root, {"CODEX_HOME": str(root / ".codex")}, launch)[0], current)
             # ConfigLayer requires name/version/config; disabledReason is optional.
             del response["layers"][0]["disabledReason"]
             with patch.object(tools.process, "run", side_effect=self.rpc(response)):
@@ -218,7 +224,8 @@ class ProbeBoundaryTests(unittest.TestCase):
                         tools.process, "run", side_effect=self.rpc(malformed)):
                     with self.assertRaisesRegex(sh.DriverError, "admission refused: layer-provenance"):
                         tools.probe_configuration(root, {"CODEX_HOME": str(root / ".codex")}, launch)
-            for mutation in ("workspace", "extra", "alias", "glob", "network", "socket",
+            for mutation in ("workspace", "extra", "alias", "glob", "network", "socket", "tcp",
+                             "network-unknown", "network-unknown-null",
                              "unknown", "origin", "version", "managed"):
                 bad = copy.deepcopy(response)
                 selected = bad["config"]["permissions"]["ouro"]
@@ -231,6 +238,10 @@ class ProbeBoundaryTests(unittest.TestCase):
                     selected["network"]["enabled"] = True
                 elif mutation == "socket":
                     selected["network"]["dangerously_allow_all_unix_sockets"] = True
+                elif mutation == "tcp":
+                    selected["network"]["transparent_tcp"] = True
+                elif mutation.startswith("network-unknown"):
+                    selected["network"]["new_field"] = None if mutation.endswith("null") else True
                 elif mutation == "unknown":
                     selected["new_field"] = None
                 elif mutation == "origin":
@@ -244,7 +255,9 @@ class ProbeBoundaryTests(unittest.TestCase):
                         tools.process, "run", side_effect=self.rpc(bad)):
                     stage = {"workspace": "selected-profile", "unknown": "selected-profile",
                              "extra": "filesystem", "alias": "filesystem", "glob": "filesystem",
-                             "network": "network", "socket": "network", "origin": "permission-origins",
+                             "network": "network", "socket": "network", "tcp": "network",
+                             "network-unknown": "network", "network-unknown-null": "network",
+                             "origin": "permission-origins",
                              "version": "layer-provenance", "managed": "layer-provenance"}[mutation]
                     with self.assertRaisesRegex(sh.DriverError, "admission refused: " + stage):
                         tools.probe_configuration(root, {"CODEX_HOME": str(root / ".codex")}, launch)

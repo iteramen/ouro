@@ -50,7 +50,8 @@
                     holding at least three such files, named for the caller to judge from the bodies.
                     One line points at Invoke-BranchSweep.ps1 for branches with no pull request.
       batch      -- the analyzer's batches, in its order, each as a `batch:` line of issue numbers, with its
-                    members' shared files and each collision a member has outside the batch. A
+                    members' shared files, a file in a member's `anchorOnly` marked
+                    `(only an anchor in #N)`, and each collision a member has outside the batch. A
                     batch is a proposed set, not a region: batches are not conflict-free, so
                     they land one after another and each build is re-checked against the
                     diff. In-flight and out-of-scope members are dropped, and the survivors split
@@ -460,7 +461,13 @@ try {
                 $printed++
                 Say "batch: $($mem -join ' ')"
                 foreach ($c in @($g.collisions)) {
-                    if ($mem -contains [int]$c.a -and $mem -contains [int]$c.b) { Say "  shared: #$($c.a) #$($c.b) on $(@($c.files) -join ', ')" }
+                    if (-not ($mem -contains [int]$c.a -and $mem -contains [int]$c.b)) { continue }
+                    $files = @(@($c.files) | ForEach-Object {
+                            $f = "$_"
+                            $only = @(@([int]$c.a, [int]$c.b) | Where-Object { @($issueBy[$_].anchorOnly) -ccontains $f })
+                            if ($only.Count) { "$f (only an anchor in $(Join-Nums $only))" } else { $f }
+                        })
+                    Say "  shared: #$($c.a) #$($c.b) on $($files -join ', ')"
                 }
                 foreach ($n in $mem) {
                     if (-not $col.ContainsKey($n)) { continue }
@@ -604,7 +611,7 @@ try {
             } elseif ($labs | Where-Object { $_ -ieq 'blocked' }) {
                 $row = @(Get-BlockedRows | Where-Object { [int]$_.number -eq $n })
                 $trig = if ($row.Count) { Get-TriggerLine $row[0] } else { '' }
-                $refs = @([regex]::Matches($trig, '(?<![\w/])#(\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+                $refs = @([regex]::Matches($trig, '(?<![\w/.-])#(\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
                 $fired = $refs.Count -gt 0 -and -not @($refs | Where-Object { -not ($listBy.ContainsKey($_) -and "$($listBy[$_].state)" -ieq 'CLOSED') }).Count
                 Say "  $(Format-Issue $n) -- blocked$(if ($fired) { ', fired' })${tail}: $(if ($trig) { $trig } else { 'no trigger line' })"
                 if ($fired) { $moves.Add("#${n}: /ouro:triage $n, needs the owner to approve the label swap") }

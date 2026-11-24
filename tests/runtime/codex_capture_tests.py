@@ -24,11 +24,8 @@ class CodexCaptureTests(unittest.TestCase):
                 def fake(argv, **kwargs):
                     settings = next(arg for arg in reversed(argv) if arg.startswith("mcp_servers="))
                     bridge = tomllib.loads(settings)["mcp_servers"]["ouro"]
-                    if home is None:
-                        self.assertNotIn("env", bridge)
-                    else:
-                        self.assertEqual(bridge["env"], {"CODEX_HOME": home})
-                    self.assertNotIn("OURO_TEST_UNRELATED_VALUE", bridge.get("env", {}))
+                    # An undeclared home is named as the developer's ~/.codex: a PROBE launch's HOME is private.
+                    self.assertEqual(bridge["env"], {"CODEX_HOME": home or str(pathlib.Path.home() / ".codex")})
                     target = pathlib.Path(argv[argv.index("--output-last-message") + 1])
                     target.write_text(json.dumps(dict(finding="ouro-ready", stop=None)), encoding="utf-8")
                     (target.parent / "tools.jsonl").write_text(json.dumps(dict(tool="read", path="readiness.txt", error=None)) + "\n")

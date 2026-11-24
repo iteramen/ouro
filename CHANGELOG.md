@@ -20,6 +20,340 @@ release takes a patch.
 
 ## [UNRELEASED]
 
+## [v1.12.0] - 2026-11-24
+
+- **Consumer contract:** `ship.review_sandbox = true` admits a Qwen Code reviewer on Linux with
+  `/usr/bin/bwrap` again: the opt-in `python3 tests/runtime/live.py --qwen-sandbox` qualification
+  passes now that the review copy's git directory is outside the copy. It was refused, naming its
+  route as not qualified. Migration: none.
+
+- The Claude preflight refuses a Claude Code whose `--help` lists no `--effort` when a role it
+  serves sets an effort, so a CLI too old for the flag fails before any write instead of at the
+  first node. The usage table adds an `effort` column, `unknown` where the host's own settings
+  decided it. The coordination-unavailable notice prints once per distinct cause. The BUILD and
+  REVIEW briefs' anchor block reads the lines the anchor gate checks: list items under an
+  `Anchors` heading, fragments of 12 characters or more. A ledger split reads the open issues
+  updated since its newest sweep mark. `docs/guide.md` states the `gh` 2.46 floor.
+
+- The developer binding takes `runtime.advisor` and `runtime.roles.<role>.advisor`: `up`, one tier
+  above the node's model in the order `haiku`, `sonnet`, `opus`, `fable` (none above `fable`, and
+  the run says so), or a Claude model alias, passed as written. The Claude backend passes it as
+  `advisorModel` in the node's single `--settings` argument; Codex and Qwen Code refuse the key.
+  Absent, the host's settings decide. The runtime attempt diagnostics add `advisor` and
+  `second_model` columns.
+
+- `bin/loop-outcomes.py` counts a publication through a direct PR vehicle in the direct
+  publications table: each merged pull request on a `direct/` head once, in the week of its merge,
+  naming an issue on `direct/<Issue>` and issue-less on `direct/<12 hex>`. A rebase-merged
+  vehicle's commits, matched by subject and author date, are no longer counted as plain pushes.
+  The pull-request fetch reads `headRefName` and each vehicle's commits; a `--from-cache`
+  `prs.json` written without them is a failed read: fetch it again.
+
+- `bin/Get-FootprintGraph.ps1` writes an `anchorOnly` list per issue: the footprint files its body
+  names only inside an Anchors section. `bin/Get-CompileProgram.ps1` marks such a file on a batch's
+  `shared:` line, `(only an anchor in #N)`, and keeps the link. Its finish intent reads a
+  blocked child's trigger by the unblock reference rule, so a `#N` right after `.` or `-` no
+  longer reads as fired.
+
+- A Qwen Code PROBE runs a glob or brace that cannot name git: `ls *.py`, `grep -E '[a-z]+' f` and
+  `echo {a,b}` are admitted. The hook still refuses any `$`, and a glob or brace word whose
+  basename, its brace sets expanded, can match `git`, `gh` or a `git-<sub>` name, `.exe` or not, and
+  a word with a quote or a backslash after an unquoted `[` or anywhere beside an unquoted `{`
+  (`git {push,"-o}"}`), and any whitespace but space and tab,
+  which bash keeps inside a word (`g[<VT>i]t push`); it refuses a
+  `GIT_CONFIG` word only in a command that names git, and reads the words a brace word expands to
+  for push and commit.
+
+- **Consumer contract:** `ship.review_sandbox = true` refuses a Qwen Code reviewer on Linux, before
+  any tracker call, naming its route as not qualified: the opt-in
+  `python3 tests/runtime/live.py --qwen-sandbox` qualification fails, because Qwen Code's
+  `workspace-write` sandbox lets the node write into the review copy's `.git`. It was admitted
+  wherever `/usr/bin/bwrap` exists. The qualification itself still runs. Migration: select another
+  reviewer backend in `[runtime.roles.reviewer]` (Claude or Codex), or unset the key.
+
+- **Consumer contract:** `bin/Push-Direct.ps1` publishes with no issue. Under a pull-request
+  requirement without `-Issue` it pushes its vehicle branch as `direct/<12-character head sha>`
+  instead of stopping with exit 1; with `-Issue <N>` the branch stays `direct/<N>`. The person who
+  ran an issue-less publication watches default-branch CI after it; the driver's lane, which always
+  passes `-Issue`, is unchanged. Migration: none for the driver; a caller that relied on the stop to
+  require an issue must check for one itself.
+
+- `bin/loop-outcomes.py` prints a direct-publications table after the quality table: per ISO week,
+  each first-parent default-branch commit whose subject ends in no `(#PR)` and that is no pull
+  request's merge commit, split into those with a `Fixes` line and the issue-less rest.
+
+- The driver checks that a bug fix's test rows fail on the code before the fix. On a run whose
+  issue carries the `bug` label, with `ship.test_first_for_bugs = true`, it puts every changed
+  file outside `ship.test_paths` back to its `origin/<default>` version in a scratch copy of the
+  head and runs each selected gate whose `paths` hold a changed test file there, the checks' own
+  gates included. One must go red, and the record names it; all green is a fix-round finding,
+  and in the direct lane a fallback to the ordinary pull-request flow, whose fix round answers it. A
+  diff that changes no test file, or no file outside the test paths, skips the check, and the
+  record says which.
+  **Consumer contract:** `ship.test_first_for_bugs` and `ship.test_paths` were read by nothing;
+  the driver now reads both. Migration: a binding that sets `test_first_for_bugs = true` checks
+  that its `test_paths` name the test files its gates' `paths` hold, or drops the key.
+
+- A Claude or Codex PROBE review node launches with a home of its own: `HOME`, `USERPROFILE` and
+  `XDG_CONFIG_HOME` name an empty directory private to the launch, so a plain `git push` that keeps
+  every credential override no longer sends a matching `~/.netrc` entry, and `~/.git-credentials`,
+  `~/.config/gh` and `~/.gitconfig` resolve to nothing there. A raw `ssh` ignores `HOME` and still
+  reads the account's `~/.ssh` from the password database. The harness's own state
+  is found past it. A declared `CLAUDE_CONFIG_DIR` is passed on; with none, the Claude launch
+  leaves it unset, because a set one moves Claude Code's global `.claude.json` into `~/.claude`,
+  and gives the home a link to `~/.claude` (a directory junction on Windows) and a copy of
+  `~/.claude.json`. `CODEX_HOME` is the declared value or `~/.codex`, which the Codex MCP bridge now
+  always receives. Whether the harness login survives it is unproved on macOS and Windows.
+
+- Under `ship.review_sandbox = true`, a Qwen Code reviewer's preflight launches its PROBE live
+  call under Qwen Code's tool execution sandbox, with the settings the review node uses, and
+  accepts it only when the transcript shows the listed command ran. A host where the sandboxed
+  route cannot run a granted command now fails preflight, before any tracker write, not at REVIEW.
+
+- On Windows, the Qwen Code allow-list hook's command is built for the shell Qwen Code runs it
+  under: POSIX-quoted under Git Bash, and unquoted under cmd.exe, which Qwen Code's hook launch
+  leaves no quoting for. The Qwen Code worker and the `--cli qwen` reader refuse before launch,
+  naming the path, when the Python interpreter, the plugin or the temporary directory holds
+  whitespace, a double quote or one of `&|<>^%`, and when `ComSpec` names PowerShell.
+
+- `bin/Test-DocsFreshness.ps1` matches a `file:` ignore entry on whole path segments: `file:
+  README.md` exempts `docs/README.md` and not `xREADME.md`. A bare token keeps its suffix match.
+  **Consumer contract:** an entry that named only the tail of a file name resolved to that doc;
+  it now stops the run as resolving to no in-scope doc. Migration: write the entry as the doc's
+  path, or as its trailing path segments.
+
+- Each developer picks their own reviewer in a `[review]` table of the developer binding:
+  `reviewer` (`adversarial-review`, `external-audit` or `copilot`), `external_cli`,
+  `external_model` and `external_effort`, each with the values of the `ship.*` key it stands for.
+  A key left unset keeps the repository's value. `reviewer = "none"` is refused: a developer cannot
+  opt out of review. `copilot` still needs `ship.copilot_bot_id` in the repository binding. The run's
+  bind line names the reviewer and its source, and the pull request record notes a reviewer the
+  developer binding selected. `ship.review` is optional; with neither, the reviewer is
+  `adversarial-review`.
+  **Consumer contract:** `bin/ouro-binding.py check` required `ship.review`, and a developer
+  binding admitted only `[runtime]`, `[coordination]` and `[followup]`. Now `ship.review` may be
+  absent, and the developer binding admits `[review]`. Migration: none; an existing binding and
+  developer file read as before.
+
+- `templates/ouro.toml.example` shows a commented `[[ship.person]]` entry under `[ship]`: a login
+  with its own `policy` and `unattended_classes`.
+
+- `[ship]` admits `test_paths`, a non-empty list of globs naming the repository's test files.
+  `bin/ouro-binding.py check` refuses `ship.test_first_for_bugs = true` without it, an empty
+  list, a blank entry, and an entry that is not a string. `docs/binding.md` no longer claims a BUILD-node
+  test-first rule; the driver's base check, above, reads both keys.
+  **Consumer contract:** `[ship]` admitted no `test_paths`, and `check` accepted
+  `test_first_for_bugs = true` alone; it now refuses that. Migration: a binding that sets
+  `test_first_for_bugs = true` adds `test_paths` naming its test files, or drops the key.
+
+- A redraw of the pull request body keeps a `## ` section a person added under a heading the driver
+  does not draw, in its order and before `## Follow-up`, so the REVIEW brief reads it and a later
+  body update leaves it on the pull request: an `## Acceptance` section that records a hand-run
+  acceptance now reaches the reviewer. The redraw keeps only the text the person wrote: the drawn
+  text under no heading of its own (the Verification block, the part, `Fixes` and `Review:` lines)
+  is redrawn from the current record and appears once, wherever the person put their heading,
+  inside the Verification block included: a heading there is kept with the lines the person wrote
+  under it, before `## Follow-up`.
+
+- `Watch-PullRequestChecks.ps1 -Pr` waits up to ten minutes for the head's `pull_request` run
+  when a workflow at the default branch names `pull_request`, as it does for a push run a filter
+  selects, so a run missing from the list by commit for its first minute no longer stops
+  `ouro run` with a driver error. A pull request that reads CONFLICTING after the first minute
+  with no run still stops then; with no workflow naming `pull_request` the stop still comes after
+  a minute. The stop for a run that never shows, and the script's help, say ten minutes.
+
+- A landing that closes an issue triages each open `blocked` issue whose `**Unblocks when:**`
+  first line names it, in number order, after the queue's anchors are refreshed, and prints one
+  line per issue with its verdict; a triage that fails is reported on its line and the landing
+  still succeeds.
+
+- A `needs-ruling` triage question on an anchor line whose fragment no longer greps in a file that
+  is still tracked carries the full replacement anchor line the TRIAGE node proposes, posted only
+  when every quoted fragment on it greps in that file at the tip; otherwise the question says no
+  replacement was found. Triage never edits the line: whoever answers the question applies it.
+
+- Triage clears a fired `**Unblocks when:**` trigger before its node grades the issue: when the
+  body's first line names exactly one issue, by the unblock reference rule of
+  `bin/Get-CompileProgram.ps1`, and that issue is closed as completed, or closed by a pull request
+  whose merge commit is on the default branch, and the text right after the reference, less an
+  optional `part <k>`, starts with one of `lands`, `landed`, `has landed`, `merges`, `is merged`,
+  `closes`, `is closed`, `ships` or `has shipped`, ignoring case, the driver deletes the line in a
+  body edit before the `**Triage**` comment, which names the line and the evidence. Prose, several
+  references, an open issue, one closed as not planned, and a line whose named issue has landed
+  but whose wording waits for something more stay blocked; for that last one the comment says the
+  issue has landed and the line does not say only that it lands, so the owner clears it once its
+  event has happened. A failed read of the issue leaves the line and the comment says so.
+
+- The REVIEW answer's `residue` entries carry an `index`, the item's 1-based position in the
+  record's `## Follow-up` list, and the driver ties each route to the item that position names,
+  so a reworded entry keeps its `ledger` or `idea` route instead of being filed as an `issue`.
+  An entry whose index is outside the list or repeats an earlier one, and an item no entry
+  routes, are listed in the `**Follow-ups filed**` comment as well as printed; an unrouted item
+  is still filed as an `issue`.
+- Under `ship.validation = "ci"` the BUILD node is now granted each gate with `paths` the pull
+  request's checks run, notice gates excepted, with the note local validation gives it: run it
+  when the change touches those paths. The brief no longer lists that gate among the CI-owned
+  commands, so a builder that edits a suite, or the code it covers, sees it run before the push.
+  A gate without `paths` the checks run, and a gate another workflow runs, stay CI-owned. The
+  checks remain the proof: a builder's run proves nothing, and a granted gate it reports as
+  `validation_pending` waits on the checks alone.
+
+- Under `ship.validation = "ci"` the BUILD node is now granted every gate the binding marks
+  `cheap`, with the note local validation gives it, and the brief no longer lists that gate among
+  the CI-owned commands, so a seconds-long check runs before the first push. The pull request's
+  checks remain the proof for a cheap gate they run.
+  A `validation_pending` request for a gate the checks run whose paths the diff does not touch
+  now waits on nothing, since nothing requires that gate, and the record shows it as awaiting
+  nothing.
+
+- Every leftover of a landing now gets one of four routes before the merge: `fix-now`, `issue`,
+  `idea` or `ledger`, each with a `reason`
+  (empty, `own-change`, `data-loss`, `wrong-place`, `breaks-gate`, `misleads-run` or
+  `open-decision`). The REVIEW node routes each L finding and, in a new `residue` list of its
+  answer, each residue item of the pull request record. The fix-now round opens only when a
+  `fix-now` item carries a reason; the round is handed the record's other `fix-now` items too, and
+  may fix a trivial bug in a file the change does not touch, as long as the commit keeps the flow
+  class. The record's fix-now line names the paths that commit touched outside the change's own
+  files. The FOLLOW-UP node is handed each item with the route it is filed under, which the run
+  prints whenever it differs from the review's: an `issue` with no reason is `ledger`, an item with
+  no route is `issue`, and a `fix-now` item no round fixed is `issue` with a reason and `ledger`
+  without one. The BUILD node no longer lists as residue a trivial thing in the lines it changes.
+
+- The FOLLOW-UP node now writes the issue for each leftover and decides nothing else: the driver
+  numbers the items it hands the node, the node answers one entry per number (`item`, `title`,
+  `body`, `labels`), and the driver files every item under the route it read, whatever the node
+  answers, with the item's own text where the node wrote none. An `issue` is filed with
+  `needs-triage`, an `idea` as its own issue with the `idea` label and no other state label, and a
+  `ledger` item is appended to the area's `Cleanup: <area>` ledger even when the node titles it
+  otherwise, and an `issue` or `idea` item the node titles as a ledger is titled with its own text.
+  Each entry of the `**Follow-ups filed**` comment names its route as `(route: <route>)`.
+
+- The quality table of `bin/loop-outcomes.py` gains a `Follow-up issues`, `Issues per landing`,
+  `Follow-up ideas` and `Ledger lines` column, between the turns and the flake columns: per
+  landing week, the entries the newest `**Follow-ups filed**` comment of each landed pull request
+  lists as filed, read as the driver reads it (its author the job token's bot or an approver, its
+  bullets before any `Not filed` line), counted by the `(route: <route>)` tag each entry carries, before any note on dead anchors. An
+  entry with no route, from a comment written before routes, is a ledger line when it files,
+  appends to or reopens a `Cleanup` ledger, and an issue otherwise. A landing with no such comment
+  counts 0.
+
+- A low review finding about the change itself is now fixed in its pull request instead of being
+  filed. When the standing verdict is CLEAN and its record holds `fix-now` findings (routed as the
+  first entry of this section says), `ouro run` hands them to one BUILD before the merge
+  decision; the commit is pushed, the checks run on it and the REVIEW node verifies it. The round runs once per change, does not count toward
+  the five fix rounds, and the pull request record names it in a line of its own, so the `Review:`
+  line's `rounds` and the weekly quality table do not count it. An H or M fix round is handed the
+  `fix-now` findings of the record it answers instead. A fix-now commit that would raise the
+  change's flow class is not pushed: the reviewed head merges and its findings are filed. A
+  `fix-now` finding the verification still finds, any new L finding, and the other findings of the
+  record the round answered go to the FOLLOW-UP node. A landing that takes the
+  round, and had no other fix round, runs the pull request's checks once more.
+
+- The pull request record's usage rows now carry each node call's turn count, `unknown` where the
+  backend's usage carries none, and they accumulate across invocations by session: a
+  resume that runs a fix BUILD or a later REVIEW round keeps the earlier rows, and the FOLLOWUP
+  node's row is added after the merge. The quality table of `bin/loop-outcomes.py` gains a
+  `BUILD turns`, `REVIEW turns` and `FOLLOWUP turns` column, before the flake columns: the median
+  and total of the node's known counts, with the unknown ones apart. A pull request whose record
+  holds no usage rows, as every one drawn before this release, counts as unknown.
+
+- A triage SPLIT of a cleanup ledger now files the children itself, in the same command. It
+  files each child with `needs-triage`, posts the `**Sweep** at <sha>` mark on the ledger naming
+  them, and triages each child with a fresh TRIAGE node. A child the ledger triage asks a question
+  about is posted NEEDS-RULING with that question, and a child's own SPLIT is left to the owner,
+  so nothing recurses. A write that fails partway is a driver error that names the children
+  already filed, and a re-triage of the ledger resumes it: the open `Part of #<N>` children
+  already filed stand for their comments, so no child is filed twice. The ledger's verdict comment ends with the line that the driver files the
+  children. A SPLIT of any other issue still leaves the children to the owner.
+  **Consumer contract:** `ouro triage <N>` on a ledger SPLIT wrote the verdict and left the
+  children to the owner; it now files and triages them. Migration: stop filing a ledger's
+  children by hand, and run `ouro triage <N> --dry-run` first to read the bodies and the sweep
+  mark it would post.
+- The triage skill's description and its relay step say what a cleanup-ledger SPLIT does in the
+  same command: it files the children, posts the sweep mark naming them and triages each child.
+  The session relays the filed child numbers, the sweep mark and each child's verdict, and, when
+  the split stops partway, the children the driver error names as already filed.
+
+- A full-flow run no longer watches the default branch's push runs on the merge commit when the
+  pull request was merged at a green head, the merged tree is that head's and the base did not
+  move (the merge commit's first parent is an ancestor of that head): it prints one line saying
+  the watch is skipped and why, then cleans up and files follow-ups. The head is green when the
+  run merged it itself once its checks passed, or, for the owner's merge a resumed run reads,
+  when the pull request's checks re-read at its head show one passed and none outside pass or
+  skipping. Any other merge, and one whose checks cannot be read, is watched as before. On a
+  skipped landing a push-only workflow is not watched.
+
+- The TRIAGE brief gains a section of closed issues that may be the same work. The driver
+  searches closed issues for each distinctive identifier in the body's code blocks (a camelCase
+  or snake_case name; type and encoding names such as `UINT32` or `utf8` are not searched) and
+  for the title less a leading tag of at most three words and a colon. For each hit it lists the
+  closed date, the merged pull requests that close it (by a closing reference to its number or
+  URL, or by its own closing event, which covers a sidebar link), each merge commit, whether the
+  commit is on the default branch, and the earliest release tags that contain it, with their
+  dates. Hits found by more searches come first, and the brief names the hits and identifiers it
+  cut. A search that fails reads as unknown in the brief, never as none.
+- Triage gains a `DUPLICATE` verdict, whose `duplicate_of` names a closed issue from that
+  section. The driver accepts it only when that issue is in the section's list, is closed when
+  read again, and has a merged pull request closing it whose merge commit is on the default
+  branch; any other is a driver error naming the failed condition. An accepted one moves the
+  issue to `needs-ruling` with the question "Close as a duplicate of #N?" and the lookup's lines
+  for that issue; the driver closes nothing. A report filed after a release tag held the fix gets
+  a comment on whether the reporter ran such a build, and a question asking for the version when
+  the body names none.
+- The anchor parser and the driver's re-point close a code fence only on a bare backtick run at
+  least as long as the one that opened it, so a shorter marker, or one with an info string, inside
+  a fence is text. An `Anchors` heading in a code block inside a longer fence no longer opens an
+  `Anchors` section, and a quoted fragment under it is not grepped.
+- The anchor parser greps a double-quoted fragment only on an anchor line: a list item under the
+  body's `Anchors` heading whose first backticked span names a tracked file, the section scoped
+  as the driver's re-point scopes it, where a `#` line inside a fence is no heading. Every other double-quoted
+  string in an issue body or a `-Doc` file is prose and is not checked, so a quoted person,
+  phrase, error message or test name no longer comes back as a dead anchor. A backticked path is
+  still resolved wherever it stands. The anchor gate, the shape gate, triage and the run's verify
+  step read the same parser, and their help text and the shape gate's no-anchor message say so.
+  **Consumer contract:** a quoted fragment on a list item citing a file was grepped in that file
+  wherever the item stood, and a code-looking quote on any other line was grepped repo-wide; now
+  only the first is checked, and only under an `Anchors` heading. A body that anchors inline
+  with no `Anchors` heading keeps its path checks and loses its fragment checks. Migration: move
+  the anchor lines whose quotes should be verified under an `## Anchors` heading; a quote meant
+  as prose needs no rewrite.
+
+- The contract no longer gives a dispatch a 100-turn budget, and the reviewer prompt no longer
+  tells a REVIEW node about one: nothing enforced it, and the node's wall-clock timeout stays the
+  bound. A reviewer whose run ends early still lists what it did not finish under UNTESTED. The
+  runtime attempt diagnostics record a Claude node's turn count from its `num_turns`, and show
+  `unknown` where the envelope has none.
+
+- The Claude backend takes `runtime.effort` and `runtime.roles.<role>.effort` (`low`, `medium`,
+  `high`, `xhigh` or `max`) and launches `claude -p` with `--effort <level>`; with no effort set it
+  passes none, and the host's Claude Code settings decide as before. The runtime attempt
+  diagnostics record each node's effort beside its model, `unknown` where none was passed.
+
+- Under `ship.validation = "ci"`, the PR record and the REVIEW brief no longer present a
+  CI-covered `validation_pending` request as outstanding once the declared checks have succeeded
+  at the head: it moves to `validation_met`, naming the head and the checks, and one the checks
+  have not proved yet is marked as awaiting them. A request BUILD recorded on an earlier commit
+  no longer draws the same false-record finding every review round. Caller requests are
+  unchanged.
+
+- `ouro run N` exits 4 when it waits on pending validation that only `ouro run N --validate`, or
+  a native Linux host, clears: the `waiting for validation` returns, `execution unavailable`
+  and `requires a supported lifecycle boundary` included. A wait on checks or a merge still
+  exits 0, so a rerun loop that treats 0 as "still waiting" no longer spins on a wait re-running
+  the same command cannot clear.
+  **Consumer contract:** `ouro run` exited 0 on a pending-validation wait; it now exits 4.
+  Migration: a caller that loops on exit 0 handles 4 by invoking `ouro run N --validate`, or by
+  stopping and reporting the wait.
+
+- A binding may declare extra acceptance runner prefixes in `ship.acceptance_runners`, such as
+  `["cargo ", "make "]`. `ouro run` and `ouro triage` grant a command that starts with one
+  exactly as they grant one that starts with a built-in runner, in an Acceptance section and in
+  an `Acceptance command:` field, so a repository whose toolchain is not on the built-in list
+  can name a targeted test as acceptance without wrapping it in `bash -c`. A prefix is matched
+  as written, adds no shell grammar, and `check` refuses one that is empty, whitespace only, or
+  holds a character the single-command grammar rejects. Older readers refuse the unknown key,
+  so update the ouro pin before declaring it.
+
 ## [v1.11.3] - 2026-11-17
 
 - A heading inside a fenced code block opens no Acceptance, Tests or Verification section, so

@@ -77,6 +77,16 @@ def probe_env(probe, gh_config, inherited=None):
             "GIT_SSH_COMMAND": NO_IDENTITY_SSH, "GH_CONFIG_DIR": str(gh_config)}
 
 
+def private_home(scratch):
+    """A Claude or Codex PROBE launch's home: an empty directory under `scratch`, so curl inside git finds no
+    `~/.netrc` and `~/.git-credentials`, `~/.config/gh` and `~/.gitconfig` resolve to nothing. A raw `ssh` ignores
+    HOME and still reads the account's `~/.ssh` from the password database. This puts nothing in it: the caller
+    finds the harness's own state past it, through the harness's own variable or what it places in the home."""
+    home = Path(scratch) / "home"
+    home.mkdir()
+    return {"HOME": str(home), "USERPROFILE": str(home), "XDG_CONFIG_HOME": str(home / ".config")}
+
+
 def check_platform():
     """Caller validation needs a lifecycle boundary, independent of command environment."""
     if os.name == "nt":

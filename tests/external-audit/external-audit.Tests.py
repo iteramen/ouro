@@ -85,7 +85,8 @@ def check(what, cond):
 # happened to pick, the way `codex exec -o <FILE>` would; STUB_EXIT is the exit code (default 0).
 # STUB_STDERR, if set, is written to the stub's stderr, and STUB_STDERR_FILL, if set, is a count of
 # filler lines written after it (an environment variable cannot carry a large stderr). STUB_HOOK_TOOLS,
-# if set, runs the allow-list hook command from the qwen system settings once per tool it names.
+# if set, runs the allow-list hook command from the qwen system settings once per tool it names,
+# split by hook_argv from the ouro package under STUB_OURO_ROOT, as the hook shell would split it.
 # STUB_REQUIRE_FILE_STDOUT, if set, exits 9 unless stdout is a regular file; STUB_PARTIAL, if set, is
 # written to stdout and flushed before the sleep. The driver
 # reads the stub's exit code only when no verdict parses: a nonzero exit with no reply is what "the
@@ -110,11 +111,13 @@ if os.environ.get("STUB_REQUIRE_FILE_STDOUT"):
         sys.exit(9)
 hook_tools = os.environ.get("STUB_HOOK_TOOLS")
 if hook_tools is not None:
-    import shlex, subprocess
+    import subprocess
+    sys.path.insert(0, os.environ["STUB_OURO_ROOT"])
+    from ouro.runtime.qwen_isolation import hook_argv
     with open(os.environ["QWEN_CODE_SYSTEM_SETTINGS_PATH"], encoding="utf-8") as f:
         command = json.load(f)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     for tool in filter(None, hook_tools.split(",")):
-        subprocess.run(shlex.split(command), input=json.dumps({"tool_name": tool, "tool_input": {}}), text=True, capture_output=True)
+        subprocess.run(hook_argv(command), input=json.dumps({"tool_name": tool, "tool_input": {}}), text=True, capture_output=True)
 fork_record = os.environ.get("STUB_FORK_CHILD_RECORD")
 if fork_record:
     child_pid = os.fork()
@@ -1425,7 +1428,7 @@ def qwen_events(text, denied=(), is_error=False):
 
 def run_qwen(reply, hook_tools="read_file", extra=None, args=QWEN_BASE_ARGS, driver=DRIVER):
     stub_dir, record, env_extra = make_stub(name="qwen", reply_text=reply, record_stdin=True)
-    env_extra.update(QWEN_ENDPOINT, STUB_HOOK_TOOLS=hook_tools, **(extra or {}))
+    env_extra.update(QWEN_ENDPOINT, STUB_HOOK_TOOLS=hook_tools, STUB_OURO_ROOT=str(DRIVER.parent), **(extra or {}))
     return run_driver(args, stub_dir, env_extra, cwd=REPO, driver=driver), record
 
 
@@ -1516,6 +1519,46 @@ else:
     r, record = run_qwen(QWEN_APPROVE, extra={"OPENAI_API_KEY": ""})
     check("an unset OPENAI_API_KEY is refused before qwen starts, naming it",
           r.returncode == 1 and "set OPENAI_API_KEY in the launch environment" in r.stderr and not record.exists())
+    r, record = run_qwen(QWEN_APPROVE, extra={"OPENAI_MODEL": ""})
+    check("under --model default an unset OPENAI_MODEL is refused before qwen starts, naming it",
+          r.returncode == 1 and "set OPENAI_MODEL in the launch environment" in r.stderr and not record.exists())
+    r, record = run_qwen(QWEN_APPROVE, extra={"OPENAI_MODEL": ""}, args=[*QWEN_BASE_ARGS, "--model", "named-model"])
+    check("control: with --model naming one, an unset OPENAI_MODEL is no refusal", r.returncode == 0 and record.exists())
+
+    # The hook shell stands in for Windows: the driver runs in a child with qwen_isolation.hook_shell patched.
+    shell_harness = PARENT_TMP / "qwen_shell_harness.py"
+    shell_harness.write_text('''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("external_audit_under_test", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+shell = sys.argv[2]
+mod.QwenAdapter()._isolation().hook_shell = lambda *a, **k: shell
+sys.argv = [sys.argv[1], *sys.argv[3:]]
+sys.exit(mod.main())
+''', encoding="utf-8")
+    spaced = PARENT_TMP / "with space"
+    spaced.mkdir()
+    # The hook's argv starts with the interpreter and the hook script: a host path holding one of these is named first.
+    host_clean = not any(c in ' \t"&|<>^%' for c in sys.executable + str(DRIVER.resolve().parent))
+    for shell, tmp in (("powershell", PARENT_TMP), ("cmd", spaced)):
+        r, record = run_qwen(QWEN_APPROVE, extra={"TEMP": str(tmp), "TMP": str(tmp), "TMPDIR": str(tmp)},
+                             args=[str(DRIVER), shell, *QWEN_BASE_ARGS], driver=shell_harness)
+        shell_sdir = session_dir_of(r.stdout)
+        evidence = str(shell_sdir / "hook.jsonl") if shell_sdir else ""
+        reason = ("qwen: ComSpec names PowerShell" if shell == "powershell"
+                  else f"argument {evidence!r} holds ' ', which cmd.exe cannot" if host_clean else "which cmd.exe cannot")
+        check(f"under a {shell} hook shell the qwen reader refuses before launch with the driver's reason, writes no system.json and starts nothing",
+              r.returncode == 1 and "qwen could not be prepared - " in r.stderr and reason in r.stderr and "nothing started" in r.stderr
+              and "Traceback" not in r.stderr and shell_sdir is not None and (shell == "powershell" or " " in str(shell_sdir))
+              and not (shell_sdir / "system.json").exists() and not record.exists())
+    r, record = run_qwen(QWEN_APPROVE, extra={"TEMP": str(spaced), "TMP": str(spaced), "TMPDIR": str(spaced)},
+                         args=[str(DRIVER), "bash", *QWEN_BASE_ARGS], driver=shell_harness)
+    shell_sdir = session_dir_of(r.stdout)
+    # Not the verdict: on Windows the stub splits the hook command by the host's own hook shell, which is not bash.
+    check("control: the same harness under a bash hook shell, in the spaced session directory, writes system.json and starts qwen",
+          "could not be prepared" not in r.stderr and shell_sdir is not None
+          and (shell_sdir / "system.json").exists() and record.exists())
     code, _ = dry_argv("qwen", "--effort", "max")
     check("qwen has no effort route: --effort max is refused", code == 1)
 

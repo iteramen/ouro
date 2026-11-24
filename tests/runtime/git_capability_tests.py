@@ -898,7 +898,7 @@ class GitCapabilityTests(unittest.TestCase):
             tree=SimpleNamespace(path=self.root, changed=lambda: [], git=lambda *a, **kw: sh.R(0, "", "", [])), verify=lambda **kw: None,
             build_commands=lambda: ("python3 check.py", ["python3 check.py"]),
             build_facts=lambda: {
-                "validation_results": [], "validation_attempts": []}, evidence_lines=lambda: "",
+                "validation_results": [], "validation_attempts": []}, evidence_lines=lambda: "", ci_mode=lambda: False,
             verification=lambda *a: "", part_scope=lambda *a: "", spec_comments=lambda: "",
             setup_tree=Mock(side_effect=AssertionError("setup before readiness")))
         for operation, name in ((lambda: driver.Run.checkpoint(fake), "checkpoint"),

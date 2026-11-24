@@ -5,6 +5,7 @@ first state not yet reached; optional board metadata caches only claim correlati
 asked only at the CHECKPOINT, BUILD, REVIEW and FOLLOWUP nodes (TRIAGE is `triage N`'s); everything else is a call to
 a script under bin/ or to git/gh.
 """
+import fnmatch
 import json
 import os
 import posixpath
@@ -19,20 +20,22 @@ from pathlib import Path
 
 from . import briefs, developer, execution, node, progress, sh, validation, worktrees
 from .acceptance import (acceptance_commands, acceptance_declarations, acceptance_problems, acceptance_text, declared_source,
-                         empty_list)
+                         empty_list, part_body, runners)
 from .coordination import Claim
 from .records import (
     BUILD_LINE, FIX_CAP, MIN_TIME, ORDER, PENDING_MARK, RELEASE_NOTES, body_line, derive_flow, derive_size,
-    drawn_body, failure_extract, filed_follow_ups, is_copilot, may_merge, needs_fix, newest_trusted_triage,
-    outside, parse_direct, parse_parts, pending_follow_ups, pending_json, read_record, reader_findings,
-    release_notes, restamped, review_comment, review_line, review_plan, review_records, sev, ship_policy, slugify,
-    tighter, unchanged_findings, when, without_build_lines)
+    drawn_body, failed_gates, failure_extract, filed_follow_ups, filing_route, finding_key, fix_now, is_copilot, may_merge, needs_fix, newest_trusted_triage,
+    outside, parse_direct, parse_parts, pending_follow_ups, pending_json, pinned_residue, read_record, reader_findings, reason,
+    REPO_POLICY, release_notes, residue_route, restamped, review_comment, review_line, review_plan, review_records, routed_residue, sev, ship_policy, slugify,
+    stands, tighter, unchanged_findings, untied_routes, usage_rows, when, with_usage, without_build_lines)
 from .runtime import SANDBOXED_PROBE, review_sandbox
 from .runtime.process import worker_env
 from .runtime.tools import caller_source_writable
 from .sh import DriverError, Refused, Stopped, argv_for, say, script
 
 MODE = {"express": "light", "standard": "sized", "full": "probe"}
+CI_EVIDENCE_LINE = ("\nEvery check in the record's *Repository CI validation evidence* list below concluded with success at "
+                    "the head under review. `gh` is unavailable to this node, so that list is the evidence to check a CI claim against.")
 STOP_REASONS = ("review cap", "open decision", "dead anchor", "gate uncovered", "acceptance unrunnable")
 DOCS_EXT = (".md", ".txt", ".rst", ".adoc", ".png", ".jpg", ".jpeg", ".gif", ".svg")  # what a docs-only diff may hold: nothing a reader probes
 BAD_RUN = re.compile(r"(\d+):(failure|cancelled|timed_out|action_required|startup_failure|stale)")
@@ -74,10 +77,79 @@ def refuse_unsandboxed(env):
         raise Refused(why)
 
 
+def reviewer(env):
+    """({ship key: value} for the review and its reader, whose reviewer): the developer binding's [review] over [ship], key by
+    key, and adversarial-review when neither names one. Refuses a reviewer the repository cannot serve."""
+    mine = getattr(env.runtime, "review", None) or {}
+    keys = {k: mine.get(k, env.lookup(f"ship.{k}")) for k in ("review", "external_cli", "external_model", "external_effort")}
+    keys["review"] = keys["review"] or "adversarial-review"
+    shown = ("review", "external_cli") if keys["review"] == "external-audit" else ("review",)  # the keys reviewer_label names
+    whose = "the developer binding" if any(k in mine for k in shown) else REPO_POLICY if env.lookup("ship.review") else "the default"
+    if keys["review"] == "copilot" and not env.lookup("ship.copilot_bot_id"):
+        raise Refused(f"{whose} selects reviewer copilot, which needs ship.copilot_bot_id in the repository binding")
+    if keys["review"] == "external-audit" and not keys["external_cli"]:
+        raise Refused(f"{whose} selects reviewer external-audit with no reader: set review.external_cli in the developer binding or ship.external_cli")
+    return keys, whose
+
+
+def reviewer_label(keys):
+    return f"{keys['review']} ({keys['external_cli']})" if keys["review"] == "external-audit" else keys["review"]
+
+
+def own_body(run):
+    """The issue body as the run reads its acceptance: a checklist part's run without the other parts' sections and fields."""
+    return part_body(run.body, getattr(run, "k", None))
+
+
 def acceptance_source(run):
-    """Only explicit fields in approved spec comments extend the body's grants."""
-    comments = getattr(run, "spec_amendments", lambda: [])()
-    return declared_source(run.body, [command for comment in comments for command in acceptance_declarations(str(comment.get("body") or ""))])
+    """Only explicit fields in approved spec comments extend the body's grants; a checklist part reads its own and the shared ones alone."""
+    comments, part = getattr(run, "spec_amendments", lambda: [])(), getattr(run, "k", None)
+    return declared_source(own_body(run),
+                           [command for comment in comments for command in acceptance_declarations(str(comment.get("body") or ""), part)])
+
+
+def granted_acceptance(run):
+    """The acceptance commands BUILD is granted: the acceptance source's spans that start like a runner the binding admits."""
+    return acceptance_commands(acceptance_source(run), runners(run.env))
+
+
+def copy_git_dir(copy):
+    """A scratch copy's git directory: its sibling under scratch, outside the copy, so a sandbox that grants the copy
+    writable misses it."""
+    return copy.with_name(copy.name + ".git")
+
+
+def new_copy(copy):
+    """Create a scratch copy and its git directory, neither existing before: `remove_copy` deletes what this created."""
+    copy.mkdir()
+    try:
+        copy_git_dir(copy).mkdir()
+    except OSError:
+        copy.rmdir()
+        raise
+
+
+def remove_copy(copy, what):
+    """Delete a scratch copy and its git directory, saying which was not removed."""
+    for path in (copy, copy_git_dir(copy)):
+        try:
+            # Git writes its objects read-only, which Windows will not delete.
+            shutil.rmtree(path, onexc=lambda remove, p, _: (os.chmod(p, stat.S_IWRITE), remove(p)))
+        except OSError as ex:
+            say(f"  the {what} {path} was not removed: {ex}")
+
+
+def finding_line(f):
+    """A finding, or a residue item the review routed, as a fix brief lists it, a `fix-now` one marked so."""
+    head = (f"- residue: {f.get('item')}" if "item" in f
+            else f"- {sev(f)} {f.get('file')}:{f.get('line')} {f.get('claim')} ({f.get('evidence')})")
+    return head + (" [fix-now]" if fix_now(f) else "")
+
+
+FIX_NOW_BRIEF = ("A fix-now round, outside the five fix rounds: the review read the change CLEAN, and these L findings and "
+                 "residue items are defects or gaps in the change, or trivial bugs next to it, that need no decision. Fix "
+                 "each, in a file the change does not touch too when that is where it is. A fix-now commit that raises "
+                 "the change's Flow class (contract section 4) is not pushed, and its items are filed instead.\n")
 
 
 # ---- the run ----------------------------------------------------------------------------------
@@ -94,6 +166,9 @@ class RunOptions:
 
 
 class Run:
+    fix_now_refused = None  # this invocation's fix-now round whose commit raised the flow class: the branch holds no trailer for it
+    HELD = "ouro-usage-before-draft.json"  # in the worktree's git directory: usage rows no record holds yet
+
     def __init__(self, env, n, part_arg, options):
         self.env, self.n, self.part_arg, self.options = env, n, part_arg, options
         self.gated = set()
@@ -143,7 +218,8 @@ class Run:
             raise Refused(f"#{self.n} is not a checklist deliverable: no --part")
         self.flow = flow if flow in ORDER else "standard"
         self.size = body_line(self.body, "Size") or "M"
-        self.primary, self.copilot = review_plan(self.env.lookup("ship.review"), self.size)
+        self.review_keys, self.review_whose = reviewer(self.env)
+        self.primary, self.copilot = review_plan(self.review_keys["review"], self.size)
         suffix = f"-p{self.k}" if self.k else ""
         areas = self.env.lookup("labels.area", []) or []
         types = self.env.lookup("labels.type", []) or []
@@ -165,8 +241,23 @@ class Run:
         line = [p for p in parse_parts(self.body) if p[0] == self.k][0][2]
         head = f"## Part {self.k}/{self.parts_n}\n\nThis run is part {self.k}/{self.parts_n}: {line}\n\n"
         if node == "build":
-            return head + "Build this part only. Every other part is out of scope: each lands in its own pull request.\n\n"
+            return head + ("Build this part only. Every other part is out of scope: each lands in its own pull request. "
+                           "The issue's other parts are not residue: each one's checklist box already records it.\n\n")
         return head + "A gap that another part's acceptance covers is not a finding against this change.\n\n"
+
+    def own_residue(self, residue):
+        """BUILD's residue less each item that opens with another part of this issue: its checklist box holds that work."""
+        if not self.k:
+            return residue
+        other = re.compile(rf"Part (\d+)/{self.parts_n} of #{self.n}(?!\d)")
+        kept = []
+        for x in residue:
+            m = other.match(str(x).lstrip())
+            if m and int(m[1]) != self.k and 1 <= int(m[1]) <= self.parts_n:
+                say(f"  dropped residue {' '.join(str(x).split())[:120]!r}: part {m[1]}/{self.parts_n} of #{self.n} is its own checklist part, not a leftover")
+            else:
+                kept.append(x)
+        return kept
 
     def fixes_line(self):
         """A pull request body's own line that fixes the issue, or carries the part this run takes."""
@@ -207,8 +298,8 @@ class Run:
         return paths
 
     def manual_known(self):
-        """The manual paths so far: the planned ones, then those the branch's commits already carry."""
-        known = self.manual_paths()
+        """The manual paths so far: the planned ones a hook refuses here, then those the branch's commits already carry."""
+        known = [p for p in map(self.protected_path, self.manual_paths()) if p]
         if self.commits_past_base():
             known += [m["path"] for m in self.build_facts(evidence=False)["manual"] if m["path"] not in known]
         return known
@@ -274,8 +365,8 @@ class Run:
         if denied:
             say(f"  denied configuration paths: {', '.join(denied)}: manual steps")
         for p in self.manual_paths() + denied:
-            p = self.protected_path(p) or p
-            if p not in [s["path"] for s in steps]:
+            p = self.protected_path(p)  # a planned path no hook refuses here is the builder's to edit, not a step
+            if p and p not in [s["path"] for s in steps]:
                 steps.append({"path": p, "edit": ""})
         return steps
 
@@ -397,7 +488,9 @@ class Run:
         if coordination:
             e.git("fetch", "origin", check=False)
         policy, _, whose = ship_policy(e)
-        say(f"[1] bind: {e.slug}, default branch {e.default}, policy {policy} from {whose}, review {e.lookup('ship.review')}")
+        say(f"[1] bind: {e.slug}, default branch {e.default}, policy {policy} from {whose}, review {reviewer_label(self.review_keys)} from {self.review_whose}")
+        if self.review_whose == "the developer binding":
+            self.notes.append(f"Reviewer: {reviewer_label(self.review_keys)}, selected by the developer binding's [review].")
         if published and published[2] == "revert":
             self.in_lane, self.tree = True, worktrees.Tree(e, e.main, self.branch)
             return self.lane_revert_stop(published[0], published[1])
@@ -420,7 +513,7 @@ class Run:
                 self._note(lane="pr")
             self.require_acceptance()
             if not self.build_commands()[1] and not self.ci_commands(selected=False):
-                self.stop_issue("gate uncovered", empty_list(self.body), 3)
+                self.stop_uncovered()
         else:
             say("[2] verify: skipped, the run already has a branch or a pull request")
             if not (pr and pr["state"] == "MERGED"):
@@ -467,7 +560,9 @@ class Run:
         return {"triager": node.READ, self.build_role(): None, "reviewer": self.review_contract()}
 
     def review_contract(self):
-        return node.PROBE if self.flow in ("standard", "full") else node.READ
+        if self.flow not in ("standard", "full"):
+            return node.READ
+        return SANDBOXED_PROBE if self.env.lookup("ship.review_sandbox") is True else node.PROBE
 
     def branch_exists(self):
         e = self.env
@@ -731,7 +826,24 @@ class Run:
         return int(self.tree.git("rev-list", "--count", f"origin/{self.env.default}..HEAD").out.strip() or 0)
 
     # ---- the drive loop (transitions 4-9)
+    def held_path(self):
+        return self.tree.path / self.tree.git("rev-parse", "--git-path", self.HELD).out.strip()
+
+    def held_usage(self):
+        """The usage rows of earlier invocations that ended before the draft opened, which no record holds yet."""
+        p = self.held_path()
+        return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
+
     def drive(self, pr, *, resumed=True):
+        """The drive loop; until a draft opens to record them, its usage rows are kept in the worktree's git directory."""
+        self.drafted = pr is not None
+        try:
+            return self.drive_loop(pr, resumed=resumed)
+        finally:
+            if not self.drafted and self.tree.path.is_dir():
+                self.held_path().write_text(json.dumps(usage_rows(node.USAGE, self.held_usage())), encoding="utf-8")
+
+    def drive_loop(self, pr, *, resumed=True):
         e = self.env
         if pr:
             self._note(pr=pr["number"])
@@ -753,7 +865,7 @@ class Run:
                 continue
             records = self.records(pr)
             pending = self.build_facts(evidence=False)["validation_pending"]
-            covered = self.ci_commands()
+            covered = self.ci_commands(selected=False)  # selected: the checks prove it; unselected: nothing requires it
             pending = [p for p in pending if p["cmd"] not in covered]
             if pending:
                 validation.requests(pending, self.validation_commands())
@@ -762,12 +874,12 @@ class Run:
                     if failure is not None:
                         say(f"waiting for validation: invoke `ouro run {self.n}"
                             + (f" --part {self.k}" if self.k else "") + " --validate`")
-                        return 0
+                        return 4
                 else:
                     results, failure = validation.validate(self.tree, pending, self.wait_hint, reuse=True)
                     if failure == 75:
                         say("waiting for validation: execution unavailable; no owner ruling or fix round")
-                        return 0
+                        return 4
                     if failure is not None:
                         failed = results[-1]
                         tail = failure_extract(Path(failed['log']).read_text(encoding="utf-8", errors="replace"))
@@ -778,18 +890,21 @@ class Run:
             inputs = self.check_inputs(head)
             if inputs == 75:
                 say("waiting for validation: execution requires a supported lifecycle boundary")
-                return 0
+                return 4
             if inputs is not None:
                 raise Refused("execution evidence requires clean tracked/untracked inputs; preserve and resolve the worktree edits")
             at_head = [r for r in records if r["sha"] == head]
             self.caller_execution_results = results if pending else []
             if head not in self.gated:
+                if finding := self.base_check(head):
+                    self.fix_round(finding, records, red=True)
+                    continue
                 red = self.run_gates(head)
                 if red == 75:
                     say(f"waiting for validation: invoke `ouro run {self.n}"
                         + (f" --part {self.k}" if self.k else "")
                         + " --validate`; execution requires a supported lifecycle boundary")
-                    return 0
+                    return 4
                 self.gated.add(head)
                 if red:
                     self.fix_round(f"gate `{red[0]}` exited {red[1]}; evidence {red[3]}; the failure in its log:\n{red[2]}", records, red=True)
@@ -797,7 +912,7 @@ class Run:
             inputs = self.check_inputs(head)
             if inputs == 75:
                 say("waiting for validation: execution requires a supported lifecycle boundary")
-                return 0
+                return 4
             if inputs is not None:
                 raise Refused("execution evidence requires clean unchanged inputs after driver gates; preserve and resolve the worktree edits")
             if self.ci_mode():
@@ -810,6 +925,8 @@ class Run:
                 if pr is None:
                     pr = self.open_pr(head)
                 state = self.checks(pr, head)
+                if state == "conflict":
+                    self.sync_and_push(records)
                 if state in ("fix", "conflict"):
                     continue
                 if state != "green" or not self.check_ci(pr, head):
@@ -839,10 +956,12 @@ class Run:
                 if needs_fix(last):
                     if same := unchanged_findings(records):  # the fix moved nothing of it: a third round would re-raise it again
                         self.stop_issue("open decision", f"Verification round {last['round']} re-raised unchanged what round {last['round'] - 1} raised, so the fix moved nothing of it:\n\n"
-                                        + "\n".join(f"- {sev(f)} {f.get('file')}:{f.get('line')} {f.get('claim')} ({f.get('evidence')})" for f in same)
+                                        + "\n".join(finding_line(f) for f in same)
                                         + f"\n\nRule on the finding: fix it by hand on the branch, or dismiss it with a ruling; then `agent-ready` back in place of `needs-ruling`, and `ouro run {self.n}` verify it as any fix round.", 3)
-                    self.fix_round("\n".join(f"- {sev(f)} {f.get('file')}:{f.get('line')} {f.get('claim')} ({f.get('evidence')})"
-                                             for f in last["findings"]), records, record_ok=True)
+                    self.fix_round("\n".join(finding_line(f) for f in last["findings"] + [x for x in last.get("residue") or [] if fix_now(x)]),
+                                   records, record_ok=True)
+                    continue
+                if self.fix_now_round(pr, head, records, last):
                     continue
             if pr is None:
                 pr = self.open_pr(head)
@@ -873,8 +992,11 @@ class Run:
         """Express reviews the local range before any push: the draft opens at convergence."""
         return self.flow == "express" and bool(self.primary) and not any(r["sha"] == head and not needs_fix(r) for r in records)
 
+    def stop_uncovered(self):
+        self.stop_issue("gate uncovered", empty_list(own_body(self), runners(self.env)), 3)
+
     def require_acceptance(self):
-        problems = acceptance_problems(acceptance_source(self), self.validation_commands())
+        problems =acceptance_problems(acceptance_source(self), self.validation_commands(), runners(self.env))
         if problems:
             self.stop_issue("acceptance unrunnable", "Required acceptance cannot be granted as written:\n\n"
                             + "\n".join("- " + problem for problem in problems)
@@ -886,7 +1008,7 @@ class Run:
         """Stop before the push when an acceptance command only the pull request's checks may run has no gate this diff selects:
         the BUILD node is not granted it, and CI skips a gate whose paths the change does not touch."""
         skipped = self.ci_commands(selected=False) - self.ci_commands()
-        unproved = [cmd for cmd in acceptance_commands(acceptance_source(self)) if cmd in skipped]
+        unproved = [cmd for cmd in granted_acceptance(self) if cmd in skipped]
         if unproved:
             paths = {run: g.get("paths") or [] for run, g in self.bound_gates(tree=False) if run in unproved}
             self.stop_issue("acceptance unrunnable", "Required acceptance is run only by the pull request's checks, and this change "
@@ -900,7 +1022,7 @@ class Run:
         if stop:
             reason = "acceptance unrunnable" if isinstance(stop, dict) and stop.get("reason") == "acceptance unrunnable" else "open decision"
             self.stop_issue(reason, self.stop_text(stop), 3)
-        required = set(acceptance_commands(acceptance_source(self))) - self.ci_commands(selected=False)
+        required = set(granted_acceptance(self)) - self.ci_commands(selected=False)
         refused = [str((denial.get("tool_input") or {}).get("command") or "")
                    for denial in ans.get("_denied") or [] if isinstance(denial, dict)]
         ran = set()
@@ -918,32 +1040,33 @@ class Run:
     def build_commands(self):
         """(the brief's command list, the commands the node may run): contract section 4's Gates bullet."""
         covered = self.ci_commands(selected=False)
-        runnable = [cmd for cmd in acceptance_commands(acceptance_source(self)) if cmd not in covered]
+        runnable = [cmd for cmd in granted_acceptance(self) if cmd not in covered]
         lines = [f"- `{c}` (acceptance)" for c in runnable]
         for run, g in self.bound_gates(tree=not self.in_lane):
             if self.in_lane and not (g.get("cheap") is True or g.get("direct_code_check") is True):
                 continue  # Inline publication has the trusted minimal floor, not the full BUILD suite.
-            if run in covered:
-                continue
             if g.get("cheap") is True:  # whatever the checks run: it needs no toolchain, so every build runs it
                 lines.append(f"- `{run}` (cheap: run it on every build)")
                 runnable.append(run)
                 continue
+            if run in covered and not g.get("paths"):
+                continue  # one with paths is granted by them, as in local mode; a notice is dropped below; the checks stay the proof
             paths, here = g.get("paths"), self.locally_run(run, g) or not self.env.pr_checks()
             if (self.notice(g) and self.env.pr_checks()) or not (here or paths):
                 continue
             when = f" (run it when the change touches: {', '.join(paths)})" if paths and not here else ""
             lines.append(f"- `{run}`{when}")
             runnable.append(run)
-        if covered:
+        owned = sorted(covered - set(runnable))  # a granted gate stays covered: the checks remain its proof
+        if owned:
             lines.append("CI-owned commands (do not run locally or report as gates_run; local toolchain absence or denial is expected, "
                          "not an owner ruling; successful configured CI is still required):\n"
-                         + "\n".join(f"- `{cmd}`" for cmd in sorted(covered)))
+                         + "\n".join(f"- `{cmd}`" for cmd in owned))
         return "\n".join(lines) or "(none: the pull request's checks are the run)", runnable
 
     def required_execution(self):
         """Recompute obligations from trusted grants and final changed paths, including resumed heads."""
-        commands = acceptance_commands(acceptance_source(self))
+        commands = granted_acceptance(self)
         if self.ci_mode():
             commands += [cmd for cmd, gate in self.bound_gates(tree=False)
                          if gate.get("cheap") is True and self.locally_run(cmd, gate)
@@ -971,14 +1094,15 @@ class Run:
     def validation_commands(self):
         """Approval comes from the invoking binding, never from a BUILD-edited branch binding."""
         here = not self.env.pr_checks()  # no workflow names pull_request: the BUILD brief grants every selected gate
-        return acceptance_commands(acceptance_source(self)) + sorted(self.ci_commands(selected=False)) + [run for run, g in self.bound_gates(tree=False) if g.get("cheap") is True
+        return granted_acceptance(self) + sorted(self.ci_commands(selected=False)) + [run for run, g in self.bound_gates(tree=False) if g.get("cheap") is True
                 or (here or not self.notice(g)) and (here or self.locally_run(run, g) or g.get("paths"))]
 
-    def build(self, findings=None, threads=None, track=True, record_ok=False, red=False):
+    def build(self, findings=None, threads=None, track=True, record_ok=False, red=False, fix_now_record=None):
         """Ask the BUILD node and commit what it left; None when a Copilot round declined every thread and changed nothing.
 
         `record_ok`: a review's fix round may change no file, since its findings may be the record's sentences; any other build must change the tree.
-        `red`: the fix round of a red validation command or gate, whose unchanged tree is an `open decision` stop, not a driver error."""
+        `red`: the fix round of a red validation command or gate, whose unchanged tree is an `open decision` stop, not a driver error.
+        `fix_now_record`: the fix-now round's record, which the commit's trailer carries so the cap and a resume tell that commit apart."""
         e = self.env
         if not self.in_lane:
             self.require_acceptance()
@@ -991,7 +1115,7 @@ class Run:
         self.execution_grants = list({json.dumps(row, sort_keys=True): row
                                       for row in [*(previous or []), *self.bound_gates()]}.values())
         if not self.in_lane and not gates and not self.ci_commands(selected=False):
-            self.stop_issue("gate uncovered", empty_list(self.body), 3)
+            self.stop_uncovered()
         contract = briefs.contract_sections(e, (4, 7))
         prompt = briefs.render("build", number=self.n, title=self.title, body=self.body, part=self.part_scope("build"),
                                comments=self.spec_comments(), manual=self.manual_block(), anchors=briefs.anchors_block(self.tree.path, self.body),
@@ -999,7 +1123,7 @@ class Run:
                                commands=cmds, findings=findings or "(none)", contract=contract)
         tools = node.builder(gates)
         model = self.build_model()
-        say(f"[4] BUILD node ({model})" + (" fix round" if findings else ""))
+        say(f"[4] BUILD node ({model})" + (" fix-now round" if fix_now_record else " fix round" if findings else ""))
         ans = node.run_node("BUILD", prompt, model, tools, str(self.tree.path), node.TIMEOUTS["BUILD"], runtime=e.runtime,
                             role=self.build_role())
         observations = (node.USAGE[-1].get("tool_calls", []) if node.USAGE
@@ -1025,9 +1149,10 @@ class Run:
                 self.no_change(findings, red)
             say("  no file changed: the record rides an empty commit" + (", with the manual steps" if steps else ""))
         msg = subject + "\n\n" + without_build_lines(str(ans.get("body") or "")) + "\n" + (f"\nFixes #{self.n}\n" if self.in_lane else "")
-        facts = {"door": ans.get("door") or "", "blast_radius": ans.get("blast_radius") or "", "residue": ans.get("residue") or [],
+        facts = {"door": ans.get("door") or "", "blast_radius": ans.get("blast_radius") or "", "residue": self.own_residue(ans.get("residue") or []),
                  "gates_run": [g for g in ans.get("gates_run") or [] if isinstance(g, dict) and g.get("cmd")],
-                 "manual": steps, "replies": self.thread_replies(ans, threads) if threads else []}
+                 "manual": steps, "replies": self.thread_replies(ans, threads) if threads else [],
+                 **({"fix_now": fix_now_record} if fix_now_record else {}), **({"sync": True} if self.rebasing() else {})}
         if pending:  # an answer without the field keeps the footer it always wrote
             facts["validation_pending"] = pending
         if self.in_lane:
@@ -1052,7 +1177,8 @@ class Run:
 
     def stage(self):
         """`git add -A`. A sync's stopped rebase is then finished, each commit keeping its message and author, so the
-        BUILD record rides a commit of its own; a rebase that stops again is the second conflict."""
+        BUILD record rides a commit of its own (a replayed commit the resolution empties is dropped, as git's merge backend
+        does on --continue); a rebase that stops again is the second conflict."""
         e = self.env
         self.tree.git("add", "-A")
         if self.rebasing():
@@ -1092,7 +1218,7 @@ class Run:
             if size != "S":
                 self.add_note(f"Size tightened from S to {size}: the diff has {why}.")
                 self.size = size
-                self.primary, self.copilot = review_plan(e.lookup("ship.review"), size)
+                self.primary, self.copilot = review_plan(self.review_keys["review"], size)
             elif self.primary == "reader" and self.docs_only(derived):  # nothing a reader's probe could run
                 self.add_note("The diff is docs-only (no path the driver reads as executable), so the external reader is skipped: Review: none.")
                 self.primary, self.reader_skipped = None, True
@@ -1106,9 +1232,14 @@ class Run:
         say(f"  {sentence}")
         self.notes.append(sentence)
 
+    def fix_rounds_spent(self):
+        """A fix is a commit past the first build's, so the rounds already taken are read from the branch; the fix-now commit is none,
+        and neither is a rebase sync's resolution record, which a merge sync's uncounted merge commit stands for."""
+        shas = self.tree.git("rev-list", "--no-merges", f"origin/{self.env.default}..HEAD").out.split()
+        return max(0, len(shas) - 1 - sum(1 for s in shas if (f := self.commit_facts(s)).get("fix_now") or f.get("sync")))
+
     def fix_round(self, findings, records, record_ok=False, red=False):
-        """A fix is a commit past the first build's, so the rounds already taken are read from the branch."""
-        done = max(0, int(self.tree.git("rev-list", "--count", "--no-merges", f"origin/{self.env.default}..HEAD").out.strip() or 0) - 1)
+        done = self.fix_rounds_spent()
         if done >= FIX_CAP:
             pr = self.find_pr()
             where = (f"the branch `{self.branch}` and pull request #{pr['number']} stay as they are, with the review record. A fix commit pushed to the branch"
@@ -1121,6 +1252,47 @@ class Run:
             if not self.docs_only(derive_flow(self.tree.changed(), gate_files)):
                 self.add_note("A fix added a path the driver reads as executable, so the external reader is back on.")
                 self.primary, self.reader_skipped = "reader", False
+
+    def fix_now_taken(self, pr):
+        """The change's one fix-now round, once it ran: its commit's trailer on the branch, else a refusal this invocation
+        or the pull request's record holds; {} before it."""
+        return (self.build_facts(evidence=False).get("fix_now")
+                or (read_record(pr.get("body") or "").get("fix_now") if pr else None) or {})
+
+    def fix_now_round(self, pr, head, records, last):
+        """The standing CLEAN record's `fix-now` findings and residue items to one BUILD before the merge decision (contract
+        section 7); False when none is due. Only an item with a reason opens the round; one with none rides along. An item an
+        H or M fix round was handed, or one a verification re-raises, opens no round."""
+        if last.get("verdict") != "CLEAN" or self.fix_now_taken(pr):
+            return False
+        handed = {finding_key(f) for r in records if needs_fix(r) for f in r["findings"] + (r.get("residue") or []) if fix_now(f)}
+        due = [f for f in last["findings"] + (last.get("residue") or []) if fix_now(f) and not stands(f) and finding_key(f) not in handed]
+        if not any(reason(f) for f in due):
+            return False
+        lines = [finding_line(f) for f in due]
+        say(f"[7] fix-now round: {len(due)} leftover(s) of review round {last['round']} to the BUILD node, outside the {FIX_CAP} fix rounds")
+        grants, gate_files = self.execution_grants, set(self.env.ob.gate_paths({"gate": self.gate_entries()}))
+        record = {"round": last["round"], "findings": lines}
+        self.build(findings=FIX_NOW_BRIEF + "\n".join(lines), record_ok=True, fix_now_record=record)
+        raised = tighter(self.flow, derive_flow(self.tree.changed(), gate_files))
+        if raised == self.flow:
+            say(f"  the fix-now commit keeps the flow class {self.flow}: the checks run on it and the REVIEW node verifies it")
+            return True
+        beyond = self.outside_paths(head, "HEAD")
+        self.tree.git("reset", "-q", "--hard", head)
+        self.execution_grants = grants
+        self.fix_now_refused = {**record, "kept": False, "why": f"the commit raised the flow class from {self.flow} to {raised}", "outside": beyond}
+        say(f"  the fix-now commit raises the flow class from {self.flow} to {raised}: not pushed; the branch stays at the "
+            f"reviewed head {head[:7]}, and its findings go to the FOLLOW-UP node")
+        if pr:
+            self.refresh_body(pr, records)
+        return True
+
+    def outside_paths(self, before, after):
+        """The paths `after` changed past `before` that the change's own diff at `before` does not touch."""
+        own, touched = ({p for p in self.tree.git("diff", "--name-only", "-z", *a).out.split("\0") if p}
+                        for a in ((f"origin/{self.env.default}...{before}",), (before, after)))
+        return sorted(touched - own)
 
     # ---- gates
     def ci_mode(self):
@@ -1141,9 +1313,14 @@ class Run:
                                   "update the owner's invoking binding before resuming")
             raise DriverError(f"CI gate coverage changed: the branch's HEAD ({self.tree.head()[:7]}) holds [[gate]] entries other than "
                               f"{base}'s and the invoking binding's; CI covers no gate a branch adds or changes")
-        return {cmd for cmd, gate in self.bound_gates(tree=False)
-                if not self.locally_run(cmd, gate)
-                and (not selected or not gate.get("paths") or self.tree.touches(gate["paths"]))}
+        return {cmd for cmd, gate in self.ci_covered(self.bound_gates(tree=False))
+                if not selected or not gate.get("paths") or self.tree.touches(gate["paths"])}
+
+    @staticmethod
+    def ci_covered(gates):
+        """The (run, gate) pairs declared CI validation covers before a diff selects among them: every gate the checks run.
+        Triage reads it too, so its empty-list note fires only where the run stops with `gate uncovered`."""
+        return [(cmd, gate) for cmd, gate in gates if not Run.locally_run(cmd, gate)]
 
     def check_ci(self, pr, head, commands=None):
         """Whether the PR's fresh checks cover `commands` (default: the CI-covered gates) at `head`; the run keeps that evidence."""
@@ -1160,18 +1337,25 @@ class Run:
     def gate_entries(self, tree=True, rev="HEAD"):
         """The [[gate]] entries of the binding at the tree's HEAD (or `rev`), as CI reads them; the main checkout's when `tree` is off, or there is no worktree yet (a dry run), or the commit has none. `tree` may name another Tree.
 
-        During a sync's conflict HEAD is the pre-sync tip (a merge) or the base plus the commits replayed so far (a rebase), so the sync's index entry stands for the result; a binding that is itself conflicted has none, and the check waits for the sync's commit."""
+        During a sync's conflict HEAD is the pre-sync tip (a merge) or the base plus the commits replayed so far (a rebase), so the sync's index entry stands for the result; a binding that is itself conflicted has none, and the check waits for the sync's commit. A rebase's index lacks the gates of the commits it has not replayed yet, so the gates the branch adds are added: those of the pre-rebase tip (git's `orig-head`) whose run neither the index nor the tip's merge-base with the rebase's `onto` holds, which leaves out a gate the base has since removed or renamed."""
         tree = self.tree if tree is True else tree
         live = tree and tree.path.is_dir()
-        if live and rev == "HEAD" and (tree.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0 or self.rebasing(tree)):
+        state = self.rebasing(tree) if live and rev == "HEAD" else None
+        if live and rev == "HEAD" and (tree.git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).code == 0 or state):
             rev = ""  # `:path` is the index's stage-0 entry
         r = tree.git("show", f"{rev}:.claude/ouro.toml", check=False) if live else None  # the commit's, not the file's: a sync conflict leaves markers in the file
         if r is None or r.code != 0:
             return list(self.env.data.get("gate", []))
         try:
-            return self.env.ob.tomllib.loads(r.out).get("gate", [])
+            gates = self.env.ob.tomllib.loads(r.out).get("gate", [])
         except ValueError as x:
             raise DriverError(f"the .claude/ouro.toml at {rev or 'the sync index'} cannot be read: {x}")
+        if state:
+            tip = (state / "orig-head").read_text(encoding="utf-8").strip()
+            fork = tree.git("merge-base", tip, (state / "onto").read_text(encoding="utf-8").strip()).out.strip()
+            runs = {g.get("run") for g in gates + self.gate_entries(tree, rev=fork)}
+            gates += [g for g in self.gate_entries(tree, rev=tip) if g.get("run") not in runs]
+        return gates
 
     def bound_gates(self, tree=True):
         """Every [[gate]], `<ouro>` replaced by the plugin root: its paths, never the issue's labels, decide whether a change runs it."""
@@ -1223,8 +1407,55 @@ class Run:
             return self.settled_gates(head, chosen, skipped)
         if ci:  # an acceptance command no CI-owned gate runs is required, so the driver proves it here like its own gates
             owned = self.ci_commands(selected=False) | {run for run, _ in chosen}
-            chosen += [(cmd, {}) for cmd in acceptance_commands(acceptance_source(self)) if cmd not in owned]
+            chosen += [(cmd, {}) for cmd in granted_acceptance(self) if cmd not in owned]
         return self.portable_gates(head, chosen, skipped, ci=ci, tree=self.tree)
+
+    def base_check(self, head):
+        """Contract section 4's bug-fix base check: a fix-round finding when every gate whose paths hold a changed test file
+        is green on a copy of `head` with every other changed file put back to origin/<default>; None when one goes red or
+        the check does not apply. It runs gates the checks run too, and its results prove nothing about the head."""
+        e = self.env
+        if e.lookup("ship.test_first_for_bugs") is not True or "bug" not in self.labels:
+            return None
+        base, globs = f"origin/{e.default}", e.lookup("ship.test_paths") or []
+        def diff(paths):
+            return {p for p in self.tree.git(*e.ob.changed_diff(base, "HEAD", paths)).out.split("\0") if p}
+        changed = diff([])
+        tests = {p for p in changed if any(fnmatch.fnmatchcase(p, g) for g in globs)}
+        if not tests or tests == changed:
+            self.note_once("Base check skipped: the diff changes no file " + ("outside" if tests else "under") + " `ship.test_paths`.")
+            return None
+        gates = [run for run, g in self.bound_gates() if g.get("paths") and tests & diff(g["paths"])]
+        copy = e.scratch / f"base-{uuid.uuid4().hex[:12]}"
+        new_copy(copy)
+        try:
+            self.review_clone(copy, head)
+            for p in sorted(changed - tests):
+                if e.git("cat-file", "-e", f"{base}:{p}", cwd=copy, check=False).code == 0:
+                    e.git("checkout", base, "--", p, cwd=copy)
+                else:
+                    e.git("rm", "-q", "-f", "--ignore-unmatch", "--", p, cwd=copy)
+            self.setup_tree(copy)
+            for run in gates:
+                argv = shlex.split(run)
+                exe = shutil.which(argv[0]) if argv else None
+                if not exe:
+                    self.stop_issue("gate uncovered", f"The driver cannot run the gate `{run}` on the base copy: `{argv[0] if argv else ''}` is not on PATH.", 3)
+                r = e.run([exe, *argv[1:]], cwd=copy, timeout=validation.TIMEOUT)
+                say(f"[5] base check: gate `{run}` with the fix reverted: exit {r.code}")
+                if r.code not in (0, None):  # a timeout is no red: the row did not fail
+                    self.note_once(f"Base check: with every changed file outside `ship.test_paths` put back to {base}, the gate `{run}` went red (exit {r.code}).")
+                    return None
+        finally:
+            remove_copy(copy, "base copy")
+        ran = ", ".join(f"`{run}`" for run in gates) or "none: no gate's paths hold a changed test file"
+        return (f"Base check @ {head}: with every changed file outside `ship.test_paths` put back to {base}, no gate went red, so the "
+                f"change's tests pass without the fix and do not prove it. Gates run on that copy: {ran}. Make a test row fail on the "
+                f"code before the fix, under a gate whose paths hold it.")
+
+    def note_once(self, sentence):
+        if sentence not in self.notes:
+            self.add_note(sentence)
 
     def portable_gates(self, head, chosen, skipped, *, ci, tree):
         """Run existing driver-owned gates, including the local part of a direct PR."""
@@ -1375,9 +1606,9 @@ class Run:
         return True
 
     def rebasing(self, tree=None):
-        """A rebase stopped in the tree (the run's, or `tree`): git's state directory, which a rebase writes in place of MERGE_HEAD."""
+        """A rebase stopped in the tree (the run's, or `tree`): git's state directory, which a rebase writes in place of MERGE_HEAD; None without one."""
         tree = tree or self.tree
-        return any((tree.path / tree.git("rev-parse", "--git-path", d).out.strip()).is_dir() for d in ("rebase-merge", "rebase-apply"))
+        return next((p for d in ("rebase-merge", "rebase-apply") if (p := tree.path / tree.git("rev-parse", "--git-path", d).out.strip()).is_dir()), None)
 
     def open_pr(self, head):
         e = self.env
@@ -1386,7 +1617,7 @@ class Run:
                "fixes_line": f"Fixes #{self.n}" if self.fixes else "", **self.build_facts(),
                "changes": self.tree.git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines(),
                "gates": self.gate_log, "skipped": self.skipped or [], "checked": self.checked_gates(),
-               "note": " ".join(self.notes), "usage": node.usage_table()}
+               "note": " ".join(self.notes), "usage": usage_rows(node.USAGE, self.held_usage())}
         review = review_line(self.pending, bool(self.primary))
         f = e.body_file("pr-body.md", drawn_body(rec, review))
         argv = argv_for("gh", "pr", "create", "-R", e.slug, "--base", e.default, "--head", self.branch, "--draft",
@@ -1397,6 +1628,8 @@ class Run:
         pr = self.find_pr()
         if pr is None:
             raise DriverError(f"gh pr create printed {r.out.strip()!r} but no pull request reads back for {self.branch}")
+        self.drafted = True
+        self.held_path().unlink(missing_ok=True)
         say(f"[6] draft pull request #{pr['number']}")
         for body in self.pending:
             e.comment_pr(pr["number"], body["body"])
@@ -1453,17 +1686,38 @@ class Run:
             self.require_granted(s, x.get("validation_pending", []), allowed)
         requested = list(pending.values())
         covered = self.ci_commands()
-        caller = [p for p in requested if p["cmd"] not in covered]
-        return {"door": str(f.get("door") or "") or "unstated", "blast": str(f.get("blast_radius") or "") or "unstated",
+        unselected = self.ci_commands(selected=False) - covered
+        caller = [p for p in requested if p["cmd"] not in covered | unselected]
+        shown, met = self.presented_requests(requested, covered, unselected) if evidence else (requested, [])
+        fixed = next(({**x["fix_now"], "kept": True, "outside": self.outside_paths(f"{s}^", s)}
+                      for s, x in facts if isinstance(x.get("fix_now"), dict)), None)
+        return {"fix_now": fixed or self.fix_now_refused or {},
+                "door": str(f.get("door") or "") or "unstated", "blast": str(f.get("blast_radius") or "") or "unstated",
                 "summary": without_build_lines(self.tree.git("log", "-1", "--format=%b", sha).out),
                 "residue": [str(x) for x in f.get("residue") or []], "build_gates": f.get("gates_run") or [], "manual": list(manual.values()),
-                "validation_pending": requested, "validation_results": validation.receipt(self.tree, caller) if caller and evidence else [],
+                "validation_pending": shown, "validation_met": met,
+                "validation_results": validation.receipt(self.tree, caller) if caller and evidence else [],
                 "validation_attempts": validation.attempts(self.tree) if caller and evidence else []}
+
+    def presented_requests(self, requested, covered, unselected=frozenset()):
+        """The record's view of the branch's requests: a CI-covered one the declared checks proved at this head is met, with
+        that evidence; one they have not proved yet awaits them; one for a CI-covered gate this diff does not select awaits
+        nothing, since nothing requires it; a caller request stays as BUILD wrote it."""
+        head = self.tree.head()
+        proven = covered & set(self.ci_execution_commands) if self.ci_execution_head == head else set()
+        checks = [{"name": g.get("name"), "url": g.get("url")} for g in self.ci_execution_checks]
+        met = [{"cmd": p["cmd"], "head": head, "checks": checks} for p in requested if p["cmd"] in proven]
+        shown = [{**p, "awaiting": "the declared CI checks at this head"} if p["cmd"] in covered
+                 else {**p, "awaiting": "nothing: this diff selects none of its gate's paths"} if p["cmd"] in unselected else p
+                 for p in requested if p["cmd"] not in proven]
+        return shown, met
 
     def evidence_lines(self):
         """The validation and CI evidence a reviewer reads, from one fingerprint."""
         facts = self.build_facts()
-        return ("\nDriver validation evidence: " + json.dumps(facts["validation_results"])
+        return ("\nCI-covered validation requests the declared checks proved at this head (met: a commit's `Ouro-Build` "
+                "trailer that still lists one records the request, not an outstanding obligation): " + json.dumps(facts["validation_met"])
+                + "\nDriver validation evidence: " + json.dumps(facts["validation_results"])
                 + "\nHistorical validation attempts (each at its own head): " + json.dumps(facts["validation_attempts"])
                 + "\nRepository CI validation evidence: " + json.dumps(self.ci_execution_checks))
 
@@ -1472,20 +1726,32 @@ class Run:
 
     def refresh_body(self, pr, records):
         e = self.env
+        body = self.redrawn_body(pr, records)
+        if body is None:
+            return
+        f = e.body_file("pr-body.md", body)
+        e.write("update the pull request body", argv_for("gh", "pr", "edit", str(pr["number"]), "-R", e.slug, "--body-file", f))
+        if not e.dry:  # a draft that opened but did not read back leaves the held rows to this redraw
+            self.held_path().unlink(missing_ok=True)
+
+    def redrawn_body(self, pr, records):
+        """The pull request body with its record drawn from the branch and the evidence at this head; None when it holds no record."""
+        e = self.env
         body = e.gh_json("pr", "view", str(pr["number"]), "--json", "body")["body"]
         rec = read_record(body)
         if not rec:
-            return
+            return None
+        refused = rec.get("fix_now")  # a refused round leaves no commit, so a resume reads it from the record
         rec.update(self.build_facts())
+        rec["fix_now"] = rec.get("fix_now") or refused or {}
         rec["gates"] = self.gate_log or rec.get("gates", [])
         rec["skipped"], rec["checked"] = rec.get("skipped", []) if self.skipped is None else self.skipped, self.checked_gates()
         rec["changes"] = self.tree.git("log", "--reverse", "--format=%s", f"origin/{e.default}..HEAD").out.strip().splitlines()
         rec["flow"] = self.flow
         rec["ci_validation"] = self.ci_execution_checks
-        rec["usage"] = node.usage_table() or rec.get("usage", "")
+        rec["usage"] = usage_rows(node.USAGE, usage_rows(self.held_usage(), rec.get("usage")))
         rec["note"] = " ".join([rec.get("note", "")] + [s for s in self.notes if s not in rec.get("note", "")]).strip()
-        f = e.body_file("pr-body.md", drawn_body(rec, review_line(records, bool(self.primary)), body))
-        e.write("update the pull request body", argv_for("gh", "pr", "edit", str(pr["number"]), "-R", e.slug, "--body-file", f))
+        return drawn_body(rec, review_line(records, bool(self.primary)), body)
 
     # ---- review
     def review(self, pr, head, records):
@@ -1501,9 +1767,11 @@ class Run:
         self.acceptance_answer(ans, "REVIEW")
         facts = self.build_facts()
         ans["validation_results"], ans["validation_attempts"] = facts["validation_results"], facts["validation_attempts"]
+        if "residue" in ans:  # the record the brief drew holds these same facts, so its Follow-up list is facts["residue"]
+            ans["residue"] = pinned_residue(ans["residue"], [str(x) for x in facts["residue"]])
         body = review_comment(rnd, ans, head)
         rec = {"round": rnd, "verdict": body.split("\n", 1)[0].split(": ")[1].split(" ")[0], "sha": head, "body": body,
-               "findings": ans.get("findings") or [], "false": ans.get("false_record_sentences"), "reader": ans.get("reader")}
+               "findings": ans.get("findings") or [], "residue": routed_residue(ans), "false": ans.get("false_record_sentences"), "reader": ans.get("reader")}
         if pr:
             e.comment_pr(pr["number"], body)
             self.refresh_body(pr, records + [rec])
@@ -1516,6 +1784,9 @@ class Run:
             return ""
         since, prior = records[-1]["sha"], records[-1]["body"]
         ruled = records[-1].get("ruled")  # an approver ruled those findings: the brief shows the range, not the findings
+        fixed = self.commit_facts(head).get("fix_now")
+        if isinstance(fixed, dict) and fixed.get("round") == records[-1]["round"]:  # a fix-now commit answers only the items it was handed
+            prior = "\n".join(fixed.get("findings") or [])
         r = self.tree.git("diff", f"{since}..{head}", check=False)
         if r.code != 0 or len(r.out) > 60000:
             if ruled:
@@ -1537,12 +1808,14 @@ class Run:
         if len(diff) > 150000:
             diff = diff[:150000] + "\n(diff cut at 150000 characters; read the rest from the worktree)"
         rp = briefs.PROMPTS / "REVIEWER-PROMPT.md"
-        record = (e.gh_json("pr", "view", str(pr["number"]), "--json", "body")["body"] if pr else "(no pull request yet)")
+        # The body as fetched was drawn before this head's checks ran: the brief reads its record redrawn at this head.
+        record = ((self.redrawn_body(pr, records) or e.gh_json("pr", "view", str(pr["number"]), "--json", "body")["body"])
+                  if pr else "(no pull request yet)")
         record += self.evidence_lines()
         prior = self.verification(records, head)
         prompt = briefs.render("review", mode=MODE.get(self.flow, "sized"), number=self.n, head=head, title=self.title, part=self.part_scope("review"),
                                range=f"origin/{e.default}...{head}", diff=diff, body=self.body, comments=self.spec_comments(), record=record,
-                               verification=prior,
+                               verification=prior, ci_evidence=CI_EVIDENCE_LINE if self.ci_mode() else "",
                                release_notes=", ".join(f"`{p}`" for p in release_notes(self.tree.changed(), e.lookup("repo.release_notes", RELEASE_NOTES))) or "none",
                                reviewer_prompt=rp.read_text(encoding="utf-8") if rp.is_file() else "(REVIEWER-PROMPT.md is not in this tree)",
                                contract=briefs.contract_sections(e, (7,)))
@@ -1552,8 +1825,8 @@ class Run:
         if self.flow in ("standard", "full"):
             copy = e.scratch / f"review-{rnd}"
             node.worktree_readiness(runtime_for(self, "reviewer"), e.main, copy, None, head, scratch=e.scratch)
-            copy.mkdir()  # never an existing directory: the finally below deletes what this created
-            tools = SANDBOXED_PROBE if e.lookup("ship.review_sandbox") is True else node.PROBE
+            new_copy(copy)
+            tools = self.review_contract()
             denied, cwd = None, copy
         try:
             if copy:
@@ -1562,19 +1835,16 @@ class Run:
             return node.run_node("REVIEW", prompt, model, tools, str(cwd), node.TIMEOUTS["REVIEW"], denied, runtime=e.runtime)
         finally:
             if copy:
-                try:
-                    # Git writes its objects read-only, which Windows will not delete.
-                    shutil.rmtree(copy, onexc=lambda remove, path, _: (os.chmod(path, stat.S_IWRITE), remove(path)))
-                except OSError as ex:
-                    say(f"  the review copy {copy} was not removed: {ex}")
+                remove_copy(copy, "review copy")
 
     def review_clone(self, copy, head):
         """The review copy as a standalone repository with no remote, so no push URL or credential config reaches it:
-        a linked worktree would share the main checkout's config, `origin` included. `origin/<default>` stays a ref."""
+        a linked worktree would share the main checkout's config, `origin` included. `origin/<default>` stays a ref.
+        Its git directory is `copy_git_dir(copy)`, outside the copy, which holds only a gitfile pointing there."""
         e = self.env
         commit = e.git("rev-parse", "--verify", f"{head}^{{commit}}").out.strip()
         base = e.git("rev-parse", "--verify", f"refs/remotes/origin/{e.default}^{{commit}}").out.strip()
-        e.git("init", "--quiet", "--template=", str(copy))
+        e.git("init", "--quiet", "--template=", "--separate-git-dir", str(copy_git_dir(copy)), str(copy))
         # A fetch copies objects into a pack; a local clone would hard-link them, which Codex PROBE admission refuses.
         e.git("fetch", "--quiet", "--no-tags", str(e.main), commit, base, cwd=copy)
         e.git("update-ref", f"refs/remotes/origin/{e.default}", base, cwd=copy)
@@ -1583,16 +1853,16 @@ class Run:
     def reader_round(self, rnd, head, records):
         """One `bin/external-audit.py` round as a review answer; None, with the record saying so, when the reader is unavailable."""
         e = self.env
-        cli = e.lookup("ship.external_cli")
+        cli = self.review_keys["external_cli"]
         spent = [r for r in records if r.get("reader")]
         if len(spent) >= 2:
             self.add_note("The external reader's two rounds are spent, so the REVIEW node verified the later fixes.")
             return None
         args = ["--cli", cli, "--range", f"origin/{e.default}...{head}", "--goal", self.reader_goal() + self.evidence_lines()]
-        if e.lookup("ship.external_model"):
-            args += ["--model", e.lookup("ship.external_model")]
-        if e.lookup("ship.external_effort"):
-            args += ["--effort", e.lookup("ship.external_effort")]
+        if self.review_keys["external_model"]:
+            args += ["--model", self.review_keys["external_model"]]
+        if self.review_keys["external_effort"]:
+            args += ["--effort", self.review_keys["external_effort"]]
         if spent:
             fix_sha, fix_subject = self.tree.git("log", "-1", "--no-merges", "--format=%H%n%s", head).out.strip().split("\n", 1)
             digest = "\n\n".join(f"{f.get('claim')}\n  the fix commit {fix_sha[:7]}: {fix_subject}" for f in spent[-1]["findings"]) or "no findings"
@@ -1627,8 +1897,8 @@ class Run:
         want = re.search(r"(?ms)^## Deliverable\s*\n(.*?)(?=^## |\Z)", self.body)
         comments = self.spec_comments()
         cut = " (earlier ones cut)" if len(comments) > 3000 else ""
-        acceptance = acceptance_text(self.body)
-        commands = "\n".join(f"- `{cmd}`" for cmd in acceptance_commands(acceptance_source(self)))
+        acceptance = acceptance_text(own_body(self))
+        commands = "\n".join(f"- `{cmd}`" for cmd in granted_acceptance(self))
         return (f"{self.title}. {(want.group(1).strip() if want else '')[:3000]}"
                 f"\n\nRequired acceptance (up to 3000 characters): {acceptance[:3000] or '(none)'}"
                 f"\n\nApproved acceptance commands (up to 3000 characters): {commands[:3000] or '(none)'}"
@@ -1772,14 +2042,21 @@ class Run:
         bad = re.findall(r"(\d+):(failure|cancelled|timed_out|action_required|startup_failure|stale)", r.text)
         if not bad:
             raise DriverError(f"{sh.cmdline(r.argv)} failed (exit {r.code}): {r.text}")
-        retried = {}  # run id -> the attempt its re-run starts
+        firsts = []  # (run id, its first attempt's jobs): the runs a re-run would retry
         for run_id, _ in bad:
             attempt = e.gh_json("run", "view", run_id, "--json", "attempt").get("attempt", 1)
-            self.ci_ran(run_id, attempt)
+            jobs = self.ci_ran(run_id, attempt)
             if attempt == 1:
-                e.write(f"re-run failed jobs of run {run_id} (a flake is a failure whose re-run succeeds)",
-                        argv_for("gh", "run", "rerun", run_id, "-R", e.slug, "--failed"))
-                retried[run_id] = attempt + 1
+                firsts.append((run_id, jobs))
+        for run_id, jobs in firsts:
+            if log := self.same_gate_failed(run_id, jobs):
+                self.fix_round(f"check run {run_id} failed; the failure in its log:\n" + failure_extract(log), self.records(pr))
+                return "fix"
+        retried = {}  # run id -> the attempt its re-run starts
+        for run_id, _ in firsts:
+            e.write(f"re-run failed jobs of run {run_id} (a flake is a failure whose re-run succeeds)",
+                    argv_for("gh", "run", "rerun", run_id, "-R", e.slug, "--failed"))
+            retried[run_id] = 2
         if retried and not e.dry:
             r2 = self.watch_pr(n, head, self.tree.path)
             if r2.code is None:
@@ -1827,13 +2104,34 @@ class Run:
             self.stop_issue("gate uncovered", f"CI could not run: attempt {k} of run {run_id} on #{self.n}'s pull request failed without "
                             f"running, {what} (an Actions budget, a runner never acquired, or a workflow that cannot start). This is no "
                             f"flake and no fix round: restore CI, then run again.", 3)
+        return jobs
+
+    def same_gate_failed(self, run_id, jobs):
+        """The `--log-failed` text of run `run_id` when two or more of its jobs failed and every one names a same failing
+        gate command, a failure no re-run turns green; else None, and the re-run happens. Says which case it took."""
+        failed = [j.get("name") for j in jobs if j.get("conclusion") == "failure"]
+        if len(failed) < 2:
+            say(f"[8] run {run_id}: {len(failed)} job failed, a re-run can show a flake")
+            return None
+        log = self.env.gh("run", "view", run_id, "-R", self.env.slug, "--log-failed", check=False).text
+        named = failed_gates(log)
+        cmds = [named.get(j, set()) for j in failed]
+        if not all(cmds):
+            say(f"[8] run {run_id}: {len(failed)} jobs failed, no failing gate command read from "
+                + ", ".join(str(j) for j, c in zip(failed, cmds) if not c) + ": a re-run can show a flake")
+            return None
+        if not (same := set.intersection(*cmds)):
+            say(f"[8] run {run_id}: {len(failed)} jobs failed different gate commands: a re-run can show a flake")
+            return None
+        say(f"[8] run {run_id}: jobs {', '.join(map(str, failed))} all failed `{sorted(same)[0]}`: no flake, no re-run, a fix round")
+        return log
 
     def conflicted(self, head, step, where):
-        """The branch conflicts with the base at `head`, says `where`: synced once, as a person would; the same head again is an error."""
+        """The branch conflicts with the base at `head`, says `where`: the caller syncs once, as a person would; the same head again is an error."""
         if head in self.synced:
             raise DriverError(f"#{self.n}'s branch conflicts with {self.env.default} at {head[:7]} and the sync changed nothing ({where})")
         self.synced.add(head)
-        say(f"[{step}] the branch conflicts with {self.env.default} ({where}): synced, then the pass repeats")
+        say(f"[{step}] the branch conflicts with {self.env.default} ({where}): syncing, then the pass repeats")
         return "conflict"
 
     # ---- merge decision
@@ -1883,7 +2181,7 @@ class Run:
             return self.conflicted(head, 9, "the merge")
         e.comment_pr(n, f"**Landed unattended** by ouro run at {sha}: checks {n_green} green, {line}, class {self.flow}, policy {policy} from {whose}" + (f"\n{facts.splitlines()[-1]}" if "\nRuled: " in facts else "") + "\n")
         say(f"[9] merged #{n} as {sha}")
-        return self.after_merge(self.find_pr())
+        return self.after_merge(self.find_pr(), green=head if n_green else "")
 
     def merge_pr(self, n, subject, body_file, cwd, head):
         """The merge commit; None when the script refuses a CONFLICTING pull request, which the caller syncs. A merge
@@ -1909,7 +2207,33 @@ class Run:
         return m.group(1) if m else "unknown"
 
     # ---- after the merge (transitions 10-12)
-    def after_merge(self, pr):
+    def merged_as_green(self, sha, head):
+        """The merge commit's tree is the green head's and its first parent an ancestor of that head; False when either is
+        unknown (no head, a git call that fails), so the caller watches."""
+        if not head:
+            return False
+        trees = self.env.git("rev-parse", sha + "^{tree}", head + "^{tree}", check=False)
+        pair = trees.out.split()
+        return (trees.code == 0 and len(pair) == 2 and pair[0] == pair[1]
+                and self.env.git("merge-base", "--is-ancestor", sha + "^1", head, check=False).code == 0)
+
+    def green_head(self, pr):
+        """The merged pull request's `headRefOid` when its checks read green there (one passed, none outside pass or
+        skipping); "" when no check ran, the read fails or does not parse, or one is not green, so the caller watches."""
+        head, n = pr.get("headRefOid") or "", pr["number"]
+        if not (head and self.env.pr_checks()):
+            return ""
+        try:
+            cs = self.env.gh_json("pr", "checks", str(n), "--json", "name,bucket")
+        except DriverError as x:  # watching is the recovery
+            say(f"[10] #{n}'s checks cannot be read at {head[:7]}, so the default branch is watched: {x}")
+            return ""
+        buckets = {c.get("bucket") for c in cs} if isinstance(cs, list) and all(isinstance(c, dict) for c in cs) else set()
+        return head if "pass" in buckets and buckets <= {"pass", "skipping"} else ""
+
+    def after_merge(self, pr, green=""):
+        """`green` is the head this run merged at once its checks passed; a merge read on a resume carries none, and in
+        full flow its head is taken as `green` once `green_head` re-reads its checks green there, else it is watched."""
         e = self.env
         n = pr["number"]
         sha = (pr.get("mergeCommit") or {}).get("oid") or ""
@@ -1918,11 +2242,16 @@ class Run:
         if recorded in ORDER:
             self.flow = tighter(self.flow, recorded)
         if e.dry:
-            say("  would: watch the default branch's runs (full), delete the branch and worktree, refresh the queue's anchors, file follow-ups, tick the part")
+            say("  would: watch the default branch's runs (full, unless the merge commit's tree is a green head's on an unmoved base), delete the branch and worktree, refresh the queue's anchors, file follow-ups, tick the part, "
+                "triage the blocked issues whose trigger names the closed issue")
             return 0
         e.git("fetch", "origin", check=False)
         claim_ready = True
-        if self.flow == "full" and sha:
+        if self.flow == "full" and sha and not green:
+            green = self.green_head(pr)
+        if self.flow == "full" and sha and self.merged_as_green(sha, green):
+            say(f"[10] the default branch's watch is skipped: the merge commit's tree is the green head {green[:7]}'s, and its base did not move")
+        elif self.flow == "full" and sha:
             r = self.env.run(script("Watch-PullRequestChecks.ps1", "-Sha", sha), cwd=e.main, timeout=watch_limit())
             if r.code not in (0, None):
                 raise DriverError(f"the default branch's run on {sha} is not green: {r.text}")
@@ -1946,8 +2275,26 @@ class Run:
                 say("  " + line.strip())
         self.follow_up(pr, sha)
         self.tick_part()
+        if self.fixes:
+            self.triage_successors()
         say(f"done: #{self.n} landed" + (f" (part {self.k}/{self.parts_n})" if self.k else ""))
         return 0
+
+    def triage_successors(self):
+        """Triage each open `blocked` issue whose first line's `**Unblocks when:**` trigger names #n by triage's reference rule, in
+        number order, one line each with its verdict; a triage that fails is reported on its line and never fails the landing."""
+        from . import triage  # triage imports this module
+        try:
+            blocked = self.env.gh_json("issue", "list", "--label", "blocked", "--state", "open", "--limit", "1000", "--json", "number,body")
+        except DriverError as x:
+            say(f"[10] the blocked issues cannot be listed, so no successor of #{self.n} is triaged: {x}")
+            return
+        for m in sorted(int(i["number"]) for i in blocked if self.n in triage.trigger_refs(i.get("body") or "")):
+            try:
+                code, verdict = triage.graded(self.env, m, False)
+                say(f"[10] successor #{m}: triage verdict {verdict}" + (f" (exit {code})" if code else ""))
+            except (DriverError, Refused, Stopped) as x:
+                say(f"[10] successor #{m}: triage failed, the landing stands: {x}")
 
     def follow_up(self, pr, sha):
         e = self.env
@@ -1955,33 +2302,48 @@ class Run:
         rec = read_record(pr.get("body") or "")
         recs = review_records(self.pr_comments(pr), e.trusted(), e.approvers())
         line = lambda f: f"{sev(f)} {f.get('file')}:{f.get('line')} {f.get('claim')} (evidence: {f.get('evidence')})"
-        key = lambda f: (str(f.get("file")), str(f.get("line")), " ".join(str(f.get("claim") or "").split()))  # review_line's identity, less the severity
-        picked = {}  # one bullet per defect, as the latest round reported it: the newest record's L findings and the later rounds' OUTSIDE ones
-        for r in recs:
-            for f in r["findings"]:
-                if (r is recs[-1] and sev(f) == "L") or (r["round"] > 1 and outside(f)):
-                    picked[key(f)] = f
-        found = [line(f) for f in picked.values()]
-        residue = [x for x in rec.get("residue", []) if not re.search(r"(?i)\b(filed|tracked|see|opened)\b.*#\d+", str(x))]  # filed already
-        if not residue and not found:
-            return
-        areas, types = e.lookup("labels.area", []) or [], e.lookup("labels.type", []) or []
         trusted = e.trusted()  # a comment any other account posts is data, never a list of issues to file
         posted = [str(c.get("body", "")) for c in self.pr_comments(pr) if str(c.get("body", "")).startswith("**Follow-ups filed**")
                   and str((c.get("author") or {}).get("login") or "").lower() in trusted]
+        if posted and not pending_follow_ups(posted[-1]):  # read before any leftover line, which a resume would print again
+            say("[11] follow-ups already filed")
+            return
+        fixed_now = rec.get("fix_now") if isinstance(rec.get("fix_now"), dict) else {}
+        # one bullet per defect, as the latest round reported it: the newest record's L findings, the L findings not routed
+        # `fix-now` of the record a fix-now round answered (its `fix-now` ones drop out unless a later round re-raises them)
+        # and the later rounds' OUTSIDE ones
+        picked = {}
+        for r in recs:
+            for f in r["findings"]:
+                if ((r is recs[-1] and sev(f) == "L") or (r["round"] > 1 and outside(f))
+                        or (r["round"] == fixed_now.get("round") and sev(f) == "L" and not fix_now(f))):
+                    picked[finding_key(f)] = f
+        found = [self.leftover(line(f), f) for f in picked.values()]
+        kept = [str(x) for x in rec.get("residue", []) if not re.search(r"(?i)\b(filed|tracked|see|opened)\b.*#\d+", str(x))]  # filed already
+        routes = [(x, residue_route(recs, x)) for x in kept]
+        residue = [self.leftover(x, r) for x, r in routes]
+        untied = untied_routes(recs, rec.get("residue", []))
+        for u in untied:
+            say(f"  {u}")
+        # the PR comment carries what the console says, so an unattended run's record shows it
+        gaps = untied + [f"the review routes no item {' '.join(x.split())[:120]!r}, so it is filed as `issue`" for x, r in routes if not r]
+        gaps = "\n\nResidue routes not tied to the record:\n" + "\n".join(f"- {g}" for g in gaps) if gaps else ""
+        if not residue and not found:
+            if gaps and not posted:
+                e.comment_pr(n, "**Follow-ups filed**\n\nnone" + gaps + "\n")
+            return
+        areas, types = e.lookup("labels.area", []) or [], e.lookup("labels.type", []) or []
         if posted:  # the newest comment records what a failed late write left unfiled, with the items themselves
             items, filed = pending_follow_ups(posted[-1]), filed_follow_ups(posted[-1])
-            if not items:
-                say("[11] follow-ups already filed")
-                return
             say(f"[11] filing the {len(items)} follow-up(s) a failed write left unfiled")
-        else:
-            bullets = lambda xs: "\n".join(f"- {x}" for x in xs) or "(none)"
-            prompt = briefs.render("followup", merge=sha, residue=bullets(residue), findings=bullets(found), contract=briefs.contract_sections(e, (3,)),
-                                   labels=json.dumps({"area": areas, "type": types}))
+        else:  # numbered in the brief's order, residue first: the node writes item k, the driver files it under item k's route
+            bullets = lambda xs, k0: "\n".join(f"- {x['text']} [route: {x['route']}" + (f", reason: {x['reason']}" if x["reason"] else "")
+                                               + f"] (item {k0 + i})" for i, x in enumerate(xs)) or "(none)"
+            prompt = briefs.render("followup", merge=sha, residue=bullets(residue, 1), findings=bullets(found, len(residue) + 1),
+                                   contract=briefs.contract_sections(e, (3,)), labels=json.dumps({"area": areas, "type": types}))
             say("[11] FOLLOWUP node")
             ans = node.run_node("FOLLOWUP", prompt, node.model(e, "triager", node.DEFAULT_BUILDER), node.READ, str(e.main), node.TIMEOUTS["FOLLOWUP"], runtime=e.runtime)
-            items, filed = [it for it in ans.get("issues") or [] if str(it.get("title") or "").strip()], []
+            items, filed = self.written(residue + found, ans.get("issues") or []), []
         for i, it in enumerate(items):
             try:
                 entry = self.file_follow_up(it, sha, areas, types)
@@ -1992,13 +2354,54 @@ class Run:
                                  + f"\n\nNot filed, a resume files them: {x}\n\n{rest}\n\n{PENDING_MARK}{pending_json(items[i:])} -->\n")
                 raise
             filed.append(entry)
-        e.comment_pr(n, "**Follow-ups filed**\n\n" + ("\n".join(f"- {x}" for x in filed) or "none") + "\n")
+        e.comment_pr(n, "**Follow-ups filed**\n\n" + ("\n".join(f"- {x}" for x in filed) or "none") + gaps + "\n")
+        if not posted and read_record(pr.get("body") or ""):  # the FOLLOWUP node ran after the merge, and no redraw follows it
+            f = e.body_file("pr-body.md", with_usage(pr["body"], node.USAGE))
+            e.write("record the FOLLOWUP node's usage on the pull request", argv_for("gh", "pr", "edit", str(n), "-R", e.slug, "--body-file", f))
+
+    @staticmethod
+    def leftover(text, item):
+        """A leftover as the FOLLOW-UP node is handed it: its text and the route it is filed under, the run saying when
+        that is not the route the review gave it."""
+        to, why = filing_route(item)
+        if why:
+            say(f"  leftover {' '.join(text.split())[:120]!r}: {why}, so it is filed as `{to}`")
+        return {"text": text, "route": to, "reason": reason(item)}
+
+    @staticmethod
+    def written(handed, answers):
+        """One item to file per handed leftover, under the route the driver read: the node's title, body and labels for its
+        number, the first entry naming it, or the leftover's own text where the node wrote none. No answer moves its route."""
+        by = {}
+        for a in answers:
+            k = str(a.get("item") if isinstance(a, dict) else "").strip()
+            if k.isdigit() and 1 <= int(k) <= len(handed) and str(a.get("title") or "").strip():
+                by.setdefault(int(k), a)
+        out = []
+        for k, h in enumerate(handed, 1):
+            a, own = by.get(k), " ".join(h["text"].split())[:100]
+            if a is None:
+                say(f"  leftover {k}: the FOLLOWUP node wrote no issue for it, so it is filed with its own text")
+                a = {"title": own, "body": h["text"] + "\n", "labels": []}
+            title = str(a["title"]).strip()
+            if h["route"] != "ledger" and (title.lower() == "cleanup" or title.lower().startswith("cleanup: ")):  # the ledger lookup would find it
+                say(f"  leftover {k}: the FOLLOWUP node titled it {title!r}, a ledger's title, so it is titled with its own text")
+                title = own
+            out.append({"title": title, "body": str(a.get("body") or ""), "labels": a.get("labels") or [], "route": h["route"]})
+        return out
 
     def file_follow_up(self, it, sha, areas, types):
-        """Files one of the node's issues and returns its comment entry; an item whose anchors do not resolve at the merge
+        """Files one item under its route and returns its comment entry; an item whose anchors do not resolve at the merge
         commit is filed with those findings in its body and its entry, for triage to re-point."""
         e = self.env
         title, body = str(it.get("title") or "").strip(), str(it.get("body") or "")
+        cleanup = title == "Cleanup" or title.startswith("Cleanup: ")
+        route = it.get("route") or ("ledger" if cleanup else "issue")  # an unfiled item a comment from before routes carries
+        ledger = route == "ledger"
+        if ledger and not cleanup:  # the ledger of the area the node names, else the run's, else the one ledger
+            low = {str(x).lower(): str(x) for x in areas}
+            area = next((low[str(x).lower()] for x in it.get("labels") or [] if str(x).lower() in low), None) or next(iter(self.areas), None)
+            title = f"Cleanup: {area}" if area else "Cleanup"
         body = re.sub(r"(?m)^(?:Size|Flow|Doc impact on close):[^\n]*\n?", "", body)  # triage stamps these lines
         dead, note = self.env.dead_anchors(body, sha), ""
         if dead:
@@ -2006,8 +2409,7 @@ class Run:
             say(f"  follow-up {title!r} is filed with anchors that do not resolve at {sha[:7]}: {'; '.join(dead)}")
             body = body.rstrip("\n") + f"\n\nThese anchors did not resolve at the merge commit {sha[:7]}:\n\n" + "\n".join(f"- {x}" for x in dead) + "\n"
         f = e.body_file("followup.md", body)
-        ledger = title == "Cleanup" or title.startswith("Cleanup: ")
-        labels = ["needs-triage"]
+        labels = ["idea" if route == "idea" else "needs-triage"]
         if not ledger:  # the node's area and type labels in the binding's spelling, one type at most; the run's areas when it names no area
             low, typed, kept = {str(x).lower(): str(x) for x in areas + types}, {str(x).lower() for x in types}, []
             for l in dict.fromkeys(str(x).lower() for x in it.get("labels") or []):
@@ -2025,15 +2427,14 @@ class Run:
                     e.write(f"reopen ledger #{num}", argv_for("gh", "issue", "reopen", num, "-R", e.slug, "--comment", body))
                 else:
                     e.write(f"append to ledger #{num}", argv_for("gh", "issue", "comment", num, "-R", e.slug, "--body-file", f))
-                return f"#{num} {hit['title']} ({how})" + note
+                return f"#{num} {hit['title']} ({how}) (route: ledger)" + note
             area = title[len("Cleanup: "):] if title != "Cleanup" else ""
             known = next((str(x) for x in areas if str(x).lower() == area.lower()), None) if area else None
             labels += ["umbrella"] + ([known] if known else [])
-        argv = argv_for("gh", "issue", "create", "-R", e.slug, "--title", title, "--body-file", f, *[a for l in labels for a in ("--label", l)],
-                       *[a for who in e.runtime.assignees for a in ("--assignee", who)])
-        r = e.write(f"file follow-up {title!r}", argv)
+        r = e.create_issue(f"file follow-up {title!r}", title, body, labels, e.runtime.assignees)
         unlabelled = f", without the label {area!r}, which [labels].area does not declare" if ledger and area and not known else ""
-        return (r.out.strip().splitlines()[-1] if r.out.strip() else title) + (f" (ledger filed{unlabelled})" if ledger else "") + note
+        return ((r.out.strip().splitlines()[-1] if r.out.strip() else title) + (f" (ledger filed{unlabelled})" if ledger else "")
+                + f" (route: {route})" + note)
 
     def tick_part(self):
         if not self.k:
@@ -2109,6 +2510,9 @@ class Run:
             built = self.build(track=False)
             if self.build_facts(evidence=False)["manual"]:
                 say("[2a] direct: the build has manual steps, which the lane cannot carry")
+                return self.lane_fallback(built)
+            if self.base_check(built):
+                say("[2a] direct: the change's tests pass without the fix, and the lane has no fix round")
                 return self.lane_fallback(built)
         trace = dict(stage="parent", parent=None)
         if ahead and (self.lane_coordinated() or self.lane_is_revert("HEAD")
@@ -2341,7 +2745,7 @@ class Run:
         if self.build_facts(evidence=False)["validation_pending"]:
             raise DriverError("direct lane does not support pending validation; nothing pushed")
         head = e.git("rev-parse", "HEAD").out.strip()
-        required = set(acceptance_commands(acceptance_source(self)))
+        required = set(granted_acceptance(self))
         expected_base = None
         if required:
             expected_base = e.git("rev-parse", f"origin/{e.default}").out.strip()
@@ -2579,12 +2983,12 @@ class Run:
         say("[5] gates: " + ("; ".join(chosen) if chosen else "none selected for the class beyond the pull request's checks") + " (a gate with paths runs only when the diff touches them)")
         say(f"[6] push: {sh.cmdline(script('Sync-Branch.ps1'))} then {sh.cmdline(script('Push-Branch.ps1'))}; "
             f"would open a draft pull request" + (" at convergence" if self.flow == "express" else " at the first push"))
-        say(f"[7] REVIEW: ship.review = {e.lookup('ship.review')}, size {self.size}: first reader {self.primary or 'none'}"
+        say(f"[7] REVIEW: {reviewer_label(self.review_keys)} from {self.review_whose}, size {self.size}: first reader {self.primary or 'none'}"
             f"{', then Copilot on the pull request' if self.copilot else ''}; mode {MODE.get(self.flow, 'sized')}, up to {FIX_CAP} fix rounds")
         say(f"[8] checks: {sh.cmdline(script('Watch-PullRequestChecks.ps1', '-Pr', '<PR>'))}" if e.pr_checks() else
             f"[8] checks: skipped, no workflow at origin/{e.default} names pull_request: every selected gate runs at [5], and the owner merges")
         policy, classes, whose = ship_policy(e)
-        ok = e.pr_checks() and may_merge(policy, classes, self.labels, self.flow) and not self.manual_paths()
+        ok = e.pr_checks() and may_merge(policy, classes, self.labels, self.flow) and not any(map(self.protected_path, self.manual_paths()))
         say(f"[9] merge: policy {policy} from {whose}, class {self.flow}: " + (f"would run {sh.cmdline(script('Merge-PullRequest.ps1', '-Pr', '<PR>', '-Subject', '<subject> (#<PR>)', '-BodyFile', '<file>', '-Linear', 'no'))}"
                                                            if ok else "would post **Ready for merge** and exit 0"))
         say(f"[10] after the merge: {sh.cmdline(script('Remove-LandedBranch.ps1', '-Pr', '<PR>'))}; "
@@ -2603,10 +3007,10 @@ def main(env, n, part, options):
     try:
         try:
             code = run.go()
-            if code == 0:
+            if code in (0, 4):
                 run.claim.update("waiting; resume reads GitHub/git")
                 env._worktrees_settled = True
-                outcome = "ok"
+                outcome = "ok" if code == 0 else "waiting"
             else:
                 outcome = "stopped"
             return code

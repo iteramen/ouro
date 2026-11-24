@@ -130,6 +130,11 @@ def exercise(h):
     def run(c, extra, *args):
         return c.ouro("run", "1", *args, extra=extra)
 
+    def red_head(c):
+        """A red check at the merged head, so the resume watches the default branch rather than skipping it."""
+        table = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
+        c.set_table({**table, "_checks_extra": [{"name": "lint", "bucket": "fail"}]})
+
     def records(state, ident):
         return [json.loads(co.MARK.search(m["body"])[1]) for m in state.threads[ident]["messages"] if co.MARK.search(m["body"])]
 
@@ -308,7 +313,7 @@ def exercise(h):
     with board() as (b, endpoint):
         c = h.validation_case("claim")
         code, out, err = run(c, dict(settings(c, endpoint), VALIDATION_STATE=str(c.root)))
-        check("pending caller validation retains claim at exit zero", code == 0 and b.threads["1"]["thread"]["status"] == "open"
+        check("pending caller validation retains claim at exit 4", code == 4 and b.threads["1"]["thread"]["status"] == "open"
               and not c.prompts("REVIEW") and records(b, "1")[-1]["outcome"].startswith("waiting"))
 
     with board() as (b, endpoint):
@@ -386,6 +391,7 @@ def exercise(h):
         extra = settings(c, endpoint)
         run(c, extra)
         h.sh(h.sys.executable, h.STUB, "pr", "merge", "7", "--squash", "--subject", "fixture merge", "--delete-branch", env=c.env())
+        red_head(c)
         b.mode = "auth"
         code, out, err = run(c, dict(extra, OURO_WATCH_LIMIT="3"))
         check("board outage with pending default checks leaves part unticked and worktree resumable",
@@ -397,6 +403,7 @@ def exercise(h):
     c = h.happy_case("pending-default-no-board", table={"_issue_1": h.issue(body=parts_body), "run list *--branch master*": {"Out": []}})
     c.ouro("run", "1")
     h.sh(h.sys.executable, h.STUB, "pr", "merge", "7", "--squash", "--subject", "fixture merge", "--delete-branch", env=c.env())
+    red_head(c)
     code, out, err = c.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "3"})
     tree = c.main / ".claude/worktrees/1-fix-the-total-p1"
     check("pending default-branch checks with no board leave the part unticked and the worktree for the resume",
@@ -490,6 +497,7 @@ def resume_offline(h):
         r.issue, r.body, r.title = dict(state="CLOSED"), "", "Edit note"
         r.flow, r.size, r.branch, r.tree = "direct", "S", "gates/1-note", h.runmod.worktrees.Tree(env, c.main, "gates/1-note")
         r.labels, r.areas = ["agent-ready"], ["gates"]
+        r.review_keys, r.review_whose = {"review": "adversarial-review"}, "the default"
         r.read_issue = r.plan_part = r.preflight = r.check_spec_trust = lambda: None
         r.branch_exists = lambda: False
         r.find_pr = lambda *a, **kw: None
@@ -1282,6 +1290,12 @@ def offline(h):
         resumed.enter()
         h.check("offline: matching session/correlation resumes an owned thread",
                 resumed.owned == "1" and len(threads) == 1 and first.data["correlation"] == resumed.data["correlation"])
+        said = []
+        with patch.object(co, "say", side_effect=said.append):
+            for cause in ("first cause", co.Unavailable("first cause"), co.Unavailable("second cause"), OSError("/a/path")):
+                resumed.notice(cause)
+        h.check("offline: the unavailable notice prints each distinct cause once, so a later call's other cause is not hidden",
+                [s.split("(", 1)[1].split(")", 1)[0] for s in said] == ["first cause", "second cause", "OSError"])
         threads["other"] = dict(thread=dict(id="other", title="Claimed: o/n#1", forum="fixture", status="open", createdBy="same person"),
                                 messages=[dict(body="Convention claim")])
         more[0] = 1

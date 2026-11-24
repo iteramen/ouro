@@ -10,7 +10,7 @@ def exercise(h):
     for spelling in ('config.yaml', './config.yaml'):
         for index, fragment in enumerate(fragments):
             bare = not spelling.startswith('./')
-            body = '## What\nUpdate the setting.\n\n' + valid + f'- `{spelling}` -- "{fragment}"\n'
+            body = '## What\nUpdate the setting.\n\n## Anchors\n' + valid + f'- `{spelling}` -- "{fragment}"\n'
             case = h.Case(f'triage-root-{bare}-{index}', files={'config.yaml': config},
                           table={'_issue_1': h.issue(labels=('needs-triage', 'gates', 'bug'), body=body, comments=[])})
             case.node('TRIAGE', answer)

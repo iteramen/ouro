@@ -104,12 +104,38 @@ Quality table, after the outcome tables, one row per ISO week and an `all` row (
    line. False sentences are totalled, averaged and shared over the PRs whose line holds a number
    there (`unread` is counted apart); H, M, L and the rounds (median, maximum; a PR is a region) are
    over every PR whose line has numbers.
+ * Turns, one column per node of a pull-request run (BUILD, REVIEW, FOLLOWUP), over the same PRs:
+   the usage rows of the PR body's `<!-- ouro-record: ... -->` JSON, each row one node call with its
+   `turns`. A cell is the median and the total of that node's known counts, then the unknown ones
+   apart, never as zero: a row whose `turns` is not a number (a backend that reports none), and,
+   once under each node, a PR whose record holds no usage list (one drawn before the rows held
+   turns, or no record at all).
+ * Follow-ups, over the same PRs: the newest `**Follow-ups filed**` comment on the PR by a trusted
+   author (the job token's bot or an approver), and its `- ` bullets before any `Not filed` line,
+   the driver's own reading; the newest alone, since a resume's comment repeats the entries of the
+   one before it. A ledger line is an entry that files (`(ledger filed`), appends to or reopens
+   (`#N Cleanup... (appended)`, `(reopened)`) a `Cleanup` ledger; every other entry is an issue.
+   Columns: the issues, the issues per landed PR, and the ledger lines. A PR with no such comment,
+   or one whose list is `none`, counts 0.
  * CI flake rate: a failed attempt is a run attempt whose conclusion is `failure`, keyed by the week
    it started. It is flaky when a later attempt of the same run, or a later run (created after the
    attempt started) of the same workflow on the same head SHA, concluded `success`; else failed. A
    `cancelled` or `skipped` attempt is neither. Rate = flaky / (flaky + failed). A week's run query
    at the API's 1000-result cap is read a day at a time; a day at the cap, or a query returning
    fewer runs than it counts, is a failed read.
+
+Direct publications, after the quality table, one row per ISO week and an `all` row (report-only), at or
+after --since, issue-less ones included:
+ * A plain push: a first-parent commit of origin/<default_branch> whose subject ends in no `(#PR)`, that
+   is no pull request's merge commit and whose subject and author date match no commit of a merged
+   direct PR vehicle (a rebase merge's commits), keyed by the week of its committer date; it names an
+   issue when its message has a `Fixes` line.
+ * A direct PR vehicle: a merged pull request whose head starts with `direct/`, counted once however it
+   merged, keyed by the week of its mergedAt; it names an issue when its head is `direct/<digits>`
+   (fewer than twelve), and is issue-less as `direct/<12 hex>` or any other form.
+Each row splits the publications into those naming an issue and the issue-less rest. A --from-cache
+prs.json whose pull requests carry no `headRefName`, or whose vehicles carry no `commits`, is a failed
+read. Which gates ran is not in history: the publisher's printed `direct-checks:` line holds it.
 
 Exit 0 when the report printed (or was posted), 1 when any read or write failed (the message, with
 the failing command's output, on stderr), 2 on a usage error. A failed read never reads as zero.
@@ -142,6 +168,7 @@ PART = re.compile(r"^`?Part ([0-9]+)/([0-9]+) of #([0-9]+)", re.IGNORECASE | re.
 STOP_LINE = re.compile(r"\*\*Stop:\*\* (" + "|".join(STOP_REASONS) + ")")
 SIZE_LINE = re.compile(r"^Size:[^\S\r\n]*(\S+)", re.MULTILINE)
 LANDED_SUBJECT = re.compile(r"\(#([0-9]+)\)\s*$")
+VEHICLE_ISSUE = re.compile(r"direct/[0-9]{1,11}")  # twelve digits are a head sha's `direct/<12 hex>` form
 REVIEW_PATTERN = r"^Review: (?:none|rounds:([0-9]+) findings:H([0-9]+)/M([0-9]+)/L([0-9]+) false-sentences:([0-9]+|unread))[ \t\r]*$"
 REVIEW_LINE = re.compile(REVIEW_PATTERN, re.MULTILINE)
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
@@ -151,6 +178,11 @@ BOT = "github-actions"  # the job token's login as GraphQL spells it, without `[
 STAMP = re.compile(r"@ ([0-9a-fA-F]{7,40})(?![0-9A-Za-z])")
 REVIEW_MARK = re.compile(r"\*\*Review\*\* round ([0-9]+): (CLEAN|FINDINGS) @ ([0-9a-f]{40})")
 JSON_FENCE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+RECORD = re.compile(r"<!-- ouro-record: (.*?) -->", re.DOTALL)  # the driver's pull-request record, bin/ouro/records.py
+TURN_NODES = ("BUILD", "REVIEW", "FOLLOWUP")
+FOLLOW_UPS = "**Follow-ups filed**"  # the driver's comment on a landed pull request, bin/ouro/run.py
+LEDGER_ENTRY = re.compile(r"\(ledger filed|^#[0-9]+ (?i:cleanup)(?:: .*)? \((?:appended|reopened)\)")
+ROUTE_TAG = re.compile(r" \(route: (issue|idea|ledger)\)(?= — |$)")  # what file_follow_up in bin/ouro/run.py ends an entry with, before its note
 
 
 class ReadError(Exception):
@@ -206,8 +238,10 @@ ISSUE_FIELDS = f"""number title state createdAt body
 userContentEdits(first: 100) {{ {EDITS} }}
 comments(first: 100) {{ {COMMENTS} }}
 timelineItems(first: 100, itemTypes: [LABELED_EVENT, UNLABELED_EVENT, CLOSED_EVENT]) {{ {TIMELINE} }}"""
-PR_FIELDS = f"""number state mergedAt body mergeCommit {{ oid }}
-comments(first: 100) {{ {COMMENTS} }}"""
+PR_COMMITS = "nodes { commit { message authoredDate } } pageInfo { hasNextPage endCursor }"
+PR_FIELDS = f"""number state mergedAt body headRefName mergeCommit {{ oid }}
+comments(first: 100) {{ {COMMENTS} }}
+commits(first: 100) {{ {PR_COMMITS} }}"""
 
 
 def fetch(slug):
@@ -244,6 +278,8 @@ def fetch(slug):
     prs = pages("pullRequests", PR_FIELDS)
     for p in prs:
         drain(p, "pullRequest", "comments", COMMENTS)
+        if vehicle(p):
+            drain(p, "pullRequest", "commits", PR_COMMITS)
     return issues, prs
 
 
@@ -255,6 +291,10 @@ def load_cache(directory):
                 out.append(json.load(f))
         except (OSError, ValueError) as e:
             raise ReadError(f"cannot read {name} in {directory}: {e}")
+    stale = [p.get("number") for p in out[1] if "headRefName" not in p or (vehicle(p) and "commits" not in p)]
+    if stale:
+        raise ReadError(f"prs.json in {directory}: pull request(s) {stale[:5]} carry no headRefName, or a direct/ vehicle no "
+                        "commits: a cache written before the direct-vehicle count reads no vehicle; fetch it again")
     return out
 
 
@@ -263,13 +303,13 @@ def git(*args):
 
 
 def first_parent(ref):
-    """The first-parent line of ref, newest first: sha, parents, committer date, subject, message."""
+    """The first-parent line of ref, newest first: sha, parents, committer date, author date, subject, message."""
     commits = []
-    for rec in git("log", "--first-parent", "-z", "--format=%H%x1f%P%x1f%cI%x1f%s%x1f%B", ref).split("\0"):
+    for rec in git("log", "--first-parent", "-z", "--format=%H%x1f%P%x1f%cI%x1f%aI%x1f%s%x1f%B", ref).split("\0"):
         if rec.strip():
-            sha, parents, date, subject, message = rec.lstrip("\n").split("\x1f", 4)
-            commits.append({"sha": sha, "parents": parents.split(), "date": utc(date), "subject": subject,
-                            "message": message})
+            sha, parents, date, authored, subject, message = rec.lstrip("\n").split("\x1f", 5)
+            commits.append({"sha": sha, "parents": parents.split(), "date": utc(date), "authored": utc(authored),
+                            "subject": subject, "message": message})
     return commits
 
 
@@ -385,12 +425,52 @@ def landings(prs, commits):
     for land, _, issues in landed_prs(prs, commits):
         for issue in issues:
             out[issue].append(land)
-    merges = {(p.get("mergeCommit") or {}).get("oid") for p in prs}
-    for c in commits:
-        if c["sha"] not in merges and not LANDED_SUBJECT.search(c["subject"]):
-            for issue in {int(x) for x in FIXES.findall(c["message"])}:
-                out[issue].append((c["date"], c["sha"], None))
+    for c in direct_commits(prs, commits):
+        for issue in {int(x) for x in FIXES.findall(c["message"])}:
+            out[issue].append((c["date"], c["sha"], None))
     return {k: sorted(v) for k, v in out.items()}
+
+
+def direct_commits(prs, commits):
+    """The first-parent commits whose subject ends in no `(#PR)` and that are no pull request's merge commit."""
+    merges = {(p.get("mergeCommit") or {}).get("oid") for p in prs}
+    return [c for c in commits if c["sha"] not in merges and not LANDED_SUBJECT.search(c["subject"])]
+
+
+def vehicle(p):
+    """A pull request whose head is a direct PR vehicle, `direct/<Issue>` or `direct/<12 hex>` (bin/Push-Direct.ps1)."""
+    return p["headRefName"].startswith("direct/")
+
+
+def git_subject(message):
+    """The subject `git log --format=%s` prints for message: its first paragraph, lines joined by a space. As git does,
+    each line loses its trailing whitespace and a whitespace-only line is a paragraph break."""
+    subject = []
+    for line in message.split("\n"):
+        line = line.rstrip(" \t\r")
+        if line:
+            subject.append(line)
+        elif subject:
+            break
+    return " ".join(subject)
+
+
+def direct_publications(prs, commits, since):
+    """ISO week -> [whether it names an issue] of each publication at or after since: a direct commit by its committer
+    date and its `Fixes` line, less a rebase-merged vehicle's commits, and each merged vehicle once, by its mergedAt and
+    its head's form."""
+    vehicles = [p for p in prs if p.get("mergedAt") and vehicle(p)]
+    rebased = {(git_subject(n["commit"]["message"]), utc(n["commit"]["authoredDate"]))
+               for p in vehicles for n in p["commits"]["nodes"]}
+    out = collections.defaultdict(list)
+    for c in direct_commits(prs, commits):
+        if c["date"] >= since and (c["subject"], c["authored"]) not in rebased:
+            out[week_of(c["date"])].append(bool(FIXES.search(c["message"])))
+    for p in vehicles:
+        when = utc(p["mergedAt"])
+        if when >= since:
+            out[week_of(when)].append(bool(VEHICLE_ISSUE.fullmatch(p["headRefName"])))
+    return dict(out)
 
 
 def anchors(body):
@@ -779,14 +859,53 @@ def review_of(body):
     return (rounds, h, mid, low, m.group(5) if m.group(5) == "unread" else int(m.group(5)))
 
 
-def pr_quality(prs, commits, since):
-    """ISO week of the landing -> the review_of each PR landed at or after since, one per PR."""
+def turns_of(body):
+    """[(node, turns or None)] of the usage rows of a body's ouro-record for the nodes in TURN_NODES, or None when the
+    record holds no usage rows (a record drawn before it kept them, an unreadable one, or none)."""
+    m = RECORD.search(body or "")
+    try:
+        rec = json.loads(m.group(1)) if m else None
+    except ValueError:
+        rec = None
+    rows = rec.get("usage") if isinstance(rec, dict) else None
+    if not isinstance(rows, list):
+        return None
+    return [(r["node"], r.get("turns") if type(r.get("turns")) is int else None)
+            for r in rows if isinstance(r, dict) and r.get("node") in TURN_NODES]
+
+
+def follow_ups_of(comments, approvers):
+    """(issue, idea, ledger) entries the newest trusted `**Follow-ups filed**` comment of a PR lists as filed; (0, 0, 0)
+    with none. The newest alone: a resume's comment lists the entries of the one before it again. An entry with no
+    route tag, as a comment from before routes writes, is a ledger line when LEDGER_ENTRY matches it, else an issue."""
+    posted = sorted((utc(c["createdAt"]), c.get("body") or "") for c in comments
+                    if (c.get("body") or "").startswith(FOLLOW_UPS) and trusted((c.get("author") or {}).get("login"), approvers))
+    if not posted:
+        return (0, 0, 0)
+    head = posted[-1][1].split("\nNot filed", 1)[0]  # the driver's reading, filed_follow_ups in bin/ouro/records.py
+    head = head.split("\nResidue routes not tied to the record:", 1)[0]  # bin/ouro/run.py's gap section lists routes, not entries
+    routes = [(m.group(1) if (m := ROUTE_TAG.search(e)) else "ledger" if LEDGER_ENTRY.search(e) else "issue")
+              for e in (line[2:] for line in head.splitlines() if line.startswith("- "))]
+    return tuple(routes.count(r) for r in ("issue", "idea", "ledger"))
+
+
+def pr_quality(prs, commits, since, read=lambda p: review_of(p.get("body"))):
+    """ISO week of the landing -> `read` of each PR node landed at or after since, one per PR."""
     out = collections.defaultdict(list)
     for (when, _, _), p in landed_any(prs, commits):
         body = p.get("body") or ""
         if when >= since and (FIXES.search(body) or PART.search(body)):
-            out[week_of(when)].append(review_of(p.get("body")))
+            out[week_of(when)].append(read(p))
     return dict(out)
+
+
+def turn_cell(turns, kind):
+    """`median/total` of the known turn counts of node `kind` over turns_of values, and how many are unknown: a row
+    with no count, and a PR whose record holds no usage rows, once under each node."""
+    known = [t for rows in turns if rows is not None for n, t in rows if n == kind and t is not None]
+    unknown = sum(rows is None for rows in turns) + sum(1 for rows in turns if rows is not None for n, t in rows if n == kind and t is None)
+    cell = f"{statistics.median(known):g}/{sum(known)}" if known else "n/a"
+    return cell + (f", unknown {unknown}" if unknown else "")
 
 
 def pr_figures(reviews):
@@ -820,37 +939,68 @@ def flake_attempts(runs, since):
     return out
 
 
-def render_quality(pr_weeks, flakes, since, now):
+def render_quality(pr_weeks, turn_weeks, follow_weeks, flakes, since, now):
     date = "%Y-%m-%d"
     days = [since + timedelta(days=i) for i in range((now - since).days + 1)]
     weeks = sorted(set(pr_weeks) | {f["week"] for f in flakes} | {week_of(t) for t in days})
 
-    def row(label, reviews, failed_attempts):
+    def row(label, reviews, turns, follows, failed_attempts):
         p = pr_figures(reviews)
+        issues, ideas, ledger = (sum(f[i] for f in follows) for i in range(3))
+        per = f"{issues / len(follows):.2f}" if follows else "n/a"
         flaky = sum(f["flaky"] for f in failed_attempts)
         mean = f"{p['false'] / p['counted']:.2f}" if p["counted"] else "n/a"
         median = "n/a" if p["median"] is None else f"{p['median']:g}"
         top = "n/a" if p["max"] is None else str(p["max"])
         return (f"| {label} | {p['landed']} | {p['line']} | {p['none']} | {p['no_line']} | {p['unread']} | {p['false']} | {mean} "
                 f"| {pct(p['with_false'], p['counted'])} | {p['h']} | {p['m']} | {p['l']} | {median} | {top} "
-                f"| {len(failed_attempts)} | {flaky} | {len(failed_attempts) - flaky} | {pct(flaky, len(failed_attempts))} |")
+                + "".join(f"| {turn_cell(turns, kind)} " for kind in TURN_NODES)
+                + f"| {issues} | {per} | {ideas} | {ledger} "
+                + f"| {len(failed_attempts)} | {flaky} | {len(failed_attempts) - flaky} | {pct(flaky, len(failed_attempts))} |")
 
     lines = ["## Quality", "",
              f"Pull requests by the ISO week of the landing and CI failed attempts by the week they started, from "
              f"{since.strftime(date)} to {now.strftime(date)} UTC. Report-only.", "",
              "| Week | Landed | With line | none | No line | unread | False sentences | Mean per PR | PRs with one | H | M | L "
-             "| Rounds median | Rounds max | Failed attempts | Flaky | Failed | Flake rate |",
-             "|---|" + "---|" * 17]
+             "| Rounds median | Rounds max " + "".join(f"| {kind} turns " for kind in TURN_NODES)
+             + "| Follow-up issues | Issues per landing | Follow-up ideas | Ledger lines | Failed attempts | Flaky | Failed | Flake rate |",
+             "|---|" + "---|" * (21 + len(TURN_NODES))]
     for w in weeks:
-        lines.append(row(w, pr_weeks.get(w, []), [f for f in flakes if f["week"] == w]))
-    lines.append(row("all", [r for w in weeks for r in pr_weeks.get(w, [])], flakes))
+        lines.append(row(w, pr_weeks.get(w, []), turn_weeks.get(w, []), follow_weeks.get(w, []), [f for f in flakes if f["week"] == w]))
+    lines.append(row("all", [r for w in weeks for r in pr_weeks.get(w, [])], [t for w in weeks for t in turn_weeks.get(w, [])],
+                     [f for w in weeks for f in follow_weeks.get(w, [])], flakes))
     return "\n".join(lines + ["",
         "A pull request with no `Review:` line is shown under no line and never counted as clean; the series starts at the "
         "first pull request that carries one. False sentences are over the lines with a number there (`unread` is "
         "counted apart); findings and rounds are over every numeric line, `unread` included, and a pull request is a region.",
+        "A turns cell is the median and the total of the turn counts of that node's calls, over the usage rows of the pull "
+        "requests' records, then how many are unknown, never counted as zero: a call whose backend reported no count, and "
+        "once under each node a pull request whose record holds no usage rows.",
+        "Follow-ups are the entries the newest `**Follow-ups filed**` comment of a pull request lists as filed, by the bot or "
+        "an approver, by the `(route: <route>)` tag each entry carries, before any note on dead anchors: issues, their number per landed pull request, ideas "
+        "and ledger lines. An entry with no route, from a comment written before routes, is a ledger line when it files, "
+        "appends to or reopens a `Cleanup` ledger, and an issue otherwise. A pull request with no such comment filed none.",
         "A failed attempt is one whose conclusion is `failure`. It is flaky when a later attempt of its run, or a later run "
         "of the same workflow on the same head SHA, concluded `success`, and failed otherwise. A cancelled or skipped attempt "
         "is neither. The flake rate is flaky over flaky plus failed."])
+
+
+def render_direct(direct, since, now):
+    date = "%Y-%m-%d"
+    weeks = sorted(set(direct) | {week_of(since + timedelta(days=i)) for i in range((now - since).days + 1)})
+
+    def row(label, marks):
+        return f"| {label} | {len(marks)} | {sum(marks)} | {len(marks) - sum(marks)} |"
+
+    lines = ["## Direct publications", "",
+             f"From {since.strftime(date)} to {now.strftime(date)} UTC, issue-less ones included: first-parent commits on the "
+             "default branch by the ISO week of the committer date, whose subject ends in no `(#PR)` and that are no pull "
+             "request's merge commit nor a rebase-merged vehicle's commit, and merged pull requests on a `direct/` head, "
+             "once each by the week of the merge, with a Fixes line when the head is `direct/<Issue>`. Report-only.", "",
+             "| Week | Direct | With a Fixes line | Issue-less |", "|---|---|---|---|"]
+    lines += [row(w, direct.get(w, [])) for w in weeks]
+    lines.append(row("all", [m for w in weeks for m in direct.get(w, [])]))
+    return "\n".join(lines)
 
 
 def json_docs(text):
@@ -968,7 +1118,10 @@ def main(argv=None):
         runs = cached[0] if cached else fetch_runs(slug, since, now)
         attempts, skipped = analyze(issues, prs, commits, approvers, now, since)
         report = (render(slug, attempts, skipped, now, since) + "\n\n"
-                  + render_quality(pr_quality(prs, commits, since), flake_attempts(runs, since), since, now))
+                  + render_quality(pr_quality(prs, commits, since), pr_quality(prs, commits, since, lambda p: turns_of(p.get("body"))),
+                                   pr_quality(prs, commits, since, lambda p: follow_ups_of(p["comments"]["nodes"], approvers)),
+                                   flake_attempts(runs, since), since, now) + "\n\n"
+                  + render_direct(direct_publications(prs, commits, since), since, now))
         print(report)
         if args.comment:
             if not title:

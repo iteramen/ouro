@@ -129,7 +129,7 @@ print('mutation counterfactual red; source restored')
     case.node("BUILD", {**h.BUILD, "validation_pending": [{"cmd": subset, "reason": "approved command blocked in worker environment"}]})
     code, out, err = case.ouro("run", "1")
     h.check("approved environment-blocked acceptance keeps validation_pending without a ruling or review",
-            code == 0 and "waiting for validation" in out and not h.stops_of(case)
+            code == 4 and "waiting for validation" in out and not h.stops_of(case)
             and len(case.prompts("BUILD")) == 1 and not case.prompts("REVIEW"))
 
     caller_only = "PATH='' python3 probes/subset.py --case selected"
@@ -197,7 +197,7 @@ def review_corrections(h):
     code, out, err = case.ouro("run", "1")
     tools = case.node_call("BUILD")["tools"]
     h.check("an unclosed earlier comment fence cannot hide a later trusted amendment or admit an outsider",
-            code == 0 and "Bash(" + command + ")" in tools and "untrusted-later" not in str(tools))
+            code == 4 and "Bash(" + command + ")" in tools and "untrusted-later" not in str(tools))
 
     body = h.ISSUE_BODY + "\n## Acceptance\nRun `python3 probes/mutation.py` and require red with each changed hunk reverted.\n"
     question = "The configured read-only reader cannot execute the required mutation and no genuine execution proof covers it; supply the approved proof."
@@ -237,6 +237,50 @@ def review_corrections(h):
             and named is not None and (pathlib.Path(named.group(1)) / "verdict.json").is_file())
 
     unread_fields(h)
+    part_scope(h)
+
+
+def part_scope(h):
+    """A checklist part run reads the shared acceptance and its own part's, never another part's; a run with no part reads all."""
+    from types import SimpleNamespace
+    from ouro.acceptance import acceptance_commands, acceptance_text, part_body
+    body = (h.ISSUE_BODY + "\n## Acceptance\n`python3 shared.py` passes.\nAcceptance command (part 2): `python3 field2.py`\n"
+            "## Acceptance (part 2)\n`python3 part2.py` passes.\n### Tests\n`python3 nested2.py` passes.\n## Notes\n`python3 notes.py` ran once.\n")
+    comments = [{"body": "**Triage**\n\nAcceptance command (part 2): `python3 declared2.py`\nAcceptance command: `python3 declared.py`"}]
+    shared = {"python3 shared.py", "python3 declared.py"}
+    second = {"python3 field2.py", "python3 part2.py", "python3 nested2.py", "python3 declared2.py"}
+
+    def granted(k):
+        run = SimpleNamespace(body=body, k=k, env=SimpleNamespace(lookup=lambda key: None), spec_amendments=lambda: comments)
+        return h.runmod.granted_acceptance(run), h.runmod.acceptance_problems(h.runmod.acceptance_source(run))
+    for k, want in ((1, shared), (2, shared | second), (None, shared | second)):
+        commands, problems = granted(k)
+        h.check(f"a part-scoped acceptance grants part {k} the shared commands and its own alone, with no refusal",
+                set(commands) == want and len(commands) == len(want) and problems == [])
+    text = acceptance_text(part_body(body, 1))
+    h.check("part 1's required acceptance text holds no other part's section, and the section after it stays unheld",
+            "shared.py" in text and not any(s in text for s in ("field2.py", "part2.py", "nested2.py", "notes.py")))
+    nested = (h.ISSUE_BODY + "\n## Acceptance\n`python3 shared.py` passes.\n### Acceptance (part 2)\n`python3 p2.py` passes.\n"
+              "### Notes\n`python3 after.py` passes.\n## Notes\n")
+    h.check("a part-tagged sub-heading under the shared Acceptance heading is that part's alone; the untagged sub-heading after it is shared again",
+            [acceptance_commands(part_body(nested, k)) for k in (1, 2)]
+            == [["python3 shared.py", "python3 after.py"], ["python3 shared.py", "python3 p2.py", "python3 after.py"]])
+    for k in (1, 2):
+        run = SimpleNamespace(body=body, k=k, title="t", env=SimpleNamespace(lookup=lambda key: None),
+                              spec_amendments=lambda: comments, spec_comments=lambda: "")
+        goal = h.runmod.Run.reader_goal(run)
+        stops = []
+        run.stop_issue = lambda reason, text, code: stops.append(text)
+        h.runmod.Run.stop_uncovered(run)
+        h.check(f"part {k}'s review brief and `gate uncovered` text name another part's acceptance only when it is part {k}'s own",
+                all((s in goal) == (k == 2) for s in ("part2.py", "declared2.py")) and ("part2.py" in stops[0]) == (k == 2) and "shared.py" in stops[0])
+    h.check("a refused part-tagged field is still named as granting nothing in its own part's run",
+            h.runmod.acceptance_problems(part_body(h.ISSUE_BODY + "\n## Notes\nAcceptance command (part 1): `python3 x.py`\n", 1)) != [])
+    from ouro.acceptance import ACCEPTANCE
+    from ouro.triage import ungranted_declarations
+    text, turned = ungranted_declarations("Acceptance command (part 2): `gh issue close 1`\n", h.ISSUE_BODY, [], ACCEPTANCE)
+    h.check("triage turns a refused part-tagged field into prose, as it does an untagged one",
+            turned == ["gh issue close 1"] and "Acceptance command" not in text and "Acceptance check, not a grant" in text)
 
 
 def unread_fields(h):
@@ -269,7 +313,8 @@ def unread_fields(h):
              "put the command in backticks"),
             ("under an Acceptance heading before a text fence names the backticks alone", "Acceptance", "```text\n" + dotnet + "\n```\n",
              "put the command in backticks"),
-            ("under an Acceptance heading before prose and a sh fence under another heading names the backticks alone", "Acceptance",
+            ("under an Acceptance heading, its command granted nowhere, before prose and a sh fence under another heading names the backticks alone",
+             "Acceptance",
              "Run from the repo root:\n## Notes\n```sh\n" + dotnet + "\n```\n", "put the command in backticks")):
         body = h.ISSUE_BODY + "\n## " + heading + "\nAcceptance command:\n" + below
         h.check("a label line " + name, problems(body) == [label + fix] and dotnet not in h.runmod.acceptance_commands(body))
@@ -323,8 +368,81 @@ def unread_fields(h):
             problems(h.runmod.declared_source(h.ISSUE_BODY, ["gh issue close 1"]))
             == ["`gh issue close 1`: this explicit command is outside the approved acceptance runner forms"])
 
+    declared_runners(h)
+
     case = h.happy_case("acceptance-unread-field", table={"_issue_1": h.issue(body=notes)})
     code, out, err = case.ouro("run", "1")
     h.check("an unread Acceptance command line stops the run before BUILD, naming its fix",
             code == 3 and not case.prompts("BUILD") and case.branches() == ["master"]
             and any(h.stop_comment_ok(stop, "acceptance unrunnable") and "put the command in backticks" in stop for stop in h.stops_of(case)))
+
+
+def declared_runners(h):
+    """A `ship.acceptance_runners` prefix is a runner the driver grants exactly as it grants a built-in one."""
+    from ouro.acceptance import ACCEPTANCE
+    cargo = "cargo test -p core"
+    extended = ACCEPTANCE + ("cargo ",)
+    body = h.ISSUE_BODY + "\n## Acceptance\n`" + cargo + "` passes.\n"
+    field = h.runmod.declared_source(h.ISSUE_BODY, [cargo])
+    refusal = ["`" + cargo + "`: this explicit command is outside the approved acceptance runner forms"]
+    h.check("a declared runner prefix grants its command under an Acceptance heading",
+            h.runmod.acceptance_commands(body, extended) == [cargo] and h.runmod.acceptance_problems(body, (), extended) == [])
+    h.check("a declared runner prefix lets its explicit Acceptance command field raise no problem",
+            h.runmod.acceptance_problems(field, (), extended) == [])
+    h.check("with no prefix declared the same command is not granted and its field keeps the runner-forms refusal",
+            h.runmod.acceptance_commands(body) == [] and h.runmod.acceptance_problems(field) == refusal)
+    h.check("a declared prefix adds a runner, not shell grammar",
+            h.runmod.acceptance_problems(h.runmod.declared_source(h.ISSUE_BODY, [cargo + " | tail"]), (), extended) != [])
+
+    binding = h.BINDING.format(policy="stop-at-pr", review="adversarial-review").replace("[ship]\n", '[ship]\nacceptance_runners = ["cargo "]\n')
+    pending = {**h.BUILD, "validation_pending": [{"cmd": cargo, "reason": "no cargo toolchain in the fixture"}]}
+    case = h.happy_case("acceptance-declared-runner", binding=binding, table={"_issue_1": h.issue(body=body)})
+    case.node("BUILD", pending)
+    code, out, err = case.ouro("run", "1")
+    h.check("a run whose binding declares the prefix grants the command to BUILD exactly",
+            code == 4 and len(case.prompts("BUILD")) == 1 and "Bash(" + cargo + ")" in case.node_call("BUILD")["tools"]
+            and not h.stops_of(case))
+    triage = [{"author": {"login": "o"}, "body": "**Triage**\n\nAcceptance command: `" + cargo + "`", "createdAt": h.TRIAGED}]
+    case = h.happy_case("acceptance-undeclared-runner", table={"_issue_1": h.issue(comments=triage)})
+    code, out, err = case.ouro("run", "1")
+    h.check("a run whose binding declares no prefix refuses the same field before BUILD",
+            code == 3 and not case.prompts("BUILD")
+            and any(h.stop_comment_ok(stop, "acceptance unrunnable") and refusal[0] in stop for stop in h.stops_of(case)))
+    case = h.happy_case("acceptance-declared-runner-field", binding=binding, table={"_issue_1": h.issue(comments=triage)})
+    case.node("BUILD", pending)
+    code, out, err = case.ouro("run", "1")
+    h.check("a run whose binding declares the prefix grants the same field to BUILD, with no stop",
+            code == 4 and len(case.prompts("BUILD")) == 1 and "Bash(" + cargo + ")" in case.node_call("BUILD")["tools"]
+            and not h.stops_of(case))
+    declared_runners_triage(h, cargo)
+
+
+def declared_runners_triage(h, cargo):
+    """Triage reads a declared prefix as the run does: its grant list, the PROMOTE check, the comment's fields and the empty-list note."""
+    notice = h.BINDING.format(policy="stop-at-pr", review="adversarial-review").replace(
+        'ci = "echo SKIP: the checks cannot run this gate"', 'ci = "echo another workflow runs this gate"')  # no gate BUILD is granted
+    declared = notice.replace("[ship]\n", '[ship]\nacceptance_runners = ["cargo "]\n')
+    labels = ("needs-triage", "gates", "bug")
+    answer = {"verdict": "PROMOTE", "size": "S", "flow": "express", "doc_impact": "none",
+              "comment": "One deliverable.\n\nAcceptance command: `" + cargo + "`\n"}
+
+    def triage(name, binding, acceptance):
+        body = h.ISSUE_BODY.replace("Doc impact on close: none", "## Acceptance\n" + acceptance + "\n\nDoc impact on close: none")
+        case = h.Case(name, binding=binding, table={"_issue_1": h.issue(labels=labels, body=body)})
+        case.node("TRIAGE", answer)
+        code, out, err = case.ouro("triage", "1", "--dry-run")
+        return code, out, open(case.nodes / case.prompts("TRIAGE")[0], encoding="utf-8").read()
+
+    field = "Acceptance command: `" + cargo + "`"
+    code, out, brief = triage("triage-declared-runner", declared, field)
+    h.check("triage with a declared prefix grants its command, promotes, keeps the comment's field and adds no empty-list note",
+            code == 0 and "as the driver reads them: `" + cargo + "`." in brief and "labels +['agent-ready'] -['needs-triage']" in out
+            and field in out and "not a grant" not in out and "empty command list" not in out)
+    code, out, brief = triage("triage-undeclared-runner", notice, field)
+    h.check("triage with no prefix declared asks on the same body and turns the comment's field into prose",
+            code == 3 and "none, the body grants no command" in brief and "labels +['needs-ruling'] -['needs-triage']" in out
+            and "Acceptance check, not a grant (this explicit command is outside the approved acceptance runner forms): `" + cargo + "`" in out
+            and "would get an empty command list" in out)
+    code, out, brief = triage("triage-declared-runner-env", declared, "`OURO_X=1 " + cargo + "` passes.")
+    h.check("triage's empty-list note names an environment-prefixed command that starts with a declared prefix",
+            "The acceptance names `OURO_X=1 " + cargo + "`, and the BUILD node would get an empty command list" in out)

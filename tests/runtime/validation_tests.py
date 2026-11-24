@@ -97,18 +97,21 @@ REQUEST_CASES = (
 
 
 def source_outcomes():
-    """Each DriverError message prefix and each stop the request checks hold, read from their source."""
+    """Each DriverError message prefix and each stop the request checks hold, read from their source. Two raises that share
+    a prefix are refused: one row would stand for both, and the second could be left without a case."""
     from ouro.run import Run
-    found = set()
+    found = []
     for fn in (validation.command, validation.record, validation.requests, Run.require_granted):
         for n in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(fn)))):
             if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call) and getattr(n.exc.func, "attr", getattr(n.exc.func, "id", None)) == "DriverError":
                 message = n.exc.args[0]
                 parts = message.values if isinstance(message, ast.JoinedStr) else [message]
-                found.add("".join(p.value for p in itertools.takewhile(lambda p: isinstance(p, ast.Constant), parts)))
+                found.append("".join(p.value for p in itertools.takewhile(lambda p: isinstance(p, ast.Constant), parts)))
             elif isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "stop_issue":
-                found.add(f"stop: {n.args[0].value}, exit {n.args[2].value}")
-    return found
+                found.append(f"stop: {n.args[0].value}, exit {n.args[2].value}")
+    shared = sorted({x for x in found if found.count(x) > 1})
+    assert not shared, f"request checks that share an outcome prefix: {shared}"
+    return set(found)
 
 
 class ValidationTests(unittest.TestCase):
@@ -290,7 +293,7 @@ class ValidationTests(unittest.TestCase):
                 patch.object(validation, "receipt") as receipt, \
                 patch.object(validation, "lock") as lease:
             # Real BUILD metadata parsing must not trigger receipt/state preflight.
-            self.assertEqual(Run.drive(run, None), 0)
+            self.assertEqual(Run.drive(run, None), 4)
             clean.assert_not_called()
             receipt.assert_not_called()
             lease.assert_not_called()
@@ -300,7 +303,7 @@ class ValidationTests(unittest.TestCase):
         from ouro.run import Run
         run, pending = self.driver_fixture(validating=False)
         with patch.object(validation, "validate", return_value=([], 75)) as validate:
-            self.assertEqual(Run.drive(run, None), 0)
+            self.assertEqual(Run.drive(run, None), 4)
             validate.assert_called_once_with(run.tree, pending, run.wait_hint, reuse=True, execute_missing=False)
         with patch.object(validation, "validate", side_effect=sh.DriverError("dirty inputs")):
             with self.assertRaisesRegex(sh.DriverError, "dirty inputs"):

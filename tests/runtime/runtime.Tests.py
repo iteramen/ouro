@@ -36,6 +36,7 @@ from backend_tests import BackendInterfaceTests
 from qwen_tests import QwenTests  # noqa: E402,F401 -- imported for unittest discovery
 from review_sandbox_tests import ReviewSandboxTests  # noqa: E402,F401 -- imported for unittest discovery
 from probe_credentials_tests import ProbeCredentialTests  # noqa: E402,F401 -- imported for unittest discovery
+from qwen_sandbox_boundary_tests import QwenSandboxBoundaryTests  # noqa: E402,F401 -- imported for unittest discovery
 from owned_children import reap_fixture_children
 
 
@@ -1110,6 +1111,11 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(runner.protected_path(".qwen/settings.json"), qwen)
                 self.assertEqual(runner.manual_steps({"manual": [{"path": ".qwen/settings.json", "edit": "e"}]}),
                                  [{"path": qwen, "edit": "e"}] if qwen else [])
+                runner.manual_paths = lambda: [".qwen/settings.json"]  # a planned `Manual:` line, no edit answered
+                self.assertEqual(runner.manual_steps({}), [{"path": qwen, "edit": ""}] if qwen else [])
+                runner.commits_past_base = lambda: False  # the brief lists the planned path only where the builder cannot edit it
+                self.assertEqual("`.qwen/settings.json`" in runner.manual_block(), bool(qwen))
+                runner.manual_paths = lambda: []
                 self.assertEqual([runner.protected_path(p) for p in harness], harness)
 
     def test_protected_lexical_path_keeps_manual_handoff(self):

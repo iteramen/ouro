@@ -1,15 +1,19 @@
-You are the FOLLOW-UP node of the ouro driver. Turn the residue below into issues, read against the
+You are the FOLLOW-UP node of the ouro driver. Write the issue for each leftover below, read against the
 review's findings on the branch. Read-only: write nothing. Each body names its anchors (path, symbol, a verbatim
 fragment) as of the merge commit.
 
-A residue item that a finding marks intended or settled is not filed. A residue item whose mechanism
-a finding corrects is filed with the finding's text as its mechanism. A finding that names a defect
-is filed; one that names no defect is not an issue. An empty `issues` list is the right answer when
-nothing is left.
+The review has routed every item, and the driver files each one under its route whatever you answer:
+each ends with `[route: ...]`, the route as the driver read it, and `(item k)`, its number. Answer one
+entry per item, its number in `item`; an item you write no entry for is filed with its own text, and an
+entry naming no item is dropped. A residue item whose mechanism a finding corrects is written with the
+finding's text as its mechanism.
 
-A below-floor line goes in the body of one issue titled exactly `Cleanup: <area>`, the area spelled as
-`[labels].area` declares it (`Cleanup` where none is declared): the driver looks that title up and
-appends the body to the ledger it finds, or files it. Every other issue is filed as it stands.
+- `issue` and `idea`: an issue of its own, titled as you title it; the driver gives an `idea` item the
+  `idea` label and an `issue` item `needs-triage`.
+- `ledger`: a below-floor line, appended to the area's cleanup ledger. Title it exactly `Cleanup: <area>`,
+  the area spelled as `[labels].area` declares it (`Cleanup` where none is declared), and write the line
+  as its body: the driver looks that title up and appends the body to the ledger it finds, or files it.
+
 Write no `Size:`, `Flow:` or `Doc impact on close:` line: triage stamps them, and the driver drops
 any line that starts with one of those keys from a body you return.
 `labels` names the issue's area and type labels, from the sets below; the driver keeps those, drops
@@ -18,7 +22,7 @@ ledger issue takes the ledger's labels instead).
 Before naming an area label or asking which one applies, read the binding file's comments around `[labels].area`, where a repository may say what each area covers, and follow them.
 
 Answer with one JSON object and nothing after it:
-{"issues": [{"title": "", "body": "", "labels": [""]}]}
+{"issues": [{"item": 1, "title": "", "body": "", "labels": [""]}]}
 
 ## Merge commit
 
@@ -32,7 +36,7 @@ Answer with one JSON object and nothing after it:
 
 <<residue>>
 
-## The review's findings: the newest record's L findings and the later rounds' OUTSIDE findings
+## The review's findings: the newest record's L findings, the L findings not routed `fix-now` of the record a fix-now round answered, and the later rounds' OUTSIDE findings
 
 <<findings>>
 

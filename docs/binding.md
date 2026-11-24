@@ -59,18 +59,20 @@ the binding without it. `templates/ouro.toml.example` is the copy-paste example.
 | `ship.policy` | `stop-at-pr`, `trivial-merge`, `merge-on-green` | required | who merges; the effective policy is the stricter of the running login's (its `ship.person` entry, else this key) and the issue's |
 | `ship.unattended_classes` | `express`, `standard`, `full` | `["express", "standard"]` | under `merge-on-green`, the Flow classes the driver merges unattended |
 | `ship.person` | `[[ship.person]]` entries: `login`, with `policy`, `unattended_classes` or both | none | one developer's own `ship.policy` and `ship.unattended_classes`, keyed by the gh login without regard to case; a key the entry leaves out is the repository's; the review of the pull request that changes the binding is the grant; `check` validates each entry; the driver's merge decision, its dry run and triage's notes read the entry of the gh login running them |
-| `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | required | the reviewer, by what it can observe: Choosing `ship.review` below |
+| `ship.review` | `copilot`, `adversarial-review`, `external-audit`, `none` | `adversarial-review` | the reviewer, by what it can observe: Choosing `ship.review` below; the default for a developer whose developer binding names no `review.reviewer` |
 | `ship.review_sandbox` | `true`, `false` | `false` | `true` confines the REVIEW node's PROBE commands to a harness sandbox: `ouro run` refuses before any tracker call, naming the backend, the platform and the missing piece, when the reviewer role's backend (the developer's `[runtime.roles.reviewer]`, else `runtime.backend`) has no sandbox route on the host, or the host is native Windows, WSL1 or another platform outside Linux, WSL2 and macOS, or the route's prerequisites are missing; Codex's route is its own write boundary, on Linux and macOS (its PROBE admission refuses WSL); Claude's route is Claude Code's sandbox (bubblewrap on Linux and WSL2, which needs `bwrap` and `socat` on PATH; Seatbelt on macOS): its PROBE review node launches with `sandbox.enabled`, `allowUnsandboxedCommands = false`, `failIfUnavailable` and an empty `sandbox.network.allowedDomains`, and with `CLAUDE_CODE_TMPDIR` and `TMPDIR` naming a temp directory private to that launch, which the driver deletes when the node returns, so its commands write only in the disposable review copy and that directory (never the `/tmp/claude-<uid>` every Claude session of the user shares) and reach no network; Qwen Code's route is its tool execution sandbox, on Linux alone (its macOS route is untested), which needs `/usr/bin/bwrap`, the one bwrap it runs: its PROBE review node launches with `tools.executionSandbox` (backend `bwrap`, `workspace-write` on the review copy, `network: closed`) and deny rules for `git push`, `git commit` and `gh`; Qwen Code runs no executable hook there, so ouro's allow-list hook never runs and its grant check does not discard that node's answer: the sandbox and the deny rules are that node's boundary, and every other Qwen Code node keeps the hook; a repository key, since the threat is the repository's: a repository that takes outside contributions sets it, and no developer binding unsets it |
 | `ship.validation` | `local`, `ci` | `local` | final-input validation authority for PR flows; inline direct checks remain local |
 | `ship.validation_checks` | exact GitHub check names | none; required under `ci` | nonempty unique names declaring aggregate CI coverage of selected nonlocal gates |
-| `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's |
-| `ship.external_cli` | `grok`, `claude`, `codex`, `copilot`, `qwen` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader |
-| `ship.external_model` | a model name | the CLI's own default | the reader's model; one the CLI refuses counts as a round-1 failure |
-| `ship.external_effort` | an effort level, as the CLI names it | the adapter's own (grok `medium`, none passed on the others) | the reader's reasoning effort, passed as written; `default` or an empty value on the reader's command line is the adapter's own; one the CLI refuses counts as a round-1 failure |
+| `ship.acceptance_runners` | command prefixes | none, the built-in runners alone | runner prefixes the driver treats as it treats its built-in ones (`python3 `, `python `, `pwsh `, `dotnet `, `npm `, `npx `, `pytest`, `bash `, `go test`): an acceptance command starting with one is granted to BUILD, in the body's acceptance sections and in an `Acceptance command:` field, by `run` and `triage` alike (contract §4, Explicit acceptance grants); matched as a plain string prefix exactly as written, so `"cargo "` with its trailing space admits `cargo test` and not `cargo-audit`; a prefix adds a runner, never shell grammar: the command still takes the single-command form; `check` refuses an entry that is empty, whitespace only, or holds a newline, CR, NUL or any of ``; & \| < > ` $`` |
+| `ship.copilot_bot_id` | a Bot node id | none; required under `copilot` | the id the review request names; github.com-wide, not the repository's; a developer's `review.reviewer = "copilot"` needs it too |
+| `ship.external_cli` | `grok`, `claude`, `codex`, `copilot`, `qwen` | none; required under `external-audit` | the CLI `bin/external-audit.py` runs as the reader; the default for a developer binding that names no `review.external_cli` |
+| `ship.external_model` | a model name | the CLI's own default | the reader's model; one the CLI refuses counts as a round-1 failure; the default for a developer binding that names no `review.external_model` |
+| `ship.external_effort` | an effort level, as the CLI names it | the adapter's own (grok `medium`, none passed on the others) | the reader's reasoning effort, passed as written; `default` or an empty value on the reader's command line is the adapter's own; one the CLI refuses counts as a round-1 failure; the default for a developer binding that names no `review.external_effort` |
 | `ship.landing` | `merge-squash`, `rebase-squash`, `rebase-merge`, `merge-merge` | `merge-squash` | the sync and merge answers in one word: The landing policy below |
 | `ship.sync` | `merge`, `rebase` | `merge` | how a branch is brought up to date before its pull request |
 | `ship.merge` | `squash`, `merge` | `squash` | how a pull request lands |
-| `ship.test_first_for_bugs` | `true`, `false` | none | accepted and read by nothing: Rules the skills apply below |
+| `ship.test_first_for_bugs` | `true`, `false` | none | `true`: the driver's base check runs on a `bug` issue's change; `check` refuses `true` without `ship.test_paths`: Rules the skills apply below |
+| `ship.test_paths` | globs | none; required when `ship.test_first_for_bugs = true` | the repository's test files, each glob matched with `fnmatchcase` against the repository-relative path, so `*` crosses `/`; the base check reads it; `check` refuses an empty list, a blank entry or one that is not a string: Rules the skills apply below |
 | `ship.direct` | globs | none, the lane off | the files the direct lane may push |
 | `ship.direct_max_lines` | positive integer | `20` | direct policy's added-plus-deleted line limit over the whole linear commit range |
 | `ship.direct_max_files` | positive integer | `3` | direct policy's changed-file union limit over that range |
@@ -128,9 +130,11 @@ a range, or a claim set; it answers with a JSON verdict that names the files it 
 at most, a third only for a new blocker, with the triage of round 1 given to round 2.
 
 **Who reviews what**, by the value and the issue's `Size:` line (contract §4), is this table and
-nowhere else: the driver's REVIEW step follows it. The table picks which reviewer a cell gets; the
+nowhere else. The value is the running developer's `review.reviewer` where their developer binding
+names one, else `ship.review`, else `adversarial-review` (The developer binding below). The
+driver's REVIEW step follows the table. The table picks which reviewer a cell gets; the
 review's weight within the cell follows the issue's `Flow:` class (contract §4): the reading brief
-for express, sized with its budget for standard, the probe format for full.
+for express, the sized review for standard, the probe format for full.
 
 | | `adversarial-review` | `copilot` | `external-audit` | `none` |
 |---|---|---|---|---|
@@ -144,8 +148,8 @@ round is spent, its record reads `Review: none` with a note saying why, and the 
 runs as under `none`. A diff with one other path keeps the reader, and a fix round that adds one
 (after a red gate or check, which no reviewer sees) brings the reader back for that fix.
 
-**The availability rule.** An unavailable reader — the CLI `ship.external_cli` names is not
-found, round 1 exits 1, round 1 exits 3 twice, or the run may not call it (a policy or network
+**The availability rule.** An unavailable reader — the CLI the developer binding's
+`review.external_cli` names, else `ship.external_cli`, is not found, round 1 exits 1, round 1 exits 3 twice, or the run may not call it (a policy or network
 rule forbids it) — falls back to the REVIEW node in every cell that names the reader, and the
 record says so. An `S` re-derived as `M` after the commit (contract §4) takes the `M` row. Under
 `stop-at-pr` the owner sees every PR whatever the value. The binding names one value, and nothing
@@ -246,15 +250,16 @@ missing file, malformed TOML, unknown key or provider/model mismatch is a driver
 
 | Scope | Location | Owns |
 |---|---|---|
-| Repository | `.claude/ouro.toml` | workflow, gates, review and shipping policy, labels and approvers |
-| Developer | `~/.config/ouro/developer.toml` or the XDG configuration directory | worker backend, models, reasoning effort, optional board connection and follow-up assignees |
+| Repository | `.claude/ouro.toml` | workflow, gates, shipping policy, the default reviewer, labels and approvers |
+| Developer | `~/.config/ouro/developer.toml` or the XDG configuration directory | worker backend, models, reasoning effort, advisor, the developer's own reviewer and reader, optional board connection and follow-up assignees |
 | Checkout on this machine | `.claude/ouro.local.toml` | the optional `repo.checkout` value |
 | Launch environment | process or user environment | host variables such as `OURO_FORBIDDEN_TOKENS` |
 
 ```toml
 [runtime]
 backend = "codex"                 # claude | codex | qwen; absent means claude
-effort = "high"                   # Codex only: low | medium | high | xhigh | max
+effort = "high"                   # Claude or Codex: low | medium | high | xhigh | max; absent means the host's own settings
+advisor = "up"                    # Claude: up | haiku | sonnet | opus | fable; absent means the host's own settings
 
 [runtime.models]
 builder = "default"
@@ -262,8 +267,15 @@ builder_trivial = "default"
 reviewer = "default"
 ```
 
-The runtime table admits only `runtime.backend`, `runtime.effort`, `runtime.models` and
-`runtime.roles`. Each node belongs to one worker role: `triager` (TRIAGE and FOLLOWUP),
+The runtime table admits only `runtime.backend`, `runtime.effort`, `runtime.advisor`,
+`runtime.models` and `runtime.roles`. `runtime.advisor` gives a Claude node an advisor, a stronger
+model it consults through a tool when it judges it needs help: the Claude backend passes it as
+`advisorModel` in the node's `--settings`. `up` is one tier above the node's model in the order
+`haiku`, `sonnet`, `opus`, `fable`; a node already on `fable` gets none, and the run prints that it
+has none. A model alias is passed as written. Absent, no advisor is passed and the host's own
+settings decide. Codex and Qwen Code refuse the key. The runtime attempt diagnostics record each
+node's advisor and whether the envelope's `modelUsage` names a second model, which is how a call to
+the advisor shows. Each node belongs to one worker role: `triager` (TRIAGE and FOLLOWUP),
 `checkpointer` (CHECKPOINT), `builder` and `builder_trivial` (BUILD) and `reviewer` (REVIEW).
 `runtime.models` takes any of them; `triager` and `checkpointer` take the `builder` role's model
 when nothing names theirs.
@@ -277,13 +289,13 @@ backend = "qwen"                  # absent means runtime.backend
 model = "deepseek-v4-pro"
 ```
 
-A `[runtime.roles.<role>]` table holds only `backend`, `model` and `effort`, each checked
-against that role's backend by the rules of `runtime.models` and `runtime.effort`; an unknown role
+A `[runtime.roles.<role>]` table holds only `backend`, `model`, `effort` and `advisor`, each checked
+against that role's backend by the rules of `runtime.models`, `runtime.effort` and `runtime.advisor`; an unknown role
 or key is a driver error. Each node dispatches through its role's backend, so one `ouro run` can
 triage and file follow-ups on Qwen Code while it builds and reviews on Claude. A role's model is
 its role table's `model`, then `runtime.models`, then the repository's `[models]`, then the usual
 default; `triager` and `checkpointer` inherit the `builder` model only while they share its
-backend. `runtime.models` and `runtime.effort` apply to the roles on `runtime.backend`: a
+backend. `runtime.models`, `runtime.effort` and `runtime.advisor` apply to the roles on `runtime.backend`: a
 `runtime.models` entry for a role whose table selects another backend is refused, and its model
 goes in that table.
 
@@ -293,7 +305,8 @@ any: the issue's acceptance commands and every gate the checkpoint selects; REVI
 express and probes (PROBE) under standard and full; BUILD takes full readiness. A run resumed on
 a merged pull request plans FOLLOWUP alone. Each backend's preflight runs once, with the contract
 of each of its roles the command can dispatch: file-only when every such role only reads, full
-readiness otherwise. A role whose backend does not admit its
+readiness otherwise. The Claude preflight requires `claude --help` to list `--effort` when a role
+it serves sets an effort, and only then. A role whose backend does not admit its
 contract is refused there, naming the role, the backend and the contract; there is no fallback to
 another backend. So a `builder` on native Windows Codex, which only reads, refuses a run before it
 writes. A diff that tightens the flow from express or direct to standard or full after BUILD commits
@@ -304,7 +317,8 @@ makes the PROBE live call on the reviewer's model.
 `runtime.backend`, each command makes one preflight, of that backend, scoped the same way, and a
 run that such a diff tightens makes the second, reviewer-scoped one as well. The
 attempt diagnostics, the usage table and the progress file's `reviewer` field name the backend
-each node used; a board claim's `platform` stays `runtime.backend`.
+each node used, and the usage table the effort each was given, `unknown` where the host's own
+settings decided it; a board claim's `platform` stays `runtime.backend`.
 
 Codex PROBE admits only Darwin's exact system-layer `/etc/codex/config.toml` alias to
 `/private/etc/codex/config.toml`: the fixed root-owned `/etc` link and physical chain are
@@ -325,30 +339,68 @@ review copy is a standalone repository fetched from the main checkout, with no r
 `origin/<default>` is a ref there. A push or a `gh` call that keeps these overrides, through a
 nested interpreter or a renamed git alike, finds no helper, askpass, agent, ssh key or `gh` login
 to authenticate with, and the name-based refusals (Claude's deny patterns, the Qwen Code hook and
-deny rules, the Codex bridge) remain the first layer. The harness keeps its own model login:
-Claude Code's and Codex's home and their API variables, and Qwen Code's `OPENAI_*` variables, are
-untouched. READ, CHECKPOINT and BUILD nodes keep their environment.
+deny rules, the Codex bridge) remain the first layer. On Claude and Codex, `HOME`, `USERPROFILE`
+and `XDG_CONFIG_HOME` name an empty directory private to the launch, a home of its own as Qwen
+Code's node has, so git's curl finds no `~/.netrc` and the node's git reads no `~/.gitconfig`.
+The harness's own state is found past that home. A declared `CLAUDE_CONFIG_DIR` is passed on.
+With none declared, the variable stays unset, since Claude Code keeps its global `.claude.json`
+under a set one: the home holds a link to the developer's `~/.claude`, on Windows a directory
+junction, which needs no privilege, and a copy of their `~/.claude.json`, so the node starts with
+their login and account state and its writes to that file stay in the launch's scratch
+directory. `CODEX_HOME` is the declared value or `~/.codex`, on
+the Codex launch and its MCP bridge alike. Their API variables, and Qwen Code's
+`OPENAI_*` variables, are untouched. Claude Code's login survives the private home on Linux,
+macOS (its keychain login) and Windows; Codex's is unproved on macOS and on Windows. The opt-in
+`python3 tests/runtime/live.py --claude-probe-home` launches one Claude PROBE node with the
+variable undeclared and prints the harness version, its answer and whether
+`~/.claude/.claude.json` exists afterwards; no CI leg runs it.
+READ, CHECKPOINT and BUILD nodes get none of these overrides.
 
 The overrides point git and `gh` away from the stored credentials; they do not delete them, and
 they do not confine the commands. A command can drop an override (`env -u GIT_CONFIG_COUNT`) or
 name a credential source itself (`git -c credential.helper=store`), and then authenticates as the
-developer would. On Claude and Codex the node keeps the developer's home, so git still sends a
-matching `~/.netrc` entry to an http(s) remote whatever its helpers say, even on a plain `git push`
-that keeps every override, and `~/.git-credentials`, `~/.ssh` and `~/.config/gh` stay readable; Qwen Code's node runs with a home of its own, which hides them from a
-command that keeps `HOME`, not from one that names their path. Outside a sandbox
+developer would. The node's home of its own hides `~/.netrc`, `~/.git-credentials`,
+`~/.config/gh` and `~/.gitconfig` from a command that keeps `HOME`, not from one that names their
+path or drops `HOME`. A raw `ssh` ignores `HOME` and still reads the account's `~/.ssh`, its
+config and default keys, from the password database. Outside a sandbox
 (`ship.review_sandbox`, or Codex's own boundary), commands still write outside the copy and reach
 the network. Nothing here covers a raw `ssh` given an explicit key, a credential a repository holds
 in its own config (a persisted `http.<url>.extraheader`), or `git -C` against another checkout.
 
+Every Claude Code node launches with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`: auto-memory is off, and
+no key turns it back on. Claude Code keys that memory by repository and shares it across
+worktrees, so a node would otherwise read the launching developer's private notes. A ruling about
+a repository goes in its documents; a fact about one host goes in that host's global instructions
+under `~/.claude`, which nodes still load. Interactive sessions keep their memory.
+
+```toml
+[review]
+reviewer = "external-audit"       # adversarial-review | external-audit | copilot; absent means ship.review
+external_cli = "codex"            # grok | claude | codex | copilot | qwen; absent means ship.external_cli
+external_model = "default"        # absent means ship.external_model
+external_effort = "high"          # absent means ship.external_effort
+```
+
+Each developer picks their own reviewer in the optional `[review]` table. Each key has the values and
+rules of the `ship.*` key it stands for. A key the developer leaves unset keeps the repository's value.
+With neither a `review.reviewer` nor a `ship.review`, the reviewer is `adversarial-review`: the
+REVIEW node on the reviewer role's backend, in a fresh session, so one model is enough. A developer
+cannot opt out of review: `reviewer = "none"` is refused with an error that says so, as are an unknown
+reviewer, a reader CLI outside the adapters `bin/external-audit.py` ships, and an unknown key.
+`copilot` stays gated by the repository: a run that selects it with no `ship.copilot_bot_id` is refused
+before any tracker write, and so is an `external-audit` with no reader CLI in either binding. The
+run's `[1] bind` line and the dry run's `[7] REVIEW` line name the reviewer and the binding that
+selected it. When the developer binding selected it, the pull request record carries the
+note `Reviewer: <reviewer>, selected by the developer binding's [review].`
+
 The optional `coordination` and `followup` tables below are the only other developer tables.
-Developer settings never merge into repository shipping policy, review requirements, gates,
-approvers or the external reader selection; a developer's own ship policy is a `[[ship.person]]`
+Developer settings never merge into repository shipping policy, the merge rules tied to
+`ship.review = "none"`, gates or approvers. A developer's own ship policy is a `[[ship.person]]`
 entry in the repository binding, granted by the review of the pull request that adds it.
 For Claude, developer role overrides precede the repository's model aliases and the usual role defaults. For Codex, roles use explicit
 account-served model names or `default`, the CLI's built-in default; repository Claude aliases
 are not passed to Codex or guessed into another provider's tiers. There is no provider fallback.
-Without a developer override the external-audit reader still follows `ship.external_cli`;
-choosing Codex workers does not change who must review a change.
+Choosing Codex workers does not change who reviews a change: only `[review]` does.
 
 ### Optional advisory board connection
 
@@ -544,8 +596,10 @@ approvals and runtime paths inside the node's temporary directory.
     removes the shell, and the hook decides each `run_shell_command` call. CHECKPOINT runs
     only its brief's exact commands; BUILD runs those and `git rm`, `git mv`, `git status`,
     `git diff`, `git log` and `git ls-files` with any arguments; and PROBE any single command but `git push`, `git commit` (their dashed
-    builtins `git-push` and `git-commit` included) and `gh`, with no `$`, glob, brace, git `-c`,
-    `--config-env`, `alias.` or `GIT_CONFIG` word. Either way the hook refuses a
+    builtins `git-push` and `git-commit` included) and `gh`, with no `$` word, no glob or brace
+    word whose basename, its brace sets expanded, can match `git`, `gh` or a `git-<sub>` name,
+    no quote or backslash after an unquoted `[` in a word, or anywhere in a word with an unquoted `{`, no whitespace but space and tab, and, in a command that names git, no `-c`, `--config-env`, `alias.` or `GIT_CONFIG` word, so
+    `ls *.py` runs. Either way the hook refuses a
     compound command, a pipe, a redirection, a substitution, a leading variable assignment, a
     background run and another directory, as bash parses the command line. It reads the names
     of the words bash runs: not what a nested interpreter (`python3 -c`) or a command that
@@ -571,7 +625,12 @@ approvals and runtime paths inside the node's temporary directory.
     Qwen Code's tool execution sandbox, which runs no executable hook, so its settings carry no
     hook and its answer is not discarded by the grant check. The sandbox (`workspace-write` on the
     review copy, `network: closed`) and the `git push`, `git commit` and `gh` deny rules are that
-    node's boundary. A sandbox requested for any other node is a driver error before launch.
+    node's boundary. The run plans the reviewer's contract as that sandboxed PROBE, so the
+    preflight's PROBE live call launches with the same settings, and its transcript alone must
+    show the listed command ran: this proves the sandboxed route can run a granted command, not
+    that the sandbox confines it; the opt-in `python3 tests/runtime/live.py --qwen-sandbox`
+    qualification ([contract](contract.md)) proves the confinement. A sandbox requested for any
+    other node, beside that preflight call, is a driver error before launch.
 - **Repository isolation:** folder trust is on, and ouro writes the trusted-folders file. For a
   node that only reads, and for the external reader, it trusts nothing, so the repository's Qwen
   Code workspace settings, hooks and environment files are ignored. A node that runs commands or
@@ -597,12 +656,17 @@ approvals and runtime paths inside the node's temporary directory.
   run the triager's, its one build role's and the reviewer's, PROBE only under standard and full
   or once a diff tightens the flow to one of them (the plan above).
   `inspect --check` proves every role it serves at its widest contract. A transcript in which a live call is
-  missing, failed or not granted by the hook refuses the backend, naming that call's contract.
+  missing, failed or not granted by the hook refuses the backend, naming that call's contract;
+  under `ship.review_sandbox = true` the PROBE call runs under the sandbox, with no hook, as above.
 - **Answers:** a node's answer is the structured result. When Qwen Code fails a run because the
   model wrote its answer as plain text instead of calling the tool, that text is admitted only
   when it passes the same strict schema check.
-- **Windows:** the hook command is POSIX-quoted. Qwen Code runs Windows hooks under cmd.exe, so
-  there the hook does not start, and preflight's file proof refuses the backend.
+- **Windows:** Qwen Code runs the hook under the `ComSpec` shell, cmd.exe, or under bash when its
+  environment marks Git Bash, where the hook command is POSIX-quoted as on Linux. Qwen Code's
+  cmd.exe launch leaves no quoting cmd.exe reads, so the command's arguments are joined unquoted:
+  the Python interpreter, the plugin and the temporary directory need paths with no whitespace,
+  double quote or `&|<>^%`. A path that holds one refuses the worker and the `--cli qwen` reader
+  before launch, naming it, and so does a `ComSpec` naming PowerShell.
 - **Cost:** reported as unknown.
 
 ## The machine-local overlay — `.claude/ouro.local.toml`
@@ -639,8 +703,8 @@ sees as a directory. The overlay entry is unchecked.
 
 ## Rules the validator enforces
 
-- `schema`, `repo.slug`, `repo.default_branch`, `ship.policy`, `ship.review` and
-  `owner.ruling_approvers` are required.
+- `schema`, `repo.slug`, `repo.default_branch`, `ship.policy` and `owner.ruling_approvers` are
+  required.
 - Unknown tables or keys fail. A typo is a silent misconfiguration otherwise.
 - `ship.review = "none"` forbids `ship.policy = "trivial-merge"` and `"merge-on-green"` — no
   independent reviewer, no unattended merge.
@@ -794,9 +858,13 @@ sees as a directory. The overlay entry is unchecked.
   binding cannot remove, reorder, or replace a step.
 - **Nothing in a skill names a repo, a path, a bot id, a workflow, or a script.** If it does,
   that is a defect in the skill — file it against `ouro`.
-- **`ship.test_first_for_bugs` is accepted and read by nothing.** The schema keeps the key valid
-  so an existing binding does not fail `check`; the BUILD node's test-first rule runs
-  unconditionally for a bug whose code has a test host.
+- **A bug fix's test rows must fail on the code before the fix.** With
+  `ship.test_first_for_bugs = true`, a run whose issue carries the `bug` label takes the driver's
+  base check, [contract §4](contract.md): each selected gate whose `paths` hold a changed
+  file under `ship.test_paths` runs on a copy of the head with every other changed file put back
+  to `origin/<default>`, and one must go red. `check` refuses `ship.test_first_for_bugs = true`
+  without `ship.test_paths`, an empty `ship.test_paths`, and an entry in it that is blank or not a
+  string. The BUILD node holds no test-first rule of its own.
 - **The plugin targets github.com.** The binding has no host key, and no gate or template names
   a host to `gh`; a skill names one only where `/ouro:init` has the operator add `--hostname` to
   its bot-id lookup off github.com. A consumer on another GitHub host sets `GH_HOST` in the

@@ -30,6 +30,7 @@ class Backend:
     label: str
     claude_aliases: bool  # True: a model must be a Claude alias; False: it must not be one
     efforts: tuple = ()   # runtime.effort values it takes; empty refuses the key
+    advisors: tuple = ()  # runtime.advisor values it takes; empty refuses the key
 
     @property
     def interface(self):
@@ -38,7 +39,7 @@ class Backend:
     def default_model(self, legacy):
         return legacy if self.claude_aliases else "default"
 
-    def validate_runtime(self, models, effort, effort_key="runtime.effort"):
+    def validate_runtime(self, models, effort, effort_key="runtime.effort", advisor=None, advisor_key="runtime.advisor"):
         """`models` maps each developer.toml key (runtime.models.builder, runtime.roles.reviewer.model) to its value."""
         for key, value in models.items():
             if not isinstance(value, str) or not value.strip() or value != value.strip():
@@ -48,13 +49,18 @@ class Backend:
             if not self.claude_aliases and value in CLAUDE_MODELS:
                 raise ValueError(f"{key}: Claude aliases cannot select {self.label} models")
         if effort is not None and effort not in self.efforts:
-            ((label, efforts),) = [(b.label, b.efforts) for b in BACKENDS.values() if b.efforts]
-            raise ValueError(f"{effort_key} requires {label} and {', '.join(efforts[:-1])} or {efforts[-1]}")
+            labels = " or ".join(b.label for b in BACKENDS.values() if b.efforts)
+            raise ValueError(f"{effort_key} requires {labels} and {', '.join(EFFORTS[:-1])} or {EFFORTS[-1]}")
+        if advisor is not None and not self.advisors:
+            raise ValueError(f"{advisor_key}: {self.label} takes no advisor")
+        if advisor is not None and advisor not in self.advisors:
+            raise ValueError(f"{advisor_key} must be {', '.join(self.advisors[:-1])} or {self.advisors[-1]}")
 
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # every backend that takes runtime.effort takes these
 BACKENDS = {b.name: b for b in (
-    Backend("claude", "Claude", claude_aliases=True),
-    Backend("codex", "Codex", claude_aliases=False, efforts=("low", "medium", "high", "xhigh", "max")),
+    Backend("claude", "Claude", claude_aliases=True, efforts=EFFORTS, advisors=("up", *CLAUDE_MODELS)),
+    Backend("codex", "Codex", claude_aliases=False, efforts=EFFORTS),
     Backend("qwen", "Qwen Code", claude_aliases=False),
 )}
 

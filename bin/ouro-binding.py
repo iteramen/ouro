@@ -134,8 +134,8 @@ SCHEMA = {
     "gate": {"run": str, "ci": str, "paths": list, "cheap": bool, "direct_code_check": bool},
     "ship": {"policy": str, "review": str, "landing": str, "sync": str, "merge": str,
              "copilot_bot_id": str, "external_cli": str, "external_model": str,
-             "external_effort": str, "test_first_for_bugs": bool, "review_sandbox": bool, "direct": list,
-             "unattended_classes": list, "validation": str, "validation_checks": list, "direct_max_lines": int, "direct_max_files": int},
+             "external_effort": str, "test_first_for_bugs": bool, "test_paths": list, "review_sandbox": bool, "direct": list,
+             "unattended_classes": list, "validation": str, "validation_checks": list, "acceptance_runners": list, "direct_max_lines": int, "direct_max_files": int},
     # Every key optional; each holds one of MODEL_VALUES, checked below. Absent means the
     # reading skill's own default.
     "models": {role: str for role in MODEL_ROLES},
@@ -162,7 +162,7 @@ SCHEMA = {
 # [[ship.person]]: one developer's own ship.policy and ship.unattended_classes, granted by the
 # review of the pull request that changes the binding. Each key keeps the rules of the one it stands for.
 PERSON_SCHEMA = {"login": str, "policy": str, "unattended_classes": list}
-REQUIRED = ("schema", "repo.slug", "repo.default_branch", "ship.policy", "ship.review", "owner.ruling_approvers")
+REQUIRED = ("schema", "repo.slug", "repo.default_branch", "ship.policy", "owner.ruling_approvers")
 
 # Lists whose entries are regexes, not literals. An invalid pattern is a configuration error the
 # consumer can fix here; `check` catches only what Python's re refuses, and the docs gate matches
@@ -361,6 +361,17 @@ def validate(data):
             errors.append("ship.validation_checks: names must be non-blank single-line strings")
         if len(set(checks)) != len(checks):
             errors.append("ship.validation_checks: names must be unique")
+    prefixes = ship.get("acceptance_runners")
+    # A prefix grants every command it starts, so an empty one grants everything; the class is validation.command's.
+    if isinstance(prefixes, list) and any(isinstance(p, str) and (not p.strip() or re.search(r"[\n\r\x00;&|<>`$]", p)) for p in prefixes):
+        errors.append("ship.acceptance_runners: a runner prefix must be non-blank and hold none of newline, CR, NUL, ; & | < > ` $")
+    if ship.get("test_first_for_bugs") is True and "test_paths" not in ship:
+        errors.append("ship.test_paths: required when ship.test_first_for_bugs = true")
+    test_paths = ship.get("test_paths")
+    if test_paths == []:
+        errors.append("ship.test_paths: must be a non-empty list")
+    elif isinstance(test_paths, list) and any(isinstance(p, str) and not p.strip() for p in test_paths):
+        errors.append("ship.test_paths: every entry must be a non-blank glob")
     if "policy" in ship and ship["policy"] not in POLICIES:
         errors.append(f"ship.policy: must be one of {', '.join(POLICIES)}")
     if "review" in ship and ship["review"] not in REVIEWS:
@@ -852,6 +863,13 @@ ruling_approvers = ["someone"]
     assert validate(ci_validation) == [], validate(ci_validation)
     assert lookup(ci_validation, "ship.validation_checks") == ["gates (windows)", "gates (linux)"]
     assert validate(validation_binding('validation_checks = ["Build", "build"]')) == []  # Exact names, not case-folded.
+    runners_binding = validation_binding('acceptance_runners = ["cargo test", "make "]')
+    assert validate(runners_binding) == [], validate(runners_binding)
+    assert lookup(runners_binding, "ship.acceptance_runners") == ["cargo test", "make "]
+    test_paths = validation_binding('test_first_for_bugs = true\ntest_paths = ["tests/**", "**/*_test.py"]')
+    assert validate(test_paths) == [], validate(test_paths)
+    assert lookup(test_paths, "ship.test_paths") == ["tests/**", "**/*_test.py"]
+    assert validate(validation_binding('test_first_for_bugs = false')) == []
     for lines, fragment in (
         ('validation = "unknown"', "ship.validation:"),
         ('validation = true', "ship.validation: expected str"),
@@ -862,9 +880,22 @@ ruling_approvers = ["someone"]
         ('validation_checks = ["Build", "Build"]', "ship.validation_checks: names must be unique"),
         ('validation_checks = [" "]', "ship.validation_checks: names must be non-blank single-line strings"),
         ('validation_checks = ["Build\\nother"]', "ship.validation_checks: names must be non-blank single-line strings"),
+        ('acceptance_runners = "cargo "', "ship.acceptance_runners: expected list"),
+        ('acceptance_runners = [1]', "ship.acceptance_runners: every entry must be a string"),
+        ('acceptance_runners = [""]', "ship.acceptance_runners: a runner prefix must be non-blank"),
+        ('acceptance_runners = ["  "]', "ship.acceptance_runners: a runner prefix must be non-blank"),
+        ('acceptance_runners = ["make; "]', "ship.acceptance_runners: a runner prefix must be non-blank"),
+        ('acceptance_runners = ["cargo $X"]', "ship.acceptance_runners: a runner prefix must be non-blank"),
+        ('test_paths = ["tests/**", 1]', "ship.test_paths: every entry must be a string"),
+        ('test_first_for_bugs = true', "ship.test_paths: required when ship.test_first_for_bugs = true"),
+        ('test_paths = "tests/**"', "ship.test_paths: expected list"),
+        ('test_first_for_bugs = true\ntest_paths = []', "ship.test_paths: must be a non-empty list"),
     ):
         errors = validate(validation_binding(lines))
         assert any(fragment in error for error in errors), (lines, errors)
+    for blank in ('[""]', '["tests/**", "  "]'):
+        errors = validate(validation_binding(f"test_paths = {blank}"))
+        assert "ship.test_paths: every entry must be a non-blank glob" in errors, (blank, errors)
 
     # review is the reviewer's standards list: a list of strings, like implement. A string entry
     # is accepted and readable through get; a non-string entry and a bare string are refused.
@@ -1195,6 +1226,10 @@ report_only = ["S9"]
         preset.write_text(base, encoding="utf-8")
         got = subprocess.run([sys.executable, this, "get", "ship.sync", str(preset)], capture_output=True, text=True)
         assert got.returncode == 1 and "no such key" in got.stderr, (got.returncode, got.stdout, got.stderr)
+
+    # ship.review is optional: absent, the driver reads adversarial-review, or a developer's [review].
+    no_review = tomllib.loads(base.replace('review = "adversarial-review"\n', ""))
+    assert "review" not in no_review["ship"] and validate(no_review) == [], validate(no_review)
 
     copilot = tomllib.loads(base.replace('review = "adversarial-review"', 'review = "copilot"'))
     assert validate(copilot) == ["ship.copilot_bot_id: required when ship.review = \"copilot\""]

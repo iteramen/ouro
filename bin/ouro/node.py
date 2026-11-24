@@ -3,19 +3,21 @@
 Real mode selects a developer-bound harness with the prompt on stdin (a command line is capped near 32k
 characters on Windows, and the briefs are longer). Stub mode, selected by OURO_NODE_STUB naming
 a directory, spawns nothing: the k-th call of a node in this process returns <dir>/<name>.<k>.json,
-else <dir>/<name>.json, and leaves <dir>/<name>.<k>.call.json holding the cwd, the tools and the model it got.
+else <dir>/<name>.json, and leaves <dir>/<name>.<k>.call.json holding the cwd, the tools and the model it got. The answer's
+`_usage` is the call's usage, `num_turns` included, and `_session` its session (default `stub`).
 """
 import json
 import os
 import re
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from . import developer, sh
+from . import developer, records, sh
 from .runtime import Capabilities, READ, PROBE, builder, diagnostics
 from .runtime.backends import BACKENDS, NOT_REQUIRED, UNSUPPORTED
 
-USAGE = []  # one row per node call: {node, session, input, output, cache_read, cache_creation, cost}
+USAGE = []  # one row per node call: {node, session, input, output, cache_read, cache_creation, cost, turns, ...}
 _CALLS = {}
 
 TIMEOUTS = {"BUILD": 3600, "REVIEW": 3600, "TRIAGE": 600, "FOLLOWUP": 600, "CHECKPOINT": 3600}
@@ -25,8 +27,8 @@ READ_TOOLS = ["Read", "Grep", "Glob"]
 
 SCHEMAS = {
     "TRIAGE": {"type": "object", "required": ["verdict", "comment"], "properties": {
-        "deliverable": {"type": "string"},  # ahead of verdict: an eighth entry in the run below clones BUILD's (release/duplicates.py)
-        "verdict": {"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE"]},
+        "deliverable": {"type": "string"}, "children": {"type": "array"}, "duplicate_of": {"type": ["integer", "null"]},  # ahead of verdict: an eighth entry in the run below clones BUILD's (release/duplicates.py)
+        "verdict": {"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE", "DUPLICATE"]},
         "size": {"type": "string"}, "flow": {"type": "string"}, "doc_impact": {"type": "string"}, "manual": {"type": "array"}, "labels": {"type": "array"},
         "comment": {"type": "string"}, "question": {"type": "string"}}},
     "BUILD": {"type": "object", "properties": {
@@ -36,7 +38,7 @@ SCHEMAS = {
             "properties": {"cmd": {"type": "string"}, "reason": {"type": "string"}}}},
         "replies": {"type": "array"}, "door": {"type": "string"}, "blast_radius": {"type": "string"}}},
     "REVIEW": {"type": "object", "required": ["verdict", "findings"], "properties": {
-        "verdict": {"type": "string", "enum": ["CLEAN", "FINDINGS"]}, "findings": {"type": "array"},
+        "verdict": {"type": "string", "enum": ["CLEAN", "FINDINGS"]}, "findings": {"type": "array"}, "residue": {"type": "array"},
         "false_record_sentences": {"type": ["integer", "string"]}, "files_read": {"type": "array"},
         "stop": {"type": ["object", "null"], "properties": {"reason": {"type": "string"}, "question": {"type": "string"}}}}},
     "CHECKPOINT": {"type": "object", "properties": {"finding": {"type": "string"}, "stop": {"type": "object"}}},
@@ -59,13 +61,15 @@ def parse_first_json(text):
     return None
 
 
-def _record(name, session, usage, cost, backend="claude"):
+def _record(name, session, usage, cost, backend="claude", effort=None):
+    """One usage row; a call that returned no session id gets an id of its own, since `records.usage_rows` keys rows by session.
+    `effort` is the runtime.effort the call was given; None, the host's own settings decided it."""
     usage = usage if isinstance(usage, dict) else {}
-    USAGE.append({"node": name, "backend": backend, "session": session or "stub", "input": usage.get("input_tokens", 0),
+    USAGE.append({"node": name, "backend": backend, "session": session or f"none-{uuid.uuid4().hex[:12]}", "input": usage.get("input_tokens", 0),
                   "output": usage.get("output_tokens", 0), "cache_read": usage.get("cache_read_input_tokens", 0),
                   "cache_creation": usage.get("cache_creation_input_tokens", 0), "cost": cost,
                   "provider": usage.get("provider", "claude"), "model": usage.get("model"),
-                  "tool_calls": usage.get("tool_calls", [])})
+                  "turns": diagnostics.count(usage.get("num_turns")), "effort": effort, "tool_calls": usage.get("tool_calls", [])})
 
 
 def _stub(name, prompt, cwd, directory, tools, denied, model, backend="claude", sandbox=False):
@@ -77,15 +81,18 @@ def _stub(name, prompt, cwd, directory, tools, denied, model, backend="claude", 
     if not f.is_file():
         raise sh.DriverError(f"node stub: no {name}.{k}.json or {name}.json in {d}")
     (d / f"{name}.{k}.prompt.txt").write_bytes(prompt.encode("utf-8"))
-    (d / f"{name}.{k}.call.json").write_text(json.dumps({"cwd": str(cwd), "cwd_exists": Path(cwd).is_dir(), "tools": tools,
+    # siblings: what an earlier round left beside the node's directory, which the run's scratch removal would otherwise hide
+    (d / f"{name}.{k}.call.json").write_text(json.dumps({"cwd": str(cwd), "cwd_exists": Path(cwd).is_dir(),
+                                                          "siblings": sorted(p.name for p in Path(cwd).parent.iterdir()), "tools": tools,
                                                           "denied": denied, "model": model, "backend": backend,
                                                           "sandbox": sandbox}), encoding="utf-8")
     ans = json.loads(f.read_text(encoding="utf-8"))
     usage = ans.pop("_usage", None) or {}
+    session = ans.pop("_session", None) or "stub"
     commands = ans.pop("_run", [])
     if "_raw" in ans:
-        _record(name, "stub", usage, 0, backend)
-        return ans["_raw"], "stub", ans.get("_stderr", "")
+        _record(name, session, usage, 0, backend)
+        return ans["_raw"], session, ans.get("_stderr", "")
     for rel, content in (ans.pop("writes", None) or {}).items():
         target = Path(cwd) / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -103,8 +110,8 @@ def _stub(name, prompt, cwd, directory, tools, denied, model, backend="claude", 
                       "inputs": before if before == after else None})
     for rel, content in (ans.pop("_after_run", None) or {}).items():
         (Path(cwd) / rel).write_bytes(content.encode("utf-8"))
-    _record(name, "stub", {**usage, "tool_calls": calls}, 0, backend)
-    return json.dumps(ans), "stub", ""
+    _record(name, session, {**usage, "tool_calls": calls}, 0, backend)
+    return json.dumps(ans), session, ""
 
 
 def model(env, role, default):
@@ -127,7 +134,7 @@ CONTRACTS = {"triager": (READ,), "checkpointer": (READ, None), "builder": (None,
 
 def contract_name(capabilities):
     return ("full" if capabilities is None else "READ" if capabilities == READ else
-            "PROBE" if capabilities == PROBE else "commands")
+            "PROBE" if capabilities.probe else "commands")
 
 
 def widest(settings):
@@ -151,7 +158,8 @@ def plan(settings, needs):
             raise sh.DriverError(f"preflight: role {role} selects {backend.label}, which does not admit its "
                                  f"{contract_name(contract)} contract; select another backend in [runtime.roles.{role}]")
         groups.setdefault(backend.name, {})[role] = contract
-    # No backend's preflight reads the effort, so none is proven here; validate_runtime checks each when the settings load.
+    # Claude's preflight asks each served role's effort_of whether to require --effort; validate_runtime checks each value
+    # when the settings load.
     return {name: (replace(settings, serves=roles, effort=settings.effort_of(next(iter(roles)))), file_only(roles))
             for name, roles in groups.items()}
 
@@ -177,10 +185,11 @@ def preflight(settings=None, *, capabilities=None, needs=None):
 
 def _real(name, prompt, model, tools, cwd, timeout, denied, settings=None, role=None):
     cfg = (settings or developer.Settings()).of(role or MODEL_ROLE[name])
-    with diagnostics.attempt(name, cfg.backend, model) as diagnostic:
+    with diagnostics.attempt(name, cfg.backend, model, cfg.effort) as diagnostic:
         answer, session, usage, cost = BACKENDS[cfg.backend].interface.execute(
             name, prompt, model, tools, cwd, timeout, denied, SCHEMAS[name], cfg, diagnostic)
-    _record(name, session, usage, cost, cfg.backend)
+        diagnostic["cost"] = diagnostics.amount(cost)
+    _record(name, session, usage, cost, cfg.backend, cfg.effort)
     return json.dumps(answer) if isinstance(answer, dict) else str(answer), session, ""
 
 
@@ -215,9 +224,4 @@ def run_node(name, prompt, model, allowed_tools, cwd, timeout, denied=None, runt
 
 
 def usage_table():
-    if not USAGE:
-        return ""
-    rows = ["| node | session | input | output | cache read | cache creation | cost USD | backend |", "|---|---|---|---|---|---|---|---|"]
-    rows += [f"| {u['node']} | {u['session']} | {u['input']} | {u['output']} | {u['cache_read']} | "
-             f"{u['cache_creation']} | {u['cost'] if u['cost'] is not None else 'unknown'} | {u.get('backend', 'claude')} |" for u in USAGE]
-    return "\n".join(rows)
+    return records.usage_table(USAGE)

@@ -12,14 +12,12 @@
          with / or \ and a file extension; command lines, prose spans, and rooted, home,
          parent-escaping, scheme- or drive-qualified tokens are not paths) must resolve
          at HEAD.
-      2. Double-quoted fragments in the body (12 to 120 chars, following the contract's
-         `File - Symbol - "fragment"` shape or free-standing, enclosing backticks
-         stripped; a backticked span holding a double quote is a command and is skipped)
-         must literal-grep (git grep -F). On an anchor line, a list item whose
-         first backticked span names a tracked file, every fragment is grepped in that
-         file; elsewhere a fragment that looks like code is grepped in the repo's tracked
-         text files, and one with interior backticks that does not grep is a prose-code
-         composite, skipped rather than flagged (Get-AnchorFindings.ps1).
+      2. Double-quoted fragments (12 to 120 chars, enclosing backticks stripped; a
+         backticked span holding a double quote is a command and is skipped) on an anchor
+         line -- a list item under an `Anchors` heading whose first backticked span names a
+         tracked file, the contract's `File - Symbol - "fragment"` shape -- must
+         literal-grep (git grep -F) in that file. A quote on any other line is prose and is
+         not checked (Get-AnchorFindings.ps1).
 
     Findings are reported per issue. Default is report-only; -Comment posts the findings
     as a comment on each affected issue; -Demote additionally swaps agent-ready ->

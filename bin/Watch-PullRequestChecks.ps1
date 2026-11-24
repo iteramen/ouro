@@ -14,7 +14,8 @@
     the commits: the workflow by its id, not its name, which two workflow files can share; the
     newest by `createdAt`, the higher run id on a tie. A run a newer run of the same workflow and
     event supersedes is not judged -- that is the run a workflow's `concurrency` cancel ends as
-    cancelled. The list is read up to six times, ten seconds apart, until it holds a run; then
+    cancelled. The list is read ten seconds apart until it holds a run, up to six times unless a
+    wait below names sixty; then
     each run is watched to its end (`gh run watch`), the list is read again for any run a watch
     outlived -- one the PR's ready_for_review event starts, or a workflow that started seconds
     later -- and those are watched too, until a list brings no run not already watched. The last
@@ -22,14 +23,16 @@
     neutral. `gh pr checks --watch` is never used: while the head has no check yet, as when its
     only run is queued with no jobs, it exits 1 with `no checks reported`.
 
-    Every refusal is one `STOP: <why, and what to do>` line and exit 1. With -Pr, no run after a
-    minute is the zero-run case: with no workflow at origin/<default> naming pull_request
-    (`ouro-binding.py pr-workflows` prints none) nothing can build the head, and the stop names
-    the missing workflow and `Install-Ouro.ps1 -CI`; a pull request that then reads CONFLICTING has
-    no run because GitHub dispatches none for a head that conflicts with the base, and the stop
-    says to sync the branch; otherwise nothing is known to have built the head, so the stop says
-    to push (or re-push) it and come back. With -Sha, the workflows whose push filters select the
-    commits (`ouro-binding.py push-workflows`; a disabled one is not counted) must each show a run:
+    Every refusal is one `STOP: <why, and what to do>` line and exit 1. With -Pr and no workflow
+    at origin/<default> naming pull_request (`ouro-binding.py pr-workflows` prints none), nothing
+    can build the head: no run after a minute stops, naming the missing workflow and
+    `Install-Ouro.ps1 -CI`. With such a workflow the list is read up to sixty times, ten minutes in
+    all, since a head's run can be missing from the list by commit for a while after it is
+    created. A pull request that reads CONFLICTING after the first minute with no run stops then,
+    because GitHub dispatches no run for a head that conflicts with the base, and the stop says to
+    sync the branch; no run after ten minutes means nothing is known to have built the head, so
+    the stop says to push (or re-push) it and come back. With -Sha, the workflows whose push
+    filters select the commits (`ouro-binding.py push-workflows`; a disabled one is not counted) must each show a run:
     the list is read up to sixty times, ten minutes in all, since GitHub can start a push run
     minutes late, and one still missing then is a stop, never a pass. With no such workflow, no
     run after a minute is reported and is no failure: nothing was triggered. `-Sha none` watches nothing and exits 0, for a batch in which
@@ -82,11 +85,14 @@ function Invoke-WatchPullRequestChecks {
     param([int]$Pr, [string[]]$Sha = @())
     if (($Pr -gt 0) -eq ($Sha.Count -gt 0)) { throw 'name -Pr <number> or -Sha <commit>..., one of the two' }
     $b = Get-LandBinding
-    $expected = @()
+    $expected = @(); $prListen = $false
     if ($Pr -gt 0) {
         $head = "$((Get-PullRequest $b.Slug $Pr @('headRefOid')).headRefOid)"
         if (-not $head) { throw "#$Pr's head read empty" }
         $commits = @($head); $branch = $null; $event = 'pull_request'; $what = "#$Pr's head $head"
+        $listen = Invoke-Native python3 @((Join-Path $PSScriptRoot 'ouro-binding.py'), 'pr-workflows')
+        if ($listen.Code -ne 0) { throw "ouro-binding.py pr-workflows failed (exit $($listen.Code)): $($listen.Text)" }
+        $prListen = [bool]$listen.Out.Count
     }
     else {
         if ($Sha.Count -eq 1 -and $Sha[0] -eq 'none') { Write-Output 'nothing landed: nothing to watch'; return }
@@ -101,11 +107,14 @@ function Invoke-WatchPullRequestChecks {
         }
     }
     $runs = @(); $missing = @()
-    $limit = if ($expected.Count) { 60 } else { 6 }
+    $limit = if ($expected.Count -or $prListen) { 60 } else { 6 }
     for ($i = 1; $i -le $limit; $i++) {
         $runs = @(Get-NewestRuns $b.Slug $commits $branch $event)
         $missing = @($expected | Where-Object { [long]$_.id -notin @($runs | ForEach-Object { [long]$_.workflowDatabaseId }) })
         if ($runs.Count -and -not $missing.Count) { break }
+        if ($prListen -and $i -eq 6 -and "$((Get-PullRequest $b.Slug $Pr @('mergeable')).mergeable)" -eq 'CONFLICTING') {
+            throw "#$Pr conflicts with $($b.Default) and GitHub runs no pull_request workflow for a conflicting pull request: sync the branch (Sync-Branch.ps1), push it, then come back"
+        }
         if ($i -lt $limit) { Wait-Poll 10 }
     }
     if ($missing.Count) {
@@ -113,15 +122,10 @@ function Invoke-WatchPullRequestChecks {
     }
     if (-not $runs.Count) {
         if ($Pr -gt 0) {
-            $listen = Invoke-Native python3 @((Join-Path $PSScriptRoot 'ouro-binding.py'), 'pr-workflows')
-            if ($listen.Code -ne 0) { throw "ouro-binding.py pr-workflows failed (exit $($listen.Code)): $($listen.Text)" }
-            if (-not $listen.Out.Count) {
+            if (-not $prListen) {
                 throw "no workflow at origin/$($b.Default) names pull_request, so nothing builds $($what): Install-Ouro.ps1 -CI adds the one that runs the [[gate]] list; until a workflow does, ouro run runs every gate itself and a pull request pushed by hand goes unchecked"
             }
-            if ("$((Get-PullRequest $b.Slug $Pr @('mergeable')).mergeable)" -eq 'CONFLICTING') {
-                throw "#$Pr conflicts with $($b.Default) and GitHub runs no pull_request workflow for a conflicting pull request: sync the branch (Sync-Branch.ps1), push it, then come back"
-            }
-            throw "no pull_request run for $what after a minute - nothing is known to have built the head: push (or re-push) it so CI runs, then come back"
+            throw "no pull_request run for $what after ten minutes - nothing is known to have built the head: push (or re-push) it so CI runs, then come back"
         }
         Write-Output "no run for any of $what after a minute: no workflow was triggered for them (path filters)"
         return

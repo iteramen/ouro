@@ -12,7 +12,8 @@
     [ship].direct and an unproved publication floor route to a PR; an empty or absent key, a
     checkout off the default branch and an empty range stop. Origin remains unchanged on refusal.
     A pull-request requirement with no
-    approving review prints `vehicle: pr`, pushes `direct/<issue>` and leaves the default branch
+    approving review prints `vehicle: pr`, pushes `direct/<issue>` (`direct/<12-character head
+    sha>` with no -Issue) and leaves the default branch
     on origin where it was, whether the requirement is a ruleset or classic protection; a required
     approval (either source, count or code-owner review) and a protection read that failed print
     `fallback: express`, exit 3, and push nothing; the help names each outcome.
@@ -315,13 +316,30 @@ foreach ($case in @(@('ruleset', (Rules 0), $NoClassic), @('classic', $NoRules, 
     Assert-Equal $before (@(G $m rev-parse master)[0]) "$($case[0]): the local default branch is back at origin's tip"
     Assert-Equal $head (@(G $m rev-parse direct/7)[0]) "$($case[0]): the local branch holds the commits"
 }
+Write-Host 'an issue-less push under a pull-request requirement: the branch is named for the head'
 $w = New-DirectWorld 'pr-noissue'; $m = $w.Main
+$before = Get-OriginTip $w.Origin 'master'
 Add-File $m 'docs/a.md'
+$head = @(G $m rev-parse HEAD)[0]
+$short = $head.Substring(0, 12)
 Set-Protection (Rules 0) $NoClassic
 $c = Invoke-Child $Script @() $m
-Assert-Equal 1 $c.Code 'without -Issue the pull-request vehicle exits 1'
-Assert-Line $c.Lines 'STOP: master requires a pull request, and the branch is named for the issue: pass -Issue <N>' 'and asks for it'
-Assert-Equal 0 (@(G $w.Origin for-each-ref 'refs/heads/direct/').Count) 'nothing is pushed'
+Assert-Equal 0 $c.Code 'without -Issue the pull-request vehicle exits 0'
+Assert-Line $c.Lines 'vehicle: pr' 'names the vehicle'
+Assert-Line $c.Lines "pushed direct/$short to origin at $head" 'prints the push of the branch named for the head'
+Assert-Equal $head (Get-OriginTip $w.Origin "direct/$short") 'origin has direct/<12-character head sha> at HEAD'
+Assert-Equal 1 (@(G $w.Origin for-each-ref 'refs/heads/direct/').Count) 'that branch is the only direct/ branch'
+Assert-Equal $before (Get-OriginTip $w.Origin 'master') 'the default branch on origin is unchanged'
+Assert-Equal $before (@(G $m rev-parse master)[0]) 'the local default branch is back at origin''s tip'
+$w = New-DirectWorld 'pr-noissue-approval'; $m = $w.Main
+$before = Get-OriginTip $w.Origin 'master'
+Add-File $m 'docs/a.md'
+Set-Protection (Rules 1) $NoClassic
+$c = Invoke-Child $Script @() $m
+Assert-Equal 3 $c.Code 'an issue-less push under a required approval falls back'
+Assert-Line $c.Lines 'reason: an approving review is required on master' 'names the review requirement'
+Assert-Equal 0 (@(G $w.Origin for-each-ref 'refs/heads/direct/').Count) 'no branch is pushed'
+Assert-Equal $before (Get-OriginTip $w.Origin 'master') 'the default branch on origin is unchanged'
 
 Write-Host 'a required approval, or a read that failed: fallback to express, exit 3, nothing pushed'
 $cases = @(

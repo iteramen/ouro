@@ -23,6 +23,7 @@ run = "python3 tests/driver/driver.Tests.py"
 """
 import atexit
 import concurrent.futures
+import hashlib
 import json
 import os
 import pathlib
@@ -74,11 +75,11 @@ atexit.register(_remove_tmp)
 failures = 0
 WORKFLOW_EXECUTOR_MODEL = False
 MODELED_WORKFLOW_SECTIONS = frozenset({
-    "sec_happy", "sec_branch_prefix", "sec_parts", "sec_trivial_merge", "sec_ship_person", "sec_findings_fix",
+    "sec_happy", "sec_branch_prefix", "sec_parts", "sec_trivial_merge", "sec_successor_triage", "sec_ship_person", "sec_findings_fix",
     "sec_catch_up", "sec_build_stop", "sec_brief", "sec_setup", "sec_builder_default",
-    "sec_developer_runtime", "sec_unchanged_finding", "sec_review_cap", "sec_conflict",
+    "sec_developer_runtime", "sec_unchanged_finding", "sec_fix_now", "sec_review_cap", "sec_conflict",
     "sec_gate_red", "sec_checks_running", "sec_head_lag",
-    "sec_check_flake", "sec_no_pr_workflow", "sec_merge_refused", "sec_express", "sec_flow_tighten",
+    "sec_check_flake", "sec_check_both_legs", "sec_no_pr_workflow", "sec_merge_refused", "sec_express", "sec_flow_tighten",
     "sec_express_base_moves", "sec_sync_conflict", "sec_sync_rebase_stops", "sec_spec_trust", "sec_review_none",
     "sec_copilot", "sec_resume", "sec_external", "sec_other_pr", "sec_manual",
     "sec_executable_acceptance", "sec_acceptance_review_corrections", "sec_coordination", "sec_gate_uncovered",
@@ -353,8 +354,11 @@ def happy_case(name, **kw):
 
 
 # ---- pure rows -------------------------------------------------------------------------------
+from ouro import briefs as briefsmod  # noqa: E402
+from ouro import ledger as ledgermod  # noqa: E402
 from ouro import node as nodemod  # noqa: E402
 from ouro import records as recmod  # noqa: E402
+from ouro import related as relatedmod  # noqa: E402
 from ouro import run as runmod  # noqa: E402
 from ouro import sh as shmod  # noqa: E402
 from ouro import triage as triagemod  # noqa: E402
@@ -373,6 +377,15 @@ def sec_pure():
     vr.env = types.SimpleNamespace(pr_checks=lambda: True,
                                    lookup=lambda key, default=None: "local" if key == "ship.validation" else default)
     check("with one, validation keeps the narrower grant: a notice gate or a plain one is the checks'", runmod.Run.validation_commands(vr) == [])
+    req = [{"cmd": "python3 c.py", "reason": "r"}]
+    pv = types.SimpleNamespace(tree=types.SimpleNamespace(head=lambda: "b" * 40), ci_execution_head="a" * 40,
+                               ci_execution_commands=["python3 c.py"], ci_execution_checks=[{"name": "ci", "url": "u"}])
+    shown, met = runmod.Run.presented_requests(pv, req, {"python3 c.py"})
+    check("a CI proof held for an earlier head meets no request at the new head: it awaits the checks there",
+          met == [] and shown == [{**req[0], "awaiting": "the declared CI checks at this head"}])
+    pv.ci_execution_head = "b" * 40
+    check("the same proof at the current head meets it", runmod.Run.presented_requests(pv, req, {"python3 c.py"})
+          == ([], [{"cmd": "python3 c.py", "head": "b" * 40, "checks": [{"name": "ci", "url": "u"}]}]))
     check("the validation key is 16 hex digits of the head and the ordered commands",
           re.fullmatch(r"[0-9a-f]{16}", runmod.validation.key("a" * 40, ["x", "y"])) is not None
           and runmod.validation.key("a" * 40, ["x", "y"]) != runmod.validation.key("a" * 40, ["y", "x"]))
@@ -411,7 +424,7 @@ def sec_pure():
           tr.env.out == "## Deliverable\n- [x] 1. **A (Flow: express).** a\n\n## Exit\n- [ ] 1. not a part\n")
     rg = runmod.Run.__new__(runmod.Run)
     rg.title, rg.body = "T", "## What\nw\n\n## Deliverable\n" + "d" * 4000 + "\n"
-    rg.env = types.SimpleNamespace(trusted=lambda: {"o"})
+    rg.env = types.SimpleNamespace(trusted=lambda: {"o"}, lookup=lambda key, default=None: default)
     rg.issue = {"comments": [{"author": {"login": "o"}, "body": "**Triage**\n\n" + "t" * 4000, "createdAt": TRIAGED},
                              {"author": {"login": "o"}, "body": "Ruling: drop it.", "createdAt": AFTER}]}
     goal = rg.reader_goal()
@@ -473,12 +486,41 @@ def sec_pure():
     again = recmod.drawn_body(rec, "r2", drawn.replace("- Nothing here has been executed", "- the tests ran"))
     wrote = []  # refresh_body reads the body as it stands: a lead's web edit, in CRLF
     web = again.replace("## Summary\ns2", "## Summary\nthe lead's correction").replace("\n", "\r\n")
-    stand = types.SimpleNamespace(env=types.SimpleNamespace(gh_json=lambda *a: {"body": web}, default="master", slug="o/n", body_file=lambda n, t: wrote.append(t), write=lambda *a: None),
+    stand = types.SimpleNamespace(env=types.SimpleNamespace(gh_json=lambda *a: {"body": web}, default="master", slug="o/n", body_file=lambda n, t: wrote.append(t), write=lambda *a: None, dry=False),
                                   build_facts=lambda: {"summary": "s3"}, checked_gates=lambda: [], tree=types.SimpleNamespace(git=lambda *a: types.SimpleNamespace(out="")), flow="standard", notes=[], primary=None,
-                                  gate_log=[], skipped=None, ci_execution_checks=[])
+                                  gate_log=[], skipped=None, ci_execution_checks=[], held_usage=lambda: [], held_path=lambda: TMP / "pure-held.json")
+    stand.redrawn_body = lambda pr, records: runmod.Run.redrawn_body(stand, pr, records)
     runmod.Run.refresh_body(stand, {"number": 7}, [])
     check("refresh_body redraws from the record and keeps the summary the lead edited on the web, and the residue they edited before it",
           len(wrote) == 1 and "## Summary\nthe lead's correction" in wrote[0] and "- the tests ran" in wrote[0] and "s3" not in wrote[0].split("<!--")[0])
+    url = "## Acceptance\nRan by hand: https://example.test/runs/1"
+    def added(body, *sections):
+        return body.replace("## Follow-up", "".join(s + "\n\n" for s in sections) + "## Follow-up", 1)
+    rec = recmod.read_record(drawn)
+    rec.update(summary="s2")
+    kept = recmod.drawn_body(rec, "r2", added(drawn, url))
+    check("drawn_body keeps a section a person added under a heading it does not draw, with its text, before ## Follow-up",
+          url in kept and kept.index(url) < kept.index("## Follow-up"))
+    check("beside an added section, a drawn section a person did not edit is still redrawn",
+          url in kept and "## Summary\ns2" in kept and "s1" not in kept.split("<!--")[0])
+    two = recmod.drawn_body(recmod.read_record(drawn), "r1", added(drawn, url, "## Notes\nsecond"))
+    check("two added sections keep their order, both before ## Follow-up",
+          url in two and two.index(url) < two.index("## Notes\nsecond") < two.index("## Follow-up"))
+    check("an added section survives a second redraw unchanged", url in kept and recmod.drawn_body(recmod.read_record(kept), "r2", kept) == kept)
+    from unittest import mock
+    briefed = []
+    rv = types.SimpleNamespace(**{**vars(stand), "flow": "express", "n": 7, "title": "t", "body": "b"})
+    rv.env = types.SimpleNamespace(**{**vars(stand.env), "gh_json": lambda *a: {"body": added(again, url)}, "lookup": lambda k, d=None: d,
+                                      "ob": types.SimpleNamespace(plugin_root=lambda: None), "main": BASE,
+                                      "runtime": types.SimpleNamespace(model=lambda role, legacy: legacy)})
+    rv.tree = types.SimpleNamespace(git=lambda *a, check=True: types.SimpleNamespace(code=0, out=""), changed=lambda: [], path=TMP)
+    rv.redrawn_body = lambda pr, records: runmod.Run.redrawn_body(rv, pr, records)
+    rv.evidence_lines, rv.part_scope, rv.spec_comments, rv.ci_mode = (lambda: ""), (lambda s: ""), (lambda: ""), (lambda: False)
+    rv.verification = lambda records, head: ""
+    with mock.patch.object(runmod.node, "run_node", side_effect=lambda name, prompt, *a, **k: briefed.append(prompt) or {}):
+        runmod.Run.node_review(rv, {"number": 7}, "h", [], 1)
+    check("the REVIEW brief of a run whose pull request body holds an added section contains that section's text",
+          len(briefed) == 1 and url in briefed[0])
     check("so does a residue that is not a list, and a trailer that is not an object",
           "malformed `residue`, which is a list" in facts_of('{"residue": "x"}') and "is not a JSON object" in facts_of("[1]"))
     f = TMP / "bytes.txt"
@@ -662,8 +704,36 @@ def sec_node():
         nodemod.USAGE.clear()
         nodemod.run_node("U", "p", "sonnet", [], str(d), 1)
         check("usage is recorded per call", nodemod.USAGE and nodemod.USAGE[0]["input"] == 5 and nodemod.USAGE[0]["output"] == 7 and "| U |" in nodemod.usage_table())
+        check("a call whose usage holds no turn count records unknown, never 0",
+              nodemod.USAGE[0]["turns"] is None and nodemod.usage_table().splitlines()[-1].split(" | ")[-2] == "unknown")
+        check("the usage table carries an effort column, unknown for a call the host's own settings decided",
+              nodemod.usage_table().splitlines()[0].endswith("| turns | effort |") and nodemod.USAGE[0]["effort"] is None
+              and nodemod.usage_table().splitlines()[-1].endswith("| unknown |"))
     finally:
         del os.environ["OURO_NODE_STUB"]
+    older = "| node | session | input | output | cache read | cache creation | cost USD | backend |\n|---|---|---|---|---|---|---|---|\n| BUILD | s1 | 5 | 7 | 0 | 0 | unknown | claude |"
+    kept = recmod.usage_rows([{"node": "REVIEW", "session": "s2", "turns": 3}], older)
+    check("the usage rows keep an older record's table rows, with no turn count, ahead of the fresh ones",
+          [(u["node"], u["session"], u.get("turns")) for u in kept] == [("BUILD", "s1", None), ("REVIEW", "s2", 3)])
+    again = recmod.usage_rows([{"node": "REVIEW", "session": "s2", "turns": 4}, {"node": "BUILD", "session": "s3", "turns": 1}], kept)
+    check("a fresh row replaces the earlier row of its session, so none is counted twice",
+          [(u["session"], u["turns"]) for u in again] == [("s1", None), ("s2", 4), ("s3", 1)])
+    nine = older.replace("backend |\n|---|", "backend | turns |\n|---|---|").replace("claude |", "claude | 2 |")
+    merged = recmod.with_usage(f"<details>\n\n{nine}\n\n</details>\n<!-- ouro-record: {json.dumps({'usage': [{'node': 'BUILD', 'session': 's1', 'turns': 2}]})} -->\n",
+                               [{"node": "REVIEW", "session": "s2", "turns": 3, "effort": "high"}])
+    check("a merged body whose table an older driver drew with fewer columns gets the table redrawn in its place, not a second one",
+          merged.count("| node | session |") == 1 and "| turns | effort |" in merged
+          and merged.split("\n\n</details>")[0].splitlines()[-2:][0].startswith("| BUILD | s1 |")
+          and merged.split("\n\n</details>")[0].splitlines()[-1].endswith("| 3 | high |"))
+    nodemod.USAGE.clear()
+    nodemod._record("BUILD", "", {}, 0)
+    nodemod._record("REVIEW", None, {}, 0)
+    first = recmod.usage_rows(nodemod.USAGE, [])
+    nodemod.USAGE.clear()
+    nodemod._record("BUILD", "", {}, 0)
+    check("a call that returned no session id gets an id of its own, so a later invocation's such row replaces no earlier one",
+          len(recmod.usage_rows(nodemod.USAGE, first)) == 3)
+    nodemod.USAGE.clear()
     check("the first JSON object wins over a later one", nodemod.parse_first_json('x {"a": 1} y {"b": 2}') == {"a": 1})
     check("a brace that is not JSON is skipped", nodemod.parse_first_json('{nope} {"a": 1}') == {"a": 1})
     d2 = TMP / "garbagestub"
@@ -743,7 +813,7 @@ def sec_not_ready():
     code, out, err = c.ouro("run", "1")
     check("an issue without agent-ready: exit 2", code == 2 and "agent-ready" in err)
     check("it writes nothing", c.wrote() == [])
-    checkpoint_body = ISSUE_BODY + "\n## Acceptance\n\nRun `python3 gates/measure.py`.\n"
+    checkpoint_body = ISSUE_BODY.replace("## Deliverable\n", "## Anchors\n") + "\n## Acceptance\n\nRun `python3 gates/measure.py`.\n"
     binding = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace(
         "[labels]", 'setup = "python3 gates/setup.py"\n[labels]')
     setup = ("import json, os, pathlib, subprocess\n"
@@ -833,7 +903,7 @@ def sec_shape():
 
 
 def sec_dead_anchor():
-    body = ISSUE_BODY.replace("def compute_total(items):", "def a_symbol_that_is_gone(items):")
+    body = ISSUE_BODY.replace("## Deliverable\n", "## Anchors\n").replace("def compute_total(items):", "def a_symbol_that_is_gone(items):")
     c = Case("deadanchor", table={"_issue_1": issue(body=body, labels=("agent-ready", "trivial", "gates", "bug"))})
     code, out, err = c.ouro("run", "1")
     check("a dead anchor: exit 2", code == 2)
@@ -859,12 +929,33 @@ def sec_dead_anchor():
     m.node("REVIEW", CLEAN)
     code, out, err = m.ouro("run", "1")
     body = (m.issue_state() or {"body": ""})["body"]
-    check("an anchor whose fragment moved to one file of the same suffix is re-pointed, not a stop: the body edited, exit 0",
-          code == 0 and stops_of(m) == [] and "`src/lib.py` -- compute_total" in body and "`src/app.py" not in body and "agent-ready" in labels_of(m))
+    try:
+        runmod.validation.check_platform()
+        caller_supported = True
+    except shmod.DriverError:
+        caller_supported = False
+    check("an anchor whose fragment moved to one file of the same suffix is re-pointed, not a stop: the body edited, exit 0 (4 where validation waits)",
+          code == (0 if caller_supported else 4) and stops_of(m) == [] and "`src/lib.py` -- compute_total" in body and "`src/app.py" not in body and "agent-ready" in labels_of(m))
     check("a span after prose with a line suffix, its fragment backticked, is re-pointed too, the suffix kept", "in `src/lib.py:1` -- \"`def compute_total" in body)
     check("a span with a hash suffix is cut as the gate cuts it, the suffix kept; a fenced # line is no heading", "`src/lib.py#L1-L2` -- the span cut" in body)
     check("the stamp is the default branch's tip", f"## Anchors @ {git(m.origin, 'rev-parse', '--short=7', 'master')}" in body)
     check("the BUILD brief reads the re-pointed anchor", "src/lib.py:1: def compute_total" in open(m.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read())
+    at_tip = types.SimpleNamespace(default="master", git=lambda *a, check=True: types.SimpleNamespace(out=sh("git", *a, cwd=m.main)[1]))
+    line = "- `src/app.py` -- fenced -- \"def compute_total(items):\"\n"
+    nested = f"````\n```\n## Anchors\n{line}```\n````\n"
+    gone = ["path does not resolve: 'src/app.py'"]
+    check("the re-point reads a fence as the gate does: a shorter marker inside a longer fence closes nothing, so an Anchors line in it opens no section and the line stays",
+          recmod.restamped(at_tip, nested, gone) == nested and "`src/lib.py` -- fenced" in recmod.restamped(at_tip, f"## Anchors\n{line}", gone))
+    briefed = TMP / "anchorsblock"
+    (briefed / "src").mkdir(parents=True)
+    (briefed / "src" / "lib.py").write_text("def compute_total(items):\n    return sum(items) + 0\n", encoding="utf-8")
+    scoped = ("## Deliverable\n- `src/lib.py` -- outside -- \"def compute_total(items):\"\n\n## Anchors @ 0000000\n"
+              "- `src/lib.py` -- under the gate's minimum -- \"sum(items)\"\n- in `src/lib.py:1` -- after prose -- \"def compute_total\"\n"
+              "```\n## Fenced, no heading\n```\n- `src/lib.py` -- still under Anchors -- \"return sum(items)\"\n\n## Notes\n"
+              "- `src/lib.py` -- after the section -- \"not in the file at all\"\n")
+    check("the brief's anchors are the gate's: lines under the Anchors heading alone, a fenced # line no heading, fragments of 12 characters or more",
+          briefsmod.anchors_block(briefed, scoped)
+          == "src/lib.py:1: def compute_total(items):\nsrc/lib.py:2: return sum(items) + 0")
     v = Case("deliverableanchor")
     git(v.main, "mv", "src/app.py", "src/lib.py")
     git(v.main, "commit", "-qm", "move the module")
@@ -896,7 +987,12 @@ def sec_worktree_symlink():
         return
     c = linked("wtlink", ".claude/worktrees\n.claude/worktrees.noindex/\n")
     code, out, err = c.ouro("run", "1")
-    check("a symlinked .claude/worktrees whose target is ignored runs: exit 0", code == 0)
+    try:
+        runmod.validation.check_platform()
+        caller_supported = True
+    except shmod.DriverError:
+        caller_supported = False
+    check("a symlinked .claude/worktrees whose target is ignored runs: exit 0 (4 where validation waits)", code == (0 if caller_supported else 4))
     check("the worktree is made at the symlink's target", (c.main / ".claude" / "worktrees.noindex" / "1-fix-the-total" / "src" / "app.py").is_file())
     check("the main checkout stays clean", git(c.main, "status", "--porcelain") == "")
     c = linked("wtlink-unignored", ".claude/worktrees\n")
@@ -1019,7 +1115,9 @@ def sec_happy():
           call["tools"] == PROBE_TOOLS and call["denied"] == PROBE_DENIED
           and pathlib.Path(call["cwd"]).resolve() != (c.main / ".claude" / "worktrees" / "1-fix-the-total").resolve()
           and not pathlib.Path(call["cwd"]).exists())
-    check("the BUILD brief holds the issue body and the anchor's current line", "src/app.py:1: def compute_total(items):" in open(c.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read())
+    check("the BUILD brief holds the issue body, and no anchor for a Deliverable line the anchor gate does not check",
+          (lambda brief: ISSUE_BODY.splitlines()[4] in brief and "(the issue names no anchor)" in brief and "src/app.py:1:" not in brief)(
+              open(c.nodes / "BUILD.1.prompt.txt", encoding="utf-8").read()))
     # resume 1: still waiting on the owner
     c.clear_prompts()
     sigs_before = len(c.sigs())
@@ -1063,6 +1161,60 @@ def sec_branch_prefix():
           and len([s for s in c.sigs() if s.startswith("pr create")]) == 1)
 
 
+def sec_successor_triage():
+    """A landing that closes an issue triages, after the queue anchors are refreshed, each open `blocked` issue whose first line names
+    it, in number order, one line each; a blocked issue whose trigger names another issue is left alone, a successor's failed triage
+    does not fail the landing, and a non-final part's landing triages none."""
+    after = "\n\n## What\nthing\n\n- `src/app.py` -- x -- \"def compute_total(items):\"\n"
+    def blocked(n, line):
+        return issue(n, labels=("blocked", "gates", "bug"), body=line + after, comments=[])
+    answer = {"verdict": "PROMOTE", "size": "S", "flow": "express", "doc_impact": "none", "comment": "Anchors resolve; one deliverable."}
+    parts = ("## Deliverable\n- [ ] 1. **First (Flow: standard).** a\n- [ ] 2. **Second (Flow: standard).** b\n\n"
+             "- `src/app.py` -- compute_total -- \"def compute_total(items):\"\n\nDoc impact on close: none\n\nSize: S\nFlow: standard\n")
+    wait = "**Unblocks when:** #1 part 2 has been reporting coverage on about 20 pull requests"
+    for name, verdict in (("promote", "PROMOTE"), ("fails", "MAYBE"), ("part", "PROMOTE"), ("waits", "PROMOTE")):
+        seeded = {"_issue_4": blocked(4, "**Unblocks when:** #1 is merged"),
+                  "_issue_3": blocked(3, wait if name == "waits" else "**Unblocks when:** #1 is merged"),
+                  "_issue_2": blocked(2, "**Unblocks when:** #5 is merged")}
+        c = happy_case("successor" + name, policy="trivial-merge", table={
+            "_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"), **({"body": parts} if name == "part" else {})), **seeded,
+            # GitHub closes the landed issue on the merge's Fixes line; the stand-in's merge does not
+            "issue view 1 --json state,stateReason": {"Out": {"state": "CLOSED", "stateReason": "COMPLETED"}}})
+        c.node("TRIAGE", {**answer, "verdict": verdict})
+        code, out, err = c.ouro("run", "1", *(("--part", "1") if name == "part" else ()))
+        if name == "part":
+            check("a non-final checklist part's landing leaves the issue open and triages no successor",
+                  code == 0 and "done: #1 landed (part 1/2)" in out and "successor #" not in out and not c.prompts("TRIAGE")
+                  and not any(x.startswith(("issue comment 3 ", "issue comment 4 ")) for x in c.wrote()))
+            continue
+        s2, s3 = c.issue_state(2) or seeded["_issue_2"], c.issue_state(3) or seeded["_issue_3"]
+        alone = (len(c.prompts("TRIAGE")) == 2 and "successor #2" not in out and not any(x.startswith("issue comment 2 ") for x in c.wrote())
+                 and s2["body"].startswith("**Unblocks when:** #5") and ["blocked", "gates", "bug"] == [x["name"] for x in s2["labels"]])
+        if name == "promote":
+            check("a landing triages each blocked successor whose trigger names the merged issue, in number order, one verdict line "
+                  "each: the fired trigger is cleared and the node's PROMOTE stands; a blocked issue naming another issue is left alone",
+                  code == 0 and "done: #1 landed" in out and alone
+                  and 0 <= out.find("[10] queue anchors refreshed") < out.find("[10] successor #3: triage verdict PROMOTE")
+                  < out.find("[10] successor #4: triage verdict PROMOTE")
+                  and s3["body"].startswith("## What") and "agent-ready" in [x["name"] for x in s3["labels"]]
+                  and "Trigger cleared" in s3["comments"][-1]["body"])
+        elif name == "waits":
+            check("a successor whose trigger waits for an event after the landing keeps its line and `blocked`, and its comment says "
+                  "#1 has landed; the next successor's fired trigger is still cleared",
+                  code == 0 and "done: #1 landed" in out and alone
+                  and "[10] successor #3: triage verdict BLOCKED" in out and "[10] successor #4: triage verdict PROMOTE" in out
+                  and s3["body"].startswith(wait) and "blocked" in [x["name"] for x in s3["labels"]]
+                  and "agent-ready" not in [x["name"] for x in s3["labels"]]
+                  and f"`{wait}`, names #1, and #1 has landed" in s3["comments"][-1]["body"]
+                  and "Trigger cleared" not in s3["comments"][-1]["body"])
+        else:
+            check("a successor's failed triage is reported on its line, the next successor is still triaged, and the landing exits 0",
+                  code == 0 and "done: #1 landed" in out and alone
+                  and "[10] successor #3: triage failed, the landing stands: node TRIAGE answered verdict 'MAYBE'" in out
+                  and "[10] successor #4: triage failed" in out and s3["body"].startswith("**Unblocks when:** #1")
+                  and "blocked" in [x["name"] for x in s3["labels"]])
+
+
 def sec_trivial_merge():
     c = happy_case("trivialmerge", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     code, out, err = c.ouro("run", "1")
@@ -1077,6 +1229,60 @@ def sec_trivial_merge():
     merge_body = next((x["body"] for x in c.calls() if x["sig"].startswith("pr merge")), None)
     check("the merge body and the pull request's body hold no Ouro-Build line", bool(merge_body) and "Ouro-Build" not in merge_body and "Ouro-Build" not in c.pr()["body"])
     check("the branch and worktree are gone", "gates/1-fix-the-total" not in c.branches() and not (c.main / ".claude" / "worktrees" / "1-fix-the-total").exists())
+    def watched(case):
+        return any(s.startswith("run list") and "--branch master" in s for s in case.sigs())
+    check("a standard merge neither watches the default branch nor prints the skip line", not watched(c) and "watch is skipped" not in out)
+    trivial = ("agent-ready", "trivial", "gates", "bug")
+    ce = Case("trivialexpress", policy="trivial-merge", table={"_issue_1": issue(labels=trivial, body=ISSUE_BODY.replace("Flow: standard", "Flow: express"))})
+    ce.node("BUILD", {**BUILD, "writes": {"docs/note.md": "note, edited\n"}})
+    ce.node("REVIEW", CLEAN)
+    code, out, err = ce.ouro("run", "1")
+    check("an express merge neither watches the default branch nor prints the skip line",
+          code == 0 and "done: #1 landed" in out and not watched(ce) and "watch is skipped" not in out)
+    for name, extra, what in (("fullskip", {}, None),
+                              ("fulltree", {"_merge_tree_differs": True}, "a merged tree that differs from the head's"),
+                              ("fullbase", {"_merge_base_moves": True}, "an equal tree whose first parent is not an ancestor of the head")):
+        cf = happy_case(name, policy="trivial-merge", table={"_issue_1": issue(labels=trivial, body=ISSUE_BODY.replace("Flow: standard", "Flow: full")), **extra})
+        code, out, err = cf.ouro("run", "1")
+        merged = git(cf.origin, "rev-parse", "refs/heads/master")
+        landed = code == 0 and "done: #1 landed" in out and "class full" in next((b["body"] for b in cf.pr_comments() if b["body"].startswith("**Landed unattended**")), "")
+        if what is None:
+            check("full: the merged tree is the green head's on an unmoved base, so no watch call is made and the skip line says why",
+                  landed and not watched(cf) and "[10] the default branch's watch is skipped: the merge commit's tree is the green head" in out
+                  and "its base did not move" in out)
+        else:
+            check(f"full: {what} is watched on the merge commit, with no skip line",
+                  landed and any(s.startswith("run list") and "--branch master" in s and merged in s for s in cf.sigs())
+                  and "runs are green" in out and "watch is skipped" not in out)
+    full_body = {"_issue_1": issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: full"))}
+    for name, extra, what in (("ownerskip", {}, None),
+                              ("ownerred", {"_checks_extra": [{"name": "lint", "bucket": "fail"}]}, "a red check at the head"),
+                              ("ownerunread", {"pr checks 7 --json name,bucket": {"Exit": 1, "Out": "checks unreadable"}}, "a checks read that fails"),
+                              ("ownerskipping", {"pr checks 7 --json name,bucket": {"Out": [{"name": "ci", "bucket": "skipping"}]}},
+                               "a head whose every check skipped")):
+        co = happy_case(name, table=full_body)
+        code, out, err = co.ouro("run", "1")
+        ready = code == 0 and any(b["body"].startswith("**Ready for merge**") for b in co.pr_comments())
+        sh(sys.executable, STUB, "pr", "merge", "7", "--squash", "--subject", "fix(app): sum the items (#7)", "--delete-branch", env=co.env())
+        co.set_table({**full_body, **extra})
+        if what is None:
+            _, dry, _ = co.ouro("run", "1", "--dry-run")
+            check("a dry run on the owner's merge says the full flow's watch is skipped for a green head's tree on an unmoved base",
+                  "would: watch the default branch's runs (full, unless the merge commit's tree is a green head's on an unmoved base)" in dry)
+        before = len(co.sigs())
+        code, out, err = co.ouro("run", "1")
+        again = co.sigs()[before:]
+        merged = git(co.origin, "rev-parse", "refs/heads/master")
+        resumed = ready and code == 0 and "done: #1 landed" in out and any(s.startswith("pr checks 7 --json name,bucket") for s in again)
+        if what is None:
+            check("full, the owner's merge read on a resume: green checks at the head, an equal tree on an unmoved base, so no watch call and the skip line",
+                  resumed and not any(s.startswith("run list") and "--branch master" in s for s in again)
+                  and "[10] the default branch's watch is skipped: the merge commit's tree is the green head "
+                  f"{git(co.origin, 'rev-parse', '--short=7', 'refs/pull/7/head')}'s" in out)
+        else:
+            check(f"full, the owner's merge read on a resume: {what} is watched on the merge commit, with no skip line",
+                  resumed and any(s.startswith("run list") and "--branch master" in s and merged in s for s in again)
+                  and "runs are green" in out and "watch is skipped" not in out)
     c2 = happy_case("trivialnolabel", policy="trivial-merge")
     code, out, err = c2.ouro("run", "1")
     check("trivial-merge without the label stops at Ready for merge", code == 0 and not any(s.startswith("pr merge") for s in c2.sigs())
@@ -1092,9 +1298,11 @@ def sec_ship_person():
             return viewer
         return types.SimpleNamespace(lookup=lambda key, default=None: ship.get(key.removeprefix("ship."), default), viewer=who)
     people = [{"login": "Alice", "unattended_classes": ["full"]}, {"login": "bob", "policy": "trivial-merge"}]
-    check("an entry's key wins, and a key it leaves out keeps the repository's",
+    check("an entry's key wins, a key it leaves out keeps the repository's, and whose credits each key to its source",
           recmod.ship_policy(env_of({"policy": "merge-on-green", "unattended_classes": ["express"], "person": people}))
-          == ("merge-on-green", ["full"], "alice's [[ship.person]] entry")
+          == ("merge-on-green", ["full"], "the repository's [ship], unattended_classes from alice's [[ship.person]] entry")
+          and recmod.ship_policy(env_of({"policy": "stop-at-pr", "unattended_classes": ["express"], "person": people}, "bob"))
+          == ("trivial-merge", ["express"], "bob's [[ship.person]] entry, unattended_classes from the repository's [ship]")
           and recmod.ship_policy(env_of({"policy": "stop-at-pr", "person": people}, "bob")) == ("trivial-merge", None, "bob's [[ship.person]] entry"))
     check("a viewer with no entry, and a binding with none, read [ship] (the latter without asking who the viewer is)",
           recmod.ship_policy(env_of({"policy": "stop-at-pr", "person": people}, "carol")) == ("stop-at-pr", None, "the repository's [ship]")
@@ -1102,10 +1310,17 @@ def sec_ship_person():
     notes = triagemod.binding_notes(env_of({"policy": "merge-on-green", "person": [{"login": "Dana", "policy": "stop-at-pr"}]}, "dana"), "", ["trivial"])
     check("triage's trivial note names the viewer's entry, not [ship], as the policy that holds the label back",
           len(notes) == 1 and '`policy = "stop-at-pr"` in dana\'s [[ship.person]] entry' in notes[0] and "ship.policy =" not in notes[0])
+    notes = triagemod.binding_notes(env_of({"policy": "stop-at-pr", "person": [{"login": "Dana", "unattended_classes": ["full"]}]}, "dana"), "", ["trivial"])
+    check("triage's trivial note credits [ship], not an entry that sets only unattended_classes, for the policy",
+          len(notes) == 1 and '`ship.policy = "stop-at-pr"`' in notes[0] and "dana" not in notes[0])
     entry = BINDING.format(policy="stop-at-pr", review="adversarial-review") + '[[ship.person]]\nlogin = "O"\npolicy = "{p}"\n'
     c = happy_case("personmerges", binding=entry.replace("{p}", "merge-on-green"))
     code, out, err = c.ouro("run", "1", "--dry-run")
     check("the dry run's plan names the viewer's entry and would merge", code == 0 and "[9] merge: policy merge-on-green from o's [[ship.person]] entry, class standard: would run" in out)
+    cq = happy_case("personqwenplanned", binding=entry.replace("{p}", "merge-on-green"), table={"_issue_1": issue(body=ISSUE_BODY + "\nManual: .qwen/settings.json\n")})
+    code, out, err = cq.ouro("run", "1", "--dry-run")
+    check("a planned `Manual: .qwen/` path no hook refuses under this builder holds no merge in the dry run's plan",
+          code == 0 and "[9] merge: policy merge-on-green from o's [[ship.person]] entry, class standard: would run" in out)
     code, out, err = c.ouro("run", "1")
     landed = [b["body"] for b in c.pr_comments() if b["body"].startswith("**Landed unattended**")]
     check("a viewer whose entry says merge-on-green merges where the repository's stop-at-pr would stop, and the comment names the entry",
@@ -1127,7 +1342,7 @@ def sec_ship_person():
     c = happy_case("persondeveloper")
     code, out, err = c.ouro("run", "1", extra={"OURO_DEVELOPER_CONFIG": str(cfg)})
     check("a developer.toml cannot set the policy: its [ship] table is refused before any tracker write",
-          code == 1 and "only [runtime], [coordination] and [followup] are allowed" in err and c.wrote() == [] and not any(s.startswith("pr merge") for s in c.sigs()))
+          code == 1 and "only [runtime], [coordination], [followup] and [review] are allowed" in err and c.wrote() == [] and not any(s.startswith("pr merge") for s in c.sigs()))
 
 
 def sec_findings_fix():
@@ -1265,6 +1480,212 @@ def sec_unchanged_finding():
     code, out, err = c3.ouro("run", "1")
     check("an OUTSIDE finding two verifications carry unchanged is no unmoved finding: the new in-scope one gets its fix round, no stop, exit 0",
           code == 0 and stops_of(c3) == [] and len(c3.prompts("BUILD")) == 4)
+
+
+def fix_now_finding(claim, **kw):
+    """An L finding the review routed `fix-now`, with a reason unless `kw` says otherwise."""
+    return {**finding("L", claim), "route": "fix-now", "reason": "own-change", **kw}
+
+
+def build_brief(c, k):
+    p = c.nodes / f"BUILD.{k}.prompt.txt"
+    return p.read_text(encoding="utf-8") if p.is_file() else ""
+
+
+def followup_brief(c):
+    return (c.nodes / c.prompts("FOLLOWUP")[0]).read_text(encoding="utf-8") if c.prompts("FOLLOWUP") else ""
+
+
+def fix_rounds_spent_row():
+    """The cap's count over a stubbed branch: a first build, a fix and a fix-now commit, newest first."""
+    msgs = {"c": 'fix\n\nOuro-Build: {"fix_now": {"round": 2, "findings": []}}\n', "b": "fix\n\nOuro-Build: {}\n", "a": "build\n\nOuro-Build: {}\n"}
+    r = runmod.Run.__new__(runmod.Run)
+    r.env = types.SimpleNamespace(default="master")
+    r.tree = types.SimpleNamespace(git=lambda *a, check=True: types.SimpleNamespace(code=0, out="c\nb\na\n" if a[0] == "rev-list" else msgs[a[-1]]))
+    return r.fix_rounds_spent()
+
+
+FIXED_NOW = {**BUILD, "subject": "fix(app): the fix-now finding", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"}}
+MARKED = "- L src/app.py:2 the docstring names the wrong total (probe) [fix-now]"
+
+
+def fix_now_guard_row(name, first, scope, label, table):
+    """An H fix round, then a CLEAN record re-reporting the fix-now finding with `scope`: no fix-now round opens."""
+    c = Case(name, policy="trivial-merge", table=table)
+    c.node("BUILD", BUILD, 1)
+    c.node("BUILD", FIXED_NOW, 2)
+    c.node("REVIEW", {"verdict": "FINDINGS", "findings": first, "false_record_sentences": 0, "files_read": ["x"]}, 1)
+    c.node("REVIEW", {**CLEAN, "findings": [fix_now_finding("the docstring names the wrong total", scope=scope)]}, 2)
+    c.node("FOLLOWUP", {"issues": []})
+    code, out, err = c.ouro("run", "1")
+    check(label, code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 2 and "fix-now round" not in out)
+
+
+def sec_fix_now():
+    """A leftover routed `fix-now` is fixed in its pull request by one round outside the five, which only a reasoned one opens;
+    every other leftover is filed under the route the driver reads."""
+    check("fix_now: an L or a residue item routed fix-now is one, whatever its case and spaces; an L with no route, an unknown route and an H fix-now are not",
+          recmod.fix_now({**finding("L"), "route": " Fix-Now "}) and recmod.fix_now({"item": "x", "route": "fix-now"}) and not recmod.fix_now(finding("L"))
+          and not recmod.fix_now({**finding("L"), "route": "follow-up"}) and not recmod.fix_now({**finding("H"), "route": "fix-now"}))
+    fr = recmod.filing_route
+    check("filing_route: an issue with no reason is ledger, an unrouted item is issue, a left fix-now is issue with a reason and ledger without, idea and ledger stand",
+          [fr({**finding("L"), "route": "issue"})[0], fr({**finding("L"), "route": "issue", "reason": "data-loss"}), fr(finding("L"))[0],
+           fr({"item": "x", "route": "fix-now", "reason": "own-change"})[0], fr({"item": "x", "route": "fix-now"})[0],
+           fr({"item": "x", "route": "idea"}), fr({"item": "x", "route": " Ledger "}), fr({**finding("M"), "scope": "OUTSIDE"})]
+          == ["ledger", ("issue", ""), "issue", "issue", "ledger", ("idea", ""), ("ledger", ""), ("issue", "")])
+    check("the fix-now commit is no fix round: a first build, a fix and a fix-now commit spend one of the five", fix_rounds_spent_row() == 1)
+    trivial = {"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))}
+    fixed, marked, brief, followup = FIXED_NOW, MARKED, build_brief, followup_brief
+    round_brief = runmod.FIX_NOW_BRIEF.split(":")[0]
+
+    c = Case("fixnow", policy="trivial-merge", table=trivial)
+    c.node("BUILD", BUILD, 1)
+    c.node("BUILD", fixed, 2)
+    c.node("REVIEW", {**CLEAN, "findings": [fix_now_finding("the docstring names the wrong total")]}, 1)
+    c.node("REVIEW", CLEAN, 2)
+    c.node("FOLLOWUP", {"issues": []})
+    code, out, err = c.ouro("run", "1")
+    rec = recmod.read_record((c.pr() or {}).get("body", ""))
+    check("a CLEAN review with one fix-now finding: one BUILD handed it, a verification, the merge of the fixed head",
+          code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 2 and len(c.prompts("REVIEW")) == 2
+          and marked in brief(c, 2) and round_brief in brief(c, 2) and "sum(items) + 1" in git(c.origin, "show", "master:src/app.py"))
+    check("the verification is handed the record the fix-now round answers", "the docstring names the wrong total" in (c.nodes / "REVIEW.2.prompt.txt").read_text(encoding="utf-8"))
+    check("nothing is filed for the fixed finding", not c.prompts("FOLLOWUP") and not any(s.startswith("issue create") for s in c.sigs()))
+    check("the record names the fix-now round apart from the Review line's rounds",
+          (rec.get("fix_now") or {}).get("round") == 1 and rec["fix_now"].get("kept") is True
+          and "- Fix-now round, after review round 1 and outside the fix rounds: 1 leftover(s) handed to the BUILD node\n" in c.pr()["body"]
+          and re.search(r"(?m)^Review: rounds:0 findings:H0/M0/L1 ", c.pr()["body"]) is not None)
+
+    fix_now_route_rows(trivial)
+
+    c = Case("fixnowagain", policy="trivial-merge", table=trivial)
+    c.node("BUILD", BUILD, 1)
+    c.node("BUILD", fixed, 2)
+    c.node("REVIEW", {**CLEAN, "findings": [fix_now_finding("the docstring names the wrong total"), finding("L", "a later helper could share this")]}, 1)
+    c.node("REVIEW", {**CLEAN, "findings": [fix_now_finding("the new line lacks a test row", scope="IN-FIX")]}, 2)
+    c.node("FOLLOWUP", {"issues": []})
+    code, out, err = c.ouro("run", "1")
+    fb = followup(c)
+    check("a fix-now finding the round's verification raises: no second round, and it is filed",
+          code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 2 and "the new line lacks a test row" in fb)
+    check("the answered record's follow-up finding still reaches the FOLLOW-UP node, its fixed fix-now finding does not",
+          "a later helper could share this" in fb and "the docstring names the wrong total" not in fb)
+    verify = (c.nodes / "REVIEW.2.prompt.txt").read_text(encoding="utf-8").split("The findings it answers:", 1)[-1]
+    check("the fix-now verification is handed the items its round was handed, not the answered record's follow-up finding",
+          MARKED in verify and "a later helper could share this" not in verify)
+
+    c = Case("fixnowflow", policy="trivial-merge", table=trivial)
+    c.node("BUILD", BUILD, 1)
+    c.node("BUILD", {**fixed, "writes": {"hooks/guard.py": "print('guard')\n"}}, 2)
+    c.node("REVIEW", {**CLEAN, "findings": [fix_now_finding("the docstring names the wrong total")]}, 1)
+    c.node("FOLLOWUP", {"issues": []})
+    code, out, err = c.ouro("run", "1")
+    rec = recmod.read_record((c.pr() or {}).get("body", ""))
+    check("a fix-now commit that raises the flow class: the run says so, nothing is pushed, the reviewed head merges",
+          code == 0 and "done: #1 landed" in out and "raises the flow class from standard to full: not pushed" in out
+          and len(c.prompts("BUILD")) == 2 and len(c.prompts("REVIEW")) == 1
+          and "hooks/guard.py" not in git(c.origin, "ls-tree", "-r", "--name-only", "master").split()
+          and "sum(items) + 0" in git(c.origin, "show", "master:src/app.py"))
+    check("its finding is filed, and the record names the refused round and the path its commit touched outside the change's own files",
+          "the docstring names the wrong total" in followup(c) and (rec.get("fix_now") or {}).get("kept") is False
+          and (rec.get("fix_now") or {}).get("outside") == ["hooks/guard.py"]
+          and "its commit touched `hooks/guard.py`; not pushed, since the commit raised the flow class from standard to full" in c.pr()["body"])
+
+    c = Case("fixnowwithh", policy="trivial-merge", table=trivial)
+    c.node("BUILD", BUILD, 1)
+    c.node("BUILD", fixed, 2)
+    c.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("H"), fix_now_finding("the docstring names the wrong total")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
+    c.node("REVIEW", {**CLEAN, "findings": [fix_now_finding("the docstring names the wrong total", scope="STANDS")]}, 2)
+    c.node("FOLLOWUP", {"issues": []})
+    code, out, err = c.ouro("run", "1")
+    check("an H fix round whose record holds a fix-now finding: the same BUILD is handed both, and no fix-now round follows",
+          code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 2
+          and "- H src/app.py:2 the total drops the last item (probe)" in brief(c, 2) and marked in brief(c, 2)
+          and round_brief not in brief(c, 2) and "fix-now round" not in out)
+    check("the handed fix-now finding a verification still finds is filed",
+          "the docstring names the wrong total" in followup(c) and not recmod.read_record(c.pr()["body"]).get("fix_now"))
+
+    for name, first, scope, label in (
+            ("fixnowhanded", [finding("H"), fix_now_finding("the docstring names the wrong total")], "",
+             "a fix-now finding an H fix round was handed, re-reported without STANDS: no fix-now round opens on it"),
+            ("fixnowstands", [finding("H", "the docstring names the wrong total")], "STANDS",
+             "a fix-now finding the verification re-raises with STANDS, its key shared with a handed H finding only: no fix-now round opens on it")):
+        fix_now_guard_row(name, first, scope, label, trivial)
+    fix_now_residue_handed_row(trivial)
+
+
+def fix_now_residue_handed_row(trivial):
+    """An H fix round is handed the record's `fix-now` residue item, which then opens no fix-now round."""
+    item = {"item": "rename the helper's argument", "route": "fix-now", "reason": "own-change"}
+    c = Case("fixnowresiduehanded", policy="trivial-merge", table=trivial)
+    c.node("BUILD", {**BUILD, "residue": [item["item"]]}, 1)
+    c.node("BUILD", FIXED_NOW, 2)
+    c.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("H")], "residue": [item], "false_record_sentences": 0, "files_read": ["x"]}, 1)
+    c.node("REVIEW", {**CLEAN, "residue": [item]}, 2)
+    c.node("FOLLOWUP", {"issues": []})
+    code, out, err = c.ouro("run", "1")
+    check("an H fix round whose record routes a residue item fix-now: the same BUILD is handed both",
+          code == 0 and "- H src/app.py:2 the total drops the last item (probe)" in build_brief(c, 2)
+          and "- residue: rename the helper's argument [fix-now]" in build_brief(c, 2))
+    check("a fix-now residue item an H fix round was handed, re-routed by the CLEAN record: no fix-now round opens on it",
+          code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 2 and "fix-now round" not in out)
+
+
+def fix_now_route_rows(trivial):
+    """The routes a leftover is filed under, and which fix-now items open the round or ride along in it."""
+    fixed, marked, brief, followup = FIXED_NOW, MARKED, build_brief, followup_brief
+    nit = "a later helper could share this"
+    for name, route, filed, said in (
+            ("fixnowissue", {"route": "issue", "reason": "open-decision"}, "[route: issue, reason: open-decision]", None),
+            ("fixnownoroute", {}, "[route: issue]", "it had no route, so it is filed as `issue`"),
+            ("routeissuenoreason", {"route": "issue"}, "[route: ledger]", "it was routed `issue` with no reason, so it is filed as `ledger`"),
+            ("fixnownoreason", {"route": "fix-now"}, "[route: ledger]", "it was routed `fix-now` with no reason and is not fixed in this change, so it is filed as `ledger`")):
+        c = Case(name, policy="trivial-merge", table=trivial)
+        c.node("BUILD", BUILD)
+        c.node("REVIEW", {**CLEAN, "findings": [{**finding("L", nit), **route}]})
+        c.node("FOLLOWUP", {"issues": []})
+        code, out, err = c.ouro("run", "1")
+        check(f"{name}: a CLEAN review whose L finding is routed {route or 'nowhere'} takes no fix-now round and hands it to the FOLLOW-UP node as {filed}"
+              + (", the run saying why" if said else ""),
+              code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 1 and "fix-now round" not in out
+              and f"{nit} (evidence: probe) {filed}" in followup(c) and not (recmod.read_record(c.pr()["body"]).get("fix_now"))
+              and (said is None and "so it is filed as" not in out or said is not None and said in out))
+        if name == "routeissuenoreason":
+            code, out, err = c.ouro("run", "1")
+            check("a resume after the follow-ups are filed says so and prints no re-route line again",
+                  code == 0 and "[11] follow-ups already filed" in out and said not in out)
+
+    c = Case("fixnowridealong", policy="trivial-merge", table=trivial)
+    c.node("BUILD", {**BUILD, "residue": ["rename the helper's argument"]}, 1)
+    c.node("BUILD", {**fixed, "writes": {**fixed["writes"], "src/other.py": "NAME = 'items'\n"}}, 2)
+    c.node("REVIEW", {**CLEAN, "findings": [fix_now_finding("the docstring names the wrong total"), fix_now_finding(nit, reason="")],
+                      "residue": [{"item": "rename the helper's argument", "route": "fix-now", "reason": ""}]}, 1)
+    c.node("REVIEW", CLEAN, 2)
+    c.node("FOLLOWUP", {"issues": []})
+    code, out, err = c.ouro("run", "1")
+    check("a reasoned fix-now finding opens the round, and the reason-less fix-now finding and residue item ride along in its BUILD",
+          code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 2 and marked in brief(c, 2)
+          and f"- L src/app.py:2 {nit} (probe) [fix-now]" in brief(c, 2) and "- residue: rename the helper's argument [fix-now]" in brief(c, 2)
+          and "3 leftover(s) handed to the BUILD node" in c.pr()["body"])
+    check("the record names the path the fix-now commit touched outside the change's own files",
+          "its commit touched `src/other.py`" in c.pr()["body"] and (recmod.read_record(c.pr()["body"]).get("fix_now") or {}).get("outside") == ["src/other.py"])
+
+    for name, residue_reason, opens in (("residuefixnow", "own-change", True), ("residuefixnownoreason", "", False)):
+        c = Case(name, policy="trivial-merge", table=trivial)
+        c.node("BUILD", {**BUILD, "residue": ["rename the helper's argument"]}, 1)
+        c.node("BUILD", fixed, 2)
+        c.node("REVIEW", {**CLEAN, "residue": [{"item": "rename the helper's argument", "route": "fix-now", "reason": residue_reason}]}, 1)
+        c.node("REVIEW", CLEAN, 2)
+        c.node("FOLLOWUP", {"issues": []})
+        code, out, err = c.ouro("run", "1")
+        if opens:
+            check("a residue item routed fix-now with a reason opens the round and is handed to it; the fixed residue is not filed",
+                  code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 2
+                  and "- residue: rename the helper's argument [fix-now]" in brief(c, 2) and not c.prompts("FOLLOWUP"))
+        else:
+            check("a residue item routed fix-now with no reason opens no round and goes to the ledger, the run saying so",
+                  code == 0 and "done: #1 landed" in out and len(c.prompts("BUILD")) == 1 and "fix-now round" not in out
+                  and "- rename the helper's argument [route: ledger]" in followup(c) and "so it is filed as `ledger`" in out)
 
 
 def sec_review_cap():
@@ -1417,7 +1838,7 @@ def sec_preflight():
                   code == 1 and "preflight" in err and what in err and c.wrote() == [] and c.branches() == ["master"] and not marker.exists()
                   and not (c.main / ".claude" / "worktrees").exists())
     signedout = {"OURO_NODE_STUB": "", "PATH": str(PREDIR) + os.pathsep + no_claude, "FAKE_PREFLIGHT": "signedout"}
-    dead = "## What\nthing\n\n- `src/app.py` -- x -- \"def no_such_function(items):\"\n\nSize: S\nFlow: standard\n"
+    dead = "## What\nthing\n\n## Anchors\n\n- `src/app.py` -- x -- \"def no_such_function(items):\"\n\nSize: S\nFlow: standard\n"
     for name, labels, body, what in (("preflightDeadAnchor", ("agent-ready", "gates", "bug"), dead, "a body whose dead anchor verify would stop on"),
                                      ("preflightCheckpoint", ("agent-ready", "checkpoint", "gates", "bug"), ISSUE_BODY, "a checkpoint")):
         c = Case(name, table={"_issue_1": issue(labels=labels, body=body)})
@@ -1454,7 +1875,7 @@ def sec_review_sandbox():
     refused = (code == 2 and c.wrote() == [] and c.branches() == ["master"] and c.prompts("BUILD") == []
                and not any(s.startswith("issue view") for s in c.sigs()))
     if where == "linux" and os.path.exists("/usr/bin/bwrap"):  # Qwen Code runs that bwrap alone; no PATH stand-in serves
-        check("a Qwen Code reviewer with /usr/bin/bwrap satisfies the key on linux: REVIEW runs on Qwen Code, sandboxed",
+        check("a Qwen Code reviewer with /usr/bin/bwrap satisfies the key on linux: the run builds and REVIEW runs on Qwen Code, sandboxed",
               code == 0 and c.node_call("REVIEW")["backend"] == "qwen" and c.node_call("REVIEW")["sandbox"] is True
               and "review_sandbox" not in err)
     elif where == "linux":
@@ -1594,7 +2015,8 @@ def sec_full_paths():
           and pathlib.Path(call["cwd"]).resolve() != (c.main / ".claude" / "worktrees" / "1-fix-the-total").resolve())
     check("under full its tools are Read, Grep, Glob, Bash and PowerShell, with push, commit and gh denied in both shells",
           call["tools"] == PROBE_TOOLS and call["denied"] == PROBE_DENIED)
-    check("the copy is removed afterwards, its registration with it", "review-1" not in git(c.main, "worktree", "list", "--porcelain") and not pathlib.Path(call["cwd"]).exists())
+    check("the copy is no registered worktree, and its git directory is its sibling outside it", "review-1" not in git(c.main, "worktree", "list", "--porcelain")
+          and {"review-1", "review-1.git"} <= set(call["siblings"]))
     c2 = happy_case("standardpaths", binding=b, files={"gates/src_gate.py": "print('src gate ran')\n", "gates/doc_gate.py": "print('doc gate ran')\n"})
     c2.node("BUILD", {**BUILD, "_run": ["python3 gates/src_gate.py"]})
     c2.write(".claude/ouro.toml", b + '[[gate]]\nrun = "python3 gates/main_only.py"\npaths = ["src/"]\n')  # the main checkout's binding, uncommitted
@@ -1617,6 +2039,82 @@ def sec_full_paths():
           and "- Gates the pull request's checks run: `python3 gates/src_gate.py --branch`" in c3.pr()["body"])
 
 
+def sec_base_check():
+    try:
+        runmod.validation.check_platform()
+    except shmod.DriverError as ex:
+        print(f"SKIP: these rows need a host that validates BUILD's commands ({ex})")
+        return
+    skip = 'ci = "echo SKIP: the checks cannot run this gate"\n'
+    gates = (f'[[gate]]\nrun = "python3 tests/test_app.py"\n{skip}paths = ["tests/", "src/"]\n'
+             f'[[gate]]\nrun = "python3 gates/src_only.py"\n{skip}paths = ["src/"]\n')
+    keys = 'direct = {direct}\ntest_first_for_bugs = {on}\ntest_paths = ["tests/*"]'
+
+    def binding(on="true", direct='["docs/*.md"]', gate_block=gates):
+        return (BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('direct = ["docs/*.md"]', keys.format(on=on, direct=direct))
+                .replace('type = ["bug"]', 'type = ["bug", "enhancement"]') + gate_block)
+
+    load = "import pathlib, sys\nsys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))\nfrom src.app import compute_total\n"
+    buggy = {"src/app.py": "def compute_total(items):\n    return sum(items[:-1])\n", "gates/src_only.py": "print('src only')\n", "tests/test_app.py": load}
+    real = {"tests/test_app.py": load + "assert compute_total([1, 2]) == 3\n"}
+    tautology = {"tests/test_app.py": load + "assert compute_total([]) == 0\n"}
+
+    def case(name, writes, on="true", labels=("agent-ready", "gates", "bug"), direct='["docs/*.md"]', body=ISSUE_BODY, gate_block=gates, files=None):
+        c = Case(name, binding=binding(on, direct, gate_block), files={**buggy, **(files or {})},
+                 table={"_issue_1": issue(labels=labels, body=body), **UNPROTECTED})
+        c.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], **writes}}, 1)
+        c.node("REVIEW", CLEAN)
+        return c
+
+    c = case("basered", real)
+    code, out, err = c.ouro("run", "1")
+    check("a fix whose new row fails on the base passes the base check: the gate holding the test file went red there",
+          code == 0 and "base check: gate `python3 tests/test_app.py` with the fix reverted: exit 1" in out and len(c.prompts("BUILD")) == 1)
+    check("the record names the gate that went red on the base",
+          "the gate `python3 tests/test_app.py` went red (exit 1)" in c.pr()["body"])
+    siblings = c.node_call("REVIEW")["siblings"]
+    check("the base copy and its git directory are gone before the review copy is made",
+          "review-1.git" in siblings and not any(s.startswith("base-") for s in siblings))
+    check("a gate whose paths hold no changed test file does not run on the base, though it runs at the head",
+          "base check: gate `python3 gates/src_only.py`" not in out and "gate `python3 gates/src_only.py`: exit 0" in out)
+
+    c = case("basegreen", tautology)
+    c.node("BUILD", {**BUILD, "subject": "test(app): a row that fails before the fix", "writes": real}, 2)
+    code, out, err = c.ouro("run", "1")
+    brief = (c.nodes / "BUILD.2.prompt.txt").read_text(encoding="utf-8") if (c.nodes / "BUILD.2.prompt.txt").is_file() else ""
+    check("a fix whose new row passes on the base gets the fix-round finding, naming the gates run on the base copy",
+          "base check: gate `python3 tests/test_app.py` with the fix reverted: exit 0" in out
+          and "the change's tests pass without the fix and do not prove it" in brief and "Gates run on that copy: `python3 tests/test_app.py`" in brief)
+    check("the fix round's row goes red on the base, and the run goes on", code == 0 and "with the fix reverted: exit 1" in out
+          and "went red (exit 1)" in c.pr()["body"])
+    check("with every gate green on the base, the gate whose paths hold no changed test file still does not run there",
+          "base check: gate `python3 gates/src_only.py`" not in out)
+
+    lane_body = "## What\nFix the total.\n\n## Deliverable\n- `src/app.py`\n- `tests/test_app.py`\n\nDoc impact on close: none\n\nSize: S\nFlow: direct\n"
+    # The direct lane never pushes a gate's own script, so this gate runs the test files rather than being one.
+    runner = {"gates/run_tests.py": "import glob, runpy\nfor p in sorted(glob.glob('tests/test_*.py')):\n    runpy.run_path(p)\n"}
+    lane_gates = f'[[gate]]\nrun = "python3 gates/run_tests.py"\n{skip}paths = ["tests/", "src/"]\n'
+    c = case("baselane", tautology, direct='["src/*", "tests/*"]', body=lane_body, gate_block=lane_gates, files=runner)
+    c.node("BUILD", {**BUILD, "subject": "test(app): a row that fails before the fix", "writes": real}, 2)
+    code, out, err = c.ouro("run", "1")
+    check("the direct lane runs the base check after its build, and its finding moves the run to the pull-request flow's fix round",
+          "[2a] direct: the change's tests pass without the fix" in out and len(c.prompts("BUILD")) == 2
+          and code == 0 and c.pr() is not None and "went red (exit 1)" in c.pr()["body"])
+
+    for name, kw in (("baselabel", {"labels": ("agent-ready", "gates", "enhancement")}),("basekeyoff", {"on": "false"})):
+        c = case(name, tautology, **kw)
+        code, out, err = c.ouro("run", "1")
+        check(f"{name}: an issue without the bug label, or a binding with the key false, skips the check without a word",
+              code == 0 and "base check" not in out.lower() and "Base check" not in c.pr()["body"] and len(c.prompts("BUILD")) == 1)
+
+    for name, writes, word in (("basenotest", {}, "under"), ("basenofix", {"src/app.py": buggy["src/app.py"], **tautology}, "outside")):
+        c = case(name, writes)
+        code, out, err = c.ouro("run", "1")
+        check(f"{name}: a diff that changes no file {word} the test paths skips the check, and the record says which",
+              code == 0 and f"Base check skipped: the diff changes no file {word} `ship.test_paths`." in c.pr()["body"]
+              and "base check: gate" not in out)
+
+
 def sec_fix_round_scope():
     try:
         runmod.validation.check_platform()
@@ -1634,6 +2132,9 @@ def sec_fix_round_scope():
     c.node("REVIEW", CLEAN, 2)
     code, out, err = c.ouro("run", "1", "--validate")
     check("a full fix round that touches only docs/: exit 0", code == 0)
+    siblings = set(c.node_call("REVIEW", 2)["siblings"])
+    check("the first round's review copy and its git directory are gone before the second round's copy is made",
+          {"review-2", "review-2.git"} <= siblings and not siblings & {"review-1", "review-1.git"})
     check("observed gates are re-run on both committed heads",
           out.count("gate `python3 gates/src_gate.py`: exit 0") == 2 and out.count("gate `python3 gates/doc_gate.py`: exit 0") == 2)
     check("the gate the checks run only to print a skip ran on both heads", out.count("gate `python3 gates/check.py`: exit 0") == 2)
@@ -1683,6 +2184,10 @@ def sec_fix_round_scope():
     check("the Review line counts one fix round and not the verification's OUTSIDE finding", re.search(r"(?m)^Review: rounds:1 findings:H1/M0/L1 ", c2.pr()["body"]) is not None)
     check("the OUTSIDE finding reaches the FOLLOWUP node", c2.prompts("FOLLOWUP") != [] and "an older helper drops a row" in open(c2.nodes / c2.prompts("FOLLOWUP")[0], encoding="utf-8").read())
     check("with no [models] table the FOLLOWUP node is dispatched with the builder default, opus", c2.node_call("FOLLOWUP")["model"] == "opus")
+    merged = recmod.read_record(c2.pr()["body"]).get("usage") or []
+    check("the FOLLOWUP node's usage row reaches the merged pull request's record and its table, with the rows before it",
+          [u["node"] for u in merged][-1:] == ["FOLLOWUP"] and "BUILD" in [u["node"] for u in merged]
+          and any(x.startswith("| FOLLOWUP |") for x in c2.pr()["body"].splitlines()))
     c3 = happy_case("outsidetwice", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     c3.node("BUILD", BUILD, 1)
     c3.node("BUILD", {**BUILD, "subject": "fix(app): round two", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) + 1\n"}}, 2)
@@ -1707,8 +2212,11 @@ def sec_fix_round_scope():
     check("its findings section holds the L and OUTSIDE findings, each with its evidence, and no residue line",
           "M src/app.py:2 an older helper drops a row (evidence: probe)" in fnd
           and "L src/app.py:2 the residue's skip is intended (evidence: the workflow's own guard)" in fnd and "do the thing" not in fnd)
-    check("a node answer with no issue leaves a Follow-ups filed comment reading none",
-          any(c["body"] == "**Follow-ups filed**\n\nnone\n" for c in c2.pr_comments()))
+    check("the brief numbers each item after its route, residue first", "- do the thing [route: issue] (item 1)" in res
+          and "(evidence: probe) [route: issue] (item 2)" in fnd and "(item 3)" in fnd)
+    check("a node answer with no entry: each handed item is still filed, with its own text, and the comment names its route",
+          len([s for s in c2.sigs() if s.startswith("issue create")]) == 3 and any(s.startswith("issue create --title do the thing") for s in c2.sigs())
+          and any(c["body"].startswith("**Follow-ups filed**") and c["body"].count("(route: issue)") == 3 for c in c2.pr_comments()))
     check("needs_fix: on a verification an IN-FIX or unscoped M needs a fix, an OUTSIDE one does not",
           recmod.needs_fix({"round": 2, "findings": [{**finding("M"), "scope": "IN-FIX"}]}) and recmod.needs_fix({"round": 2, "findings": [finding("M")]})
           and not recmod.needs_fix({"round": 2, "findings": [{**finding("H"), "scope": "outside "}]}))
@@ -1746,46 +2254,57 @@ def sec_fix_round_scope():
     check("a run with findings and no residue still runs the node, its residue section reading (none)",
           c3.prompts("FOLLOWUP") != [] and under(open(c3.nodes / c3.prompts("FOLLOWUP")[0], encoding="utf-8").read(), "The record's residue").strip() == "(none)")
 
-    for name, ledger, title, want in (
-            ("open ledger", issue(2, ("gates", "umbrella"), title="Cleanup: gates"), "Cleanup: gates", ("issue comment 2", None)),
-            ("closed ledger", issue(2, ("gates", "umbrella"), title="Cleanup: gates", state="CLOSED"), "Cleanup: gates", ("issue reopen 2", None)),
-            ("open ledger in another case", issue(2, ("gates", "umbrella"), title="Cleanup: gates"), "Cleanup: GATES", ("issue comment 2", None)),
-            ("no ledger", None, "Cleanup: gates", (None, "--label needs-triage --label umbrella --label gates")),
-            ("ordinary title", issue(2, ("gates", "umbrella"), title="Cleanup: gates"), "Fix the helper", (None, "--label needs-triage"))):
+    open_ledger = issue(2, ("gates", "umbrella"), title="Cleanup: gates")
+    for name, ledger, route, title, want in (
+            ("open ledger", open_ledger, "ledger", "Cleanup: gates", ("issue comment 2", None)),
+            ("closed ledger", issue(2, ("gates", "umbrella"), title="Cleanup: gates", state="CLOSED"), "ledger", "Cleanup: gates", ("issue reopen 2", None)),
+            ("open ledger in another case", open_ledger, "ledger", "Cleanup: GATES", ("issue comment 2", None)),
+            ("no ledger", None, "ledger", "Cleanup: gates", (None, "--label needs-triage --label umbrella --label gates")),
+            ("a ledger item the node titles as an issue", open_ledger, "ledger", "Fix the helper", ("issue comment 2", None)),
+            ("an issue item the node titles as a ledger", open_ledger, "issue", "Cleanup: gates", (None, "--label needs-triage --label gates")),
+            ("an idea item", open_ledger, "idea", "Add the helper", (None, "--label idea --label gates"))):
         tbl = {"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))}
         if ledger:
             tbl["_issue_2"] = ledger
         cl = happy_case("ledger " + name.replace(" ", ""), policy="trivial-merge", table=tbl)
         cl.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-        cl.node("FOLLOWUP", {"issues": [{"title": title, "body": "- a below-floor line\n", "labels": ["gates"]}]})
+        cl.node("REVIEW", {**CLEAN, "residue": [{"item": "a below-floor line", "route": route, "reason": "data-loss" if route == "issue" else ""}]})
+        other = next(r for r in ("issue", "ledger") if r != route)  # the node's answer names another route, which the driver does not read
+        cl.node("FOLLOWUP", {"issues": [{"item": 1, "title": title, "body": "- a below-floor line\n", "labels": ["gates"], "route": other}]})
         code, out, err = cl.ouro("run", "1", "--validate")
         sigs = cl.sigs()
         creates = [s for s in sigs if s.startswith("issue create")]
-        check(f"follow-up, {name}: exit 0", code == 0)
+        check(f"follow-up, {name}: exit 0, and the Follow-ups filed comment names the route `{route}`",
+              code == 0 and any(c["body"].startswith("**Follow-ups filed**") and f"(route: {route})" in c["body"] for c in cl.pr_comments()))
         if want[0]:
             check(f"follow-up, {name}: {want[0]!r} and no create", any(s.startswith(want[0]) for s in sigs) and creates == [])
             lines_reach = any("a below-floor line" in (c["body"] or "") or "a below-floor line" in c["sig"]
                               for c in cl.calls() if c["sig"].startswith(want[0]) or c["sig"].startswith("issue comment 2"))
             how = "reopened" if "reopen" in want[0] else "appended"
             check(f"follow-up, {name}: the lines reach the ledger and the PR comment says {how}",
-                  lines_reach and any(f"#2 Cleanup: gates ({how})" in c["body"] for c in cl.pr_comments()))
+                  lines_reach and any(f"#2 Cleanup: gates ({how}) (route: ledger)" in c["body"] for c in cl.pr_comments()))
         else:
-            check(f"follow-up, {name}: one create carrying {want[1]!r}", len(creates) == 1 and want[1] in creates[0]
-                  and (name != "ordinary title" or "umbrella" not in creates[0]) and not any(s.startswith(("issue comment 2", "issue reopen")) for s in sigs))
+            check(f"follow-up, {name}: one create carrying {want[1]!r}" + (" and no other state label" if route == "idea" else ""),
+                  len(creates) == 1 and creates[0].endswith(want[1]) and (route != "idea" or "needs-triage" not in creates[0])
+                  and (route == "ledger" or "umbrella" not in creates[0]) and not any(s.startswith(("issue comment 2", "issue reopen")) for s in sigs))
+            if route != "ledger":
+                own = "a below-floor line" if title.startswith("Cleanup") else title
+                check(f"follow-up, {name}: titled {own!r}, never a ledger's title", creates[0].startswith(f"issue create --title {own} --"))
 
     cb = happy_case("ledger bothstates", policy="trivial-merge", table={
         "_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug")),
         "_issue_2": issue(2, ("gates", "umbrella"), title="Cleanup: gates", state="CLOSED"),
         "_issue_3": issue(3, ("gates", "umbrella"), title="Cleanup: gates")})
     cb.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-    cb.node("FOLLOWUP", {"issues": [{"title": "Cleanup: gates", "body": "- a below-floor line\n"}]})
+    cb.node("REVIEW", {**CLEAN, "residue": [{"item": "a below-floor line", "route": "ledger"}]})
+    cb.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Cleanup: gates", "body": "- a below-floor line\n"}]})
     code, out, err = cb.ouro("run", "1", "--validate")
     check("follow-up, a closed and an open ledger: the open one takes the comment, nothing reopens",
           code == 0 and any(s.startswith("issue comment 3") for s in cb.sigs()) and not any(s.startswith(("issue reopen", "issue create")) for s in cb.sigs()))
 
     cf = happy_case("followupstrip", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     cf.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-    cf.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- a line to keep\n\nSize: S. Flow: express. Doc impact on close: none.\n", "labels": ["gates"]}]})
+    cf.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Fix the helper", "body": "- a line to keep\n\nSize: S. Flow: express. Doc impact on close: none.\n", "labels": ["gates"]}]})
     code, out, err = cf.ouro("run", "1", "--validate")
     filed = [c["body"] or "" for c in cf.calls() if c["sig"].startswith("issue create")]
     check("a follow-up's Size, Flow and Doc impact lines are stripped before it is filed",
@@ -1793,7 +2312,7 @@ def sec_fix_round_scope():
 
     cd = happy_case("followupdead", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     cd.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-    cd.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- `src/nosuch.py` drops a row\n", "labels": ["gates"]}]})
+    cd.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Fix the helper", "body": "- `src/nosuch.py` drops a row\n", "labels": ["gates"]}]})
     code, out, err = cd.ouro("run", "1", "--validate")
     filed = [c["body"] or "" for c in cd.calls() if c["sig"].startswith("issue create")]
     named = [c["body"] for c in cd.pr_comments() if c["body"].startswith("**Follow-ups filed**")]
@@ -1803,9 +2322,9 @@ def sec_fix_round_scope():
           and "'Fix the helper' is filed with anchors that do not resolve" in out)
 
     cg = happy_case("followuplabels", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
-    cg.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-    cg.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- a line\n", "labels": ["Gates", "Bug", "agent-ready", "nosuch"]},
-                                    {"title": "Fix the other helper", "body": "- a line\n", "labels": []}]})
+    cg.node("BUILD", {**BUILD, "residue": ["a below-floor line", "another line"]}, 1)
+    cg.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Fix the helper", "body": "- a line\n", "labels": ["Gates", "Bug", "agent-ready", "nosuch"]},
+                                    {"item": 2, "title": "Fix the other helper", "body": "- a line\n", "labels": []}]})
     code, out, err = cg.ouro("run", "1", "--validate")
     creates = [s for s in cg.sigs() if s.startswith("issue create")]
     check("a follow-up keeps the node's area and type labels in the binding's spelling and drops a state or unknown name; one naming no area inherits the run's",
@@ -1814,7 +2333,7 @@ def sec_fix_round_scope():
     check("the FOLLOWUP brief says to read the binding's comments on each area", AREA_COMMENTS in open(cg.nodes / cg.prompts("FOLLOWUP")[0], encoding="utf-8").read())
     ca = happy_case("followupassignees", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
     ca.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-    ca.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- a line\n", "labels": ["Gates"]}]})
+    ca.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Fix the helper", "body": "- a line\n", "labels": ["Gates"]}]})
     cfg = ca.root / "developer.toml"
     cfg.write_text('[followup]\nassignees = ["someone", "@me"]\n', encoding="utf-8")
     code, out, err = ca.ouro("run", "1", "--validate", extra={"OURO_DEVELOPER_CONFIG": str(cfg)})
@@ -1832,9 +2351,11 @@ def sec_fix_round_scope():
         check(f"a malformed followup table is a developer binding error: {text.splitlines()[1]!r}", "followup.assignees must be a list" in refused)
 
     cu = happy_case("ledgerundeclared", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
-    cu.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-    cu.node("FOLLOWUP", {"issues": [{"title": "Cleanup: nosuch", "body": "- a line\n"}, {"title": "Cleanup: GATES", "body": "- a line\n"},
-                                    {"title": "Fix the helper", "body": "- a line\n", "labels": ["gates"]}]})
+    cu.node("BUILD", {**BUILD, "residue": ["line one", "line two", "line three"]}, 1)
+    cu.node("REVIEW", {**CLEAN, "residue": [{"item": "line one", "route": "ledger"}, {"item": "line two", "route": "ledger"},
+                                            {"item": "line three", "route": "issue", "reason": "data-loss"}]})
+    cu.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Cleanup: nosuch", "body": "- a line\n"}, {"item": 2, "title": "Cleanup: GATES", "body": "- a line\n"},
+                                    {"item": 3, "title": "Fix the helper", "body": "- a line\n", "labels": ["gates"]}]})
     code, out, err = cu.ouro("run", "1", "--validate")
     creates = [s for s in cu.sigs() if s.startswith("issue create")]
     check("a ledger title naming an undeclared area files once without that label, a declared one in the binding's spelling, beside an ordinary issue",
@@ -1849,25 +2370,72 @@ def sec_fix_round_scope():
                                                                                                   {"Exit": 1, "Out": "HTTP 502"},
                                                                                                   {"Out": "https://example.test/o/n/issues/99"},
                                                                                                   {"Out": "https://example.test/o/n/issues/100"}]}})
-    cw.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
-    cw.node("FOLLOWUP", {"issues": [{"title": "Fix the helper", "body": "- a line\n"}, {"title": "Fix the other helper", "body": "- a line\n"},
-                                    {"title": "Third lost one", "body": "- a line\n"}]})
+    cw.node("BUILD", {**BUILD, "residue": ["line one", "line two", "line three"]}, 1)
+    cw.node("REVIEW", {**CLEAN, "residue": [{"item": "line one", "route": "issue", "reason": "data-loss"}, {"item": "line two", "route": "idea"},
+                                            {"item": "line three", "route": "ledger"}]})
+    cw.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Fix the helper", "body": "- a line\n"}, {"item": 2, "title": "Fix the other helper", "body": "- a line\n"},
+                                    {"item": 3, "title": "Third lost one", "body": "- a line\n"}]})
     code, out, err = cw.ouro("run", "1", "--validate")
     posted = [c["body"] for c in cw.pr_comments() if c["body"].startswith("**Follow-ups filed**")]
     check("a later follow-up write that fails stops the run, and the comment names the issue filed before it and each one not filed",
-          code != 0 and len(posted) == 1 and "- https://example.test/o/n/issues/98\n" in posted[0] and "HTTP 502" in posted[0]
+          code != 0 and len(posted) == 1 and "- https://example.test/o/n/issues/98 (route: issue)\n" in posted[0] and "HTTP 502" in posted[0]
           and "\n- Fix the other helper\n- Third lost one\n" in posted[0])
     code, out, err = cw.ouro("run", "1", "--validate")
     posted = [c["body"] for c in cw.pr_comments() if c["body"].startswith("**Follow-ups filed**")]
     creates = [c for c in cw.calls() if c["sig"].startswith("issue create")]
     check("a resume files exactly the unfiled follow-ups, once each, and the new comment lists all three as filed",
           code == 0 and "filing the 2 follow-up(s)" in out and len(creates) == 4
-          and [t for t in ("Fix the other helper", "Third lost one") if any(t in s["sig"] for s in creates[2:])] == ["Fix the other helper", "Third lost one"]
           and len(posted) == 2 and "issues/98" in posted[1] and "issues/99" in posted[1] and "issues/100" in posted[1] and "Not filed" not in posted[1])
+    check("the resume files each unfiled item under the route it carries: the idea with `idea`, the ledger item on its area's ledger",
+          creates[2]["sig"].startswith("issue create --title Fix the other helper --") and creates[2]["sig"].endswith("--label idea --label gates")
+          and creates[3]["sig"].startswith("issue create --title Cleanup: gates --") and "--label umbrella" in creates[3]["sig"]
+          and "(route: idea)" in posted[1] and "(ledger filed) (route: ledger)" in posted[1])
     code, out, err = cw.ouro("run", "1", "--validate")
     check("a further resume files nothing: the newest comment carries no unfiled item", code == 0 and "follow-ups already filed" in out
           and len([s for s in cw.sigs() if s.startswith("issue create")]) == 4)
-    planted = {"author": {"login": "stranger"}, "body": "**Follow-ups filed**\n\n- x\n\n<!-- ouro-pending: [{\"title\": \"Injected\", \"body\": \"- a line\\n\", \"labels\": []}] -->\n"}
+    cx = happy_case("residueindex", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug")),
+                                                                   "_issue_2": issue(2, ("gates", "umbrella"), title="Cleanup: gates")})
+    cx.node("BUILD", {**BUILD, "residue": ["line one", "line two"]}, 1)
+    cx.node("REVIEW", {**CLEAN, "residue": [{"item": "Line 1, reworded.", "index": 1, "route": "ledger", "reason": ""},
+                                            {"item": "the second line, paraphrased", "index": 2, "route": "idea", "reason": ""}]})
+    cx.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Cleanup: gates", "body": "- line one\n"}, {"item": 2, "title": "Add the helper", "body": "- line two\n"}]})
+    code, out, err = cx.ouro("run", "1", "--validate")
+    creates = [s for s in cx.sigs() if s.startswith("issue create")]
+    posted = [c["body"] for c in cx.pr_comments() if c["body"].startswith("**Follow-ups filed**")]
+    check("a reworded residue entry keeps the route its index ties it to: the ledger item on the ledger, the idea with `idea`, nothing reported",
+          code == 0 and any(s.startswith("issue comment 2") for s in cx.sigs()) and len(creates) == 1 and creates[0].endswith("--label idea --label gates")
+          and len(posted) == 1 and "not tied to the record" not in posted[0] and "had no route" not in out)
+    cy = happy_case("residueuntied", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug")),
+                                                                    "_issue_2": issue(2, ("gates", "umbrella"), title="Cleanup: gates")})
+    cy.node("BUILD", {**BUILD, "residue": ["line one", "line two"]}, 1)
+    cy.node("REVIEW", {**CLEAN, "residue": [{"item": "line one", "index": 1, "route": "ledger", "reason": ""},
+                                            {"item": "line two, paraphrased", "index": 5, "route": "idea", "reason": ""},
+                                            {"item": "line one again", "index": 1, "route": "idea", "reason": ""}]})
+    cy.node("FOLLOWUP", {"issues": [{"item": 1, "title": "Cleanup: gates", "body": "- line one\n"}, {"item": 2, "title": "Fix the helper", "body": "- line two\n"}]})
+    code, out, err = cy.ouro("run", "1", "--validate")
+    creates = [s for s in cy.sigs() if s.startswith("issue create")]
+    posted = [c["body"] for c in cy.pr_comments() if c["body"].startswith("**Follow-ups filed**")]
+    for what, text, said in (("an index outside the list", "its index 5 names none of the 2 item(s)", None),
+                             ("a repeated index", "its index 1 repeats an earlier entry's", None),
+                             ("an item no entry ties", "the review routes no item 'line two', so it is filed as `issue`", "'line two': it had no route")):
+        check(f"a residue route the record cannot tie, {what}: the Follow-ups filed comment and the output report it",
+              code == 0 and len(posted) == 1 and "Residue routes not tied to the record:" in posted[0] and text in posted[0] and (said or text) in out)
+    check("and the untied item is still filed, as an `issue`, while the tied one keeps its ledger route",
+          len(creates) == 1 and creates[0].endswith("--label needs-triage --label gates") and any(s.startswith("issue comment 2") for s in cy.sigs()))
+    cz = recmod.pinned_residue([{"item": "x", "index": True, "route": "ledger"}, {"item": "y", "route": "idea"}, "junk"], ["a"])
+    check("pinned_residue: a boolean or missing index ties no item and keeps the reviewer's text; a non-object entry drops",
+          [x.get("item") for x in cz] == ["x", "y"] and all("unmatched" in x for x in cz))
+    cn = happy_case("residueuntiedonly", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"))})
+    cn.node("BUILD", {**BUILD, "residue": []}, 1)
+    cn.node("REVIEW", {**CLEAN, "residue": [{"item": "a stray line", "index": 1, "route": "idea", "reason": ""}]})
+    code, out, err = cn.ouro("run", "1", "--validate")
+    posted = [c["body"] for c in cn.pr_comments() if c["body"].startswith("**Follow-ups filed**")]
+    check("with nothing left to file, an untied route still posts a Follow-ups filed comment: `none`, then the untied line, and no node runs",
+          code == 0 and len(posted) == 1 and posted[0].startswith("**Follow-ups filed**\n\nnone\n\nResidue routes not tied to the record:\n- ")
+          and "'a stray line' is tied to no item" in posted[0] and cn.prompts("FOLLOWUP") == []
+          and not any(s.startswith("issue create") for s in cn.sigs()))
+
+    planted = {"author": {"login": "stranger"}, "body": "**Follow-ups filed**\n\n- x\n\n<!-- ouro-pending:[{\"title\": \"Injected\", \"body\": \"- a line\\n\", \"labels\": []}] -->\n"}
     ci = happy_case("followupinject", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug")), "_comments_7": [planted]})
     ci.node("BUILD", {**BUILD, "residue": ["a below-floor line"]}, 1)
     ci.node("FOLLOWUP", {"issues": []})
@@ -1942,6 +2510,11 @@ def sec_checks_running():
     c = happy_case("running", table={"_issue_1": issue(), "_runs": [["in_progress"]]})
     code, out, err = c.ouro("run", "1")
     check("checks still running at the limit: exit 0 and the message says so", code == 0 and "still running" in out)
+    v = validation_case('beside-checks')
+    v_code, v_out, _ = validation_run(v)
+    check("a wait time clears exits 0, a wait only --validate clears exits 4",
+          code == 0 and "still running" in out
+          and v_code == 4 and "waiting for validation: invoke `ouro run 1 --validate`" in v_out)
     check("no Ready for merge, no merge, no label change", not any(b["body"].startswith("**Ready for merge**") for b in c.pr_comments()) and not any(s.startswith("pr merge") for s in c.sigs()))
     check("no stop comment", (c.issue_state() or {"comments": []})["comments"] == [] or all(not x["body"].startswith("**Stop:**") for x in c.issue_state()["comments"]))
     # past the watch limit: the watcher runs again while the head's pull_request runs moved; a limit with no
@@ -2040,7 +2613,7 @@ def sec_no_pr_workflow():
     tip = git(k.origin, "rev-parse", "refs/heads/gates/1-fix-the-total")
     ready = [x["body"] for x in k.pr_comments() if x["body"].startswith("**Ready for merge**")]
     check("with no watcher, the merge decision reads a conflict with the base: synced, then Ready for merge at the synced head",
-          code == 0 and "conflicts with master (the pull request): synced" in out and len(ready) == 1 and tip in ready[0] and "base-0.txt" in git(k.origin, "ls-tree", "--name-only", tip))
+          code == 0 and "conflicts with master (the pull request): syncing" in out and len(ready) == 1 and tip in ready[0] and "base-0.txt" in git(k.origin, "ls-tree", "--name-only", tip))
     protected = {"api repos/o/n/rules/branches/master": {"Exit": 0, "Out": [{"type": "required_status_checks"}]},
                  "api repos/o/n/branches/master/protection": {"Exit": 1, "Out": "Branch not protected"}}
     v = lane_case("noprworkflowlane", protection=protected, files={".github/workflows/ci.yml": None})
@@ -2070,12 +2643,18 @@ def sec_no_pr_workflow():
                          if inline_supported else "would post **Ready for merge** and exit 0" in out))
 
 
+def leg(job, line):
+    """One line of a `gh run view --log-failed` text, prefixed as gh prefixes it with its job and step."""
+    return f"{job}\tRun gates\t2026-11-22T10:00:00.0000000Z {line}"
+
+
 def sec_check_flake():
     # the stand-in keeps one run per commit: the first attempt fails, the re-run the driver asks for succeeds, however often the list is read
     c = happy_case("flake", table={"_issue_1": issue(), "_runs": [["failure", "success"]]})
     code, out, err = c.ouro("run", "1")
     check("a failure whose re-run succeeds is a flake: retried once, then exit 0", code == 0 and any(s.startswith("run rerun 11") for s in c.sigs()) and "a flake" in out)
     check("a flake is no fix round", c.prompts("BUILD") == ["BUILD.1.prompt.txt"])
+    check("one failed job is re-run, and the run says that is the case it took", "run 11: 1 job failed, a re-run can show a flake" in out)
     # the first run is re-run once and stays red (a real failure); every later run reads attempt 2 from the table and is not re-run
     c2 = happy_case("realfail", table={"_issue_1": issue(), "_runs": [["failure", "failure"]], "run view * --json attempt": {"Seq": [{"Model": True}, {"Exit": 0, "Out": {"attempt": 2}}]},
                                        "run view * --log-failed": {"Exit": 0, "Out": "the real failure line"}})
@@ -2162,6 +2741,31 @@ def sec_check_flake():
     check("control: a skipped check is no obstacle: Ready for merge is posted", code == 0 and any(b["body"].startswith("**Ready for merge**") for b in cs.pr_comments()))
 
 
+def sec_check_both_legs():
+    # both legs failed: what each names decides whether a re-run can show a flake
+    # build (2) names the command only by its FAIL exit= line, as when the Action's trailing ::error:: loop is not reached
+    same = "\n".join([leg("build", "##[error]gate failed: python3 tests/a.py"), leg("build (2)", "FAIL exit=1  python3 tests/a.py")])
+    cs = happy_case("samegate", table={"_issue_1": issue(), "_runs": [["legs"], ["success"]], "run view * --log-failed": {"Exit": 0, "Out": same}})
+    cs.node("BUILD", {**BUILD, "subject": "fix(app): the gate both legs failed", "writes": {"src/app.py": "def compute_total(items):\n    return 9\n"}}, 2)
+    code, out, err = cs.ouro("run", "1", extra={"OURO_WATCH_LIMIT": "20"})
+    got = open(cs.nodes / "BUILD.2.prompt.txt", encoding="utf-8").read() if "BUILD.2.prompt.txt" in cs.prompts("BUILD") else ""
+    check("two jobs that failed the same gate command: no re-run, a fix round at once with the failure, and the run says so",
+          not any(s.startswith("run rerun") for s in cs.sigs()) and "gate failed: python3 tests/a.py" in got
+          and "jobs build, build (2) all failed `python3 tests/a.py`: no flake, no re-run" in out)
+    for name, what, log, case in (
+            ("diffgate", "named different commands",
+             "\n".join([leg("build", "##[error]gate failed: python3 tests/a.py"), leg("build (2)", "##[error]gate failed: python3 tests/b.py")]),
+             "2 jobs failed different gate commands"),
+            ("nogate", "no command reads from either log",
+             "\n".join([leg("build", "Error: the runner lost its disk"), leg("build (2)", "Error: the runner lost its disk")]),
+             "2 jobs failed, no failing gate command read from build, build (2)")):
+        cd = happy_case(name, table={"_issue_1": issue(), "_runs": [["legs", "success"]], "run view * --log-failed": {"Exit": 0, "Out": log}})
+        code, out, err = cd.ouro("run", "1")
+        check(f"two jobs failed, {what}: the re-run is requested as today, a green one a flake, and the run says which case",
+              code == 0 and any(s.startswith("run rerun 11") for s in cd.sigs()) and "a flake" in out and f"run 11: {case}: a re-run can show a flake" in out
+              and cd.prompts("BUILD") == ["BUILD.1.prompt.txt"])
+
+
 def sec_conflict():
     """A conflict with the base, reported by the checks watcher or by the merge, is synced once per head; the same head again is an error."""
     r = runmod.Run.__new__(runmod.Run)
@@ -2182,7 +2786,7 @@ def sec_conflict():
     c = happy_case("mergeconflict", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug")), "_mergeable": ["CONFLICTING DIRTY", "MERGEABLE CLEAN"]})
     code, out, err = c.ouro("run", "1")
     check("a merge refused as CONFLICTING is a sync, then the pass repeats and merges: exit 0",
-          code == 0 and "conflicts with master (the merge): synced" in out and (c.pr() or {}).get("state") == "MERGED" and len(c.prompts("BUILD")) == 1)
+          code == 0 and "conflicts with master (the merge): syncing" in out and (c.pr() or {}).get("state") == "MERGED" and len(c.prompts("BUILD")) == 1)
     c2 = happy_case("mergeconflict2", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug")), "_mergeable": ["CONFLICTING DIRTY"]})
     code, out, err = c2.ouro("run", "1")
     check("a conflict the sync does not clear is a driver error at the same head: exit 1, no merge, no stop comment",
@@ -2277,6 +2881,8 @@ def sec_flow_tighten():
     check("a standard issue whose diff reaches a hook is full, and the record carries that class", code == 0 and bool(ready) and "Class: full" in ready[0]
           and recmod.read_record(c.pr()["body"]).get("flow") == "full")
     sh(sys.executable, STUB, "pr", "merge", "7", "--squash", "--subject", "fix (#7)", "--delete-branch", env=c.env())
+    # A red check at the merged head keeps the resume from skipping the watch.
+    c.set_table({**json.loads((c.root / "gh-table.json").read_text(encoding="utf-8")), "_checks_extra": [{"name": "lint", "bucket": "fail"}]})
     merged = git(c.origin, "rev-parse", "refs/heads/master")
     before = len(c.sigs())
     code, out, err = c.ouro("run", "1")
@@ -2364,6 +2970,12 @@ def sec_sync_conflict():
     check("the branch pushed is the base plus the rebased commit, its message kept, and the resolution's record on top: no merge commit",
           sh("git", "merge-base", "--is-ancestor", "master", pushed, cwd=c4.origin)[0] == 0 and subjects == [BUILD["subject"], "fix(app): resolve"]
           and git(c4.origin, "rev-list", "--merges", f"master..{pushed}") == "")
+    ob = shmod.load_binding_module()
+    env = shmod.Env(c4.main, ob, ob.load(c4.main / ".claude/ouro.toml"), False)
+    r = runmod.Run(env, 1, None, runmod.RunOptions())
+    r.tree = Tree(env, pathlib.Path(c4.node_call("BUILD", 2)["cwd"]), None)
+    check("a rebase resolution's record commit spends no fix round, as a merge resolution's merge commit spends none",
+          len(r.tree.git("rev-list", "--no-merges", "origin/master..HEAD").out.split()) == 2 and r.fix_rounds_spent() == 0)
     added = '[[gate]]\nrun = "python3 gates/branch_gate.py"\nci = "echo SKIP: the checks cannot run this gate"\n'
     c6 = Case("syncconflictrebasegate", binding=rebase, files={"gates/check.py": MOVER})
     c6.node("BUILD", {**BUILD, "writes": {**BUILD["writes"], ".claude/ouro.toml": rebase + added, "gates/branch_gate.py": "import sys\nsys.exit(0)\n"}}, 1)
@@ -2388,7 +3000,8 @@ def rebase_aborted(c):
 
 
 def sec_sync_rebase_stops():
-    """The two rebase-sync stops: a second sync conflict, and a rebase that stops again after the resolution's --continue."""
+    """The rebase sync past its first resolution: two stops (a second sync conflict, a rebase that stops again after the
+    resolution's --continue), a resolution that empties a replayed commit, and a gate a commit not yet replayed adds."""
     rebase = BINDING.format(policy="stop-at-pr", review="adversarial-review").replace("[ship]\n", '[ship]\nsync = "rebase"\n')
     c6 = Case("syncconflictrebase3", binding=rebase, files={"gates/check.py": MOVER})
     c6.node("BUILD", BUILD, 1)
@@ -2410,6 +3023,56 @@ def sec_sync_rebase_stops():
     check("a rebase that stops again on the next commit after the resolution's --continue: `open decision`, exit 3, the rebase aborted",
           code == 3 and len(c7.prompts("BUILD")) == 3 and len(stops) == 1 and stop_comment_ok(stops[0], "open decision")
           and "stopped again" in stops[0] and rebase_aborted(c7))
+    pushed = "refs/heads/gates/1-fix-the-total"
+    c8 = Case("syncconflictrebaseempty", binding=rebase, files={"gates/check.py": MOVER})
+    c8.node("BUILD", BUILD, 1)
+    c8.node("BUILD", {**BUILD, "subject": "fix(app): resolve", "writes": {"src/app.py": "def compute_total(items):\n    return sum(items) * 2\n"}}, 2)
+    c8.node("REVIEW", CLEAN)
+    code, out, err = c8.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c8.origin)})
+    subjects = git(c8.origin, "log", "--reverse", "--format=%s", f"master..{pushed}").splitlines() if "gates/1-fix-the-total" in c8.branches() else []
+    check("a rebase resolution that takes the base's side, leaving the replayed commit empty, drops that commit and lands the record: exit 0, no stop",
+          code == 0 and len(c8.prompts("BUILD")) == 2 and stops_of(c8) == [] and subjects == ["fix(app): resolve"])
+    added = '[[gate]]\nrun = "python3 gates/branch_gate.py"\nci = "echo SKIP: the checks cannot run this gate"\n'
+    c9 = Case("syncconflictrebaselater", binding=rebase, files={"gates/check.py": MOVER}, table=express)
+    c9.node("BUILD", {**BUILD, "writes": {"docs/note.md": "note, edited\n"}}, 1)
+    c9.node("BUILD", {**BUILD, "subject": "gates: add the branch gate",
+                      "writes": {".claude/ouro.toml": rebase + added, "gates/branch_gate.py": "import sys\nsys.exit(0)\n"}}, 2)
+    c9.node("BUILD", {**BUILD, "subject": "docs: resolve", "writes": {"docs/note.md": "note, resolved\n"}}, 3)
+    c9.node("REVIEW", {"verdict": "FINDINGS", "findings": [finding("M", "the note needs a gate")], "false_record_sentences": 0, "files_read": ["x"]}, 1)
+    c9.node("REVIEW", CLEAN)
+    code, out, err = c9.ouro("run", "1", extra={"CONFLICT_ORIGIN": str(c9.origin), "CONFLICT_FILE": "docs/note.md"})
+    check("a stopped rebase's resolution BUILD names the gate a branch commit the rebase has not replayed yet adds, read at orig-head: exit 0",
+          code == 0 and len(c9.prompts("BUILD")) == 3 and "- `python3 gates/branch_gate.py`" in (c9.nodes / "BUILD.3.prompt.txt").read_text(encoding="utf-8"))
+    check("a stopped rebase whose base renamed a gate reads the base's gates plus the one the branch adds, not the renamed one at orig-head",
+          rebase_renamed_gates(rebase, c9.main) == ["python3 gates/check.py", "python3 tests/new.py --strict", "python3 tests/keep.py", "python3 tests/branch.py"])
+
+
+def rebase_renamed_gates(binding, main):
+    """The gate runs `gate_entries` reads in a scratch repo stopped on a rebase conflict: the base renamed a gate, and a
+    branch commit the rebase has not replayed yet adds one. None when the rebase did not stop."""
+    repo = TMP / "rebaserenamed"
+    (repo / ".claude").mkdir(parents=True)
+
+    def commit(files, msg):
+        for p, t in files.items():
+            (repo / p).write_text(binding + "".join(f'[[gate]]\nrun = "{x}"\n' for x in t) if p.endswith(".toml") else t, encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", msg)
+    git(repo, "init", "-q", "-b", "master")
+    commit({".claude/ouro.toml": ["python3 tests/old.py", "python3 tests/keep.py"], "note.md": "note\n"}, "base")
+    git(repo, "checkout", "-q", "-b", "feat")
+    commit({"note.md": "note, branch\n"}, "docs: the note")
+    commit({".claude/ouro.toml": ["python3 tests/old.py", "python3 tests/keep.py", "python3 tests/branch.py"]}, "gates: add one")
+    git(repo, "checkout", "-q", "master")
+    commit({".claude/ouro.toml": ["python3 tests/new.py --strict", "python3 tests/keep.py"], "note.md": "note, base\n"}, "gates: rename old")
+    git(repo, "checkout", "-q", "feat")
+    if sh("git", "rebase", "master", cwd=repo)[0] == 0:
+        return None
+    ob = shmod.load_binding_module()
+    env = shmod.Env(main, ob, ob.load(main / ".claude/ouro.toml"), False)
+    r = runmod.Run(env, 1, None, runmod.RunOptions())
+    r.tree = Tree(env, repo, None)
+    return [g["run"] for g in r.gate_entries()]
 
 
 def sec_direct():
@@ -2455,10 +3118,11 @@ def sec_direct():
               and git(actual.origin, 'rev-parse', 'master') == head
               and any('gates/doc_gate.py' in t for t in actual.node_call('BUILD')['tools']))
     else:
-        check("unsupported inline execution uses the declared ordinary CI route without running a CI-owned gate locally",
+        check("unsupported inline execution uses the declared ordinary CI route; the driver runs no CI-covered gate locally, "
+              "and the BUILD node is granted only the cheap one",
               code == 0 and actual.pr() is not None and not marker.exists()
               and any(row['body'].startswith('**Ready for merge**') for row in actual.pr_comments())
-              and not any(t.startswith('Bash(python3') for t in actual.node_call('BUILD')['tools']))
+              and [t for t in actual.node_call('BUILD')['tools'] if t.startswith('Bash(python3')] == ['Bash(python3 gates/doc_gate.py)'])
     code, out, err = Case("directoutsidenotice", binding=notice, table={"_issue_1": issue(body=body2)}).ouro("run", "1", "--dry-run")
     check("one that falls back to a worktree does stop", code == 3 and "stopped: gate uncovered" in out)
 
@@ -2481,6 +3145,24 @@ def sec_parts():
           "Part 2/2" in pb and "**Second (Flow: standard).** b" in pb and "out of scope" in pb and "its own pull request" in pb)
     check("a part 2 run's REVIEW brief names part 2/2 and says another part's gap is not a finding",
           "Part 2/2" in pr_ and "another part's acceptance covers is not a finding" in pr_)
+    check("a part's BUILD brief says the issue's other parts are not residue", "The issue's other parts are not residue" in pb)
+    two = ("## Deliverable\n- [ ] 1. **First (Flow: standard).** a\n- [ ] 2. **Second (Flow: standard).** b\n\n"
+           "- `src/app.py` -- compute_total -- \"def compute_total(items):\"\n\nDoc impact on close: none\n\nSize: S\nFlow: standard\n")
+    own, other, mid = ("Part 2/2 of #1 (**Second (Flow: standard).** b) lands in its own PR.",
+                       "Part 2/2 of #7 (the other issue's part) lands in its own PR.", "The helper rename waits for part 2/2 of #1.")
+    dc = happy_case("partresidue", policy="trivial-merge", table={"_issue_1": issue(labels=("agent-ready", "trivial", "gates", "bug"), body=two)})
+    dc.node("BUILD", {**BUILD, "residue": [own, other, mid]}, 1)
+    dc.node("FOLLOWUP", {"issues": []})
+    code, out, err = dc.ouro("run", "1", "--part", "1")
+    followup = "\n".join(read(dc, n) for n in dc.prompts("FOLLOWUP"))
+    listed = dc.pr()["body"].partition("## Follow-up")[2]
+    creates = [s for s in dc.sigs() if s.startswith("issue create")]
+    check("a part 1/2 run drops its residue item for part 2/2 of the same issue: the run prints the drop, and neither the record's "
+          "follow-up list nor the FOLLOW-UP brief holds it, and nothing is filed for it",
+          code == 0 and f"dropped residue {own!r}" in out and own not in listed and own not in followup
+          and not any(own in s or own in (c["body"] or "") for c in dc.calls() if (s := c["sig"]).startswith("issue create")))
+    check("a residue item naming another issue's part, and one mentioning a part mid-sentence, are routed and filed as before",
+          other in listed and mid in listed and other in followup and mid in followup and len(creates) == 2)
     plain = happy_case("partplain")
     plain.ouro("run", "1")
     check("a plain deliverable's BUILD and REVIEW briefs carry neither",
@@ -2535,6 +3217,78 @@ def sec_triage_checkpoint_exit():
         else:
             check("a stale checkpoint cannot start a BUILD or another checkpoint", code == 2 and "agent-ready" not in labels_of(c)
                   and "not agent-ready" in err and "[4] BUILD:" not in out and "[4] CHECKPOINT:" not in out)
+
+
+def sec_triage_fired_trigger():
+    """A fired trigger, one reference closed as completed or by a merge commit on the default branch, is cleared before grading;
+    every other trigger stays."""
+    answer = {"verdict": "PROMOTE", "size": "S", "flow": "express", "doc_impact": "none", "comment": "Anchors resolve; one deliverable."}
+    body = "## What\nthing\n\n- `src/app.py` -- x -- \"def compute_total(items):\"\n"
+    closed = {**issue(62, labels=("bug",), state="CLOSED"), "stateReason": "COMPLETED"}
+    def merged(tip):
+        return [{"__typename": "PullRequest", "number": 63, "title": "Land it", "state": "MERGED", "mergeCommit": {"oid": tip}}]
+    def side(cf):  # a merge commit pushed to another branch: on origin, but no ancestor of origin/master
+        other = cf.root / "other"
+        git(cf.root, "clone", "-q", str(cf.origin), str(other))
+        git(other, "checkout", "-q", "-b", "side")
+        (other / "side.txt").write_text("y\n", encoding="utf-8")
+        git(other, "add", "-A")
+        git(other, "commit", "-q", "-m", "side")
+        git(other, "push", "-q", "origin", "side")
+        return git(other, "rev-parse", "HEAD")
+    unclosed = {**closed, "stateReason": None}
+    reporting = "**Unblocks when:** #62 part 2 has been reporting coverage on about 20 pull requests"
+    week = "**Unblocks when:** once #62 has run for a week"
+    def waits(line):
+        return (f"The body's first line, `{line}`, names #62, and #62 has landed (#62 is closed as completed), but the line does not say "
+                "only that #62 lands, so it stays in place: the owner clears it once its event has happened.")
+    notes = {"unread": "#62, whose read failed", "unreadclosers": "#62, closed as no reason, whose closing pull requests are unreadable",
+             "reporting": waits(reporting), "week": waits(week)}
+    for name, line, extra, fires in (
+            ("completed", "**Unblocks when:** #62 is merged", lambda tip: {"_issue_62": closed}, "#62 is closed as completed"),
+            ("seam", "**Unblocks when:** #62 lands the seam", lambda tip: {"_issue_62": closed}, "#62 is closed as completed"),
+            ("partlands", "**Unblocks when:** #62 part 2 lands", lambda tip: {"_issue_62": closed}, "#62 is closed as completed"),
+            ("capital", "**Unblocks when:** #62 Lands", lambda tip: {"_issue_62": closed}, "#62 is closed as completed"),
+            ("reporting", reporting, lambda tip: {"_issue_62": closed}, None),
+            ("week", week, lambda tip: {"_issue_62": closed}, None),
+            ("mergedcloser", "**Unblocks when:** #62 is merged", lambda tip: {"_issue_62": {**closed, "stateReason": None}, "_closers_62": merged(tip)},
+             "#62 is closed by #63, whose merge commit {tip} is an ancestor of origin/master"),
+            ("tworefs", "**Unblocks when:** #62 and #64 are merged", lambda tip: {"_issue_62": closed, "_issue_64": {**closed, "number": 64}}, None),
+            ("prose", "**Unblocks when:** the vendor ships v2 (see o/n#62)", lambda tip: {"_issue_62": closed}, None),
+            ("open", "**Unblocks when:** #62 is merged", lambda tip: {"_issue_62": {**closed, "state": "OPEN", "stateReason": None}}, None),
+            ("notplanned", "**Unblocks when:** #62 is merged",
+             lambda tip: {"_issue_62": {**closed, "stateReason": "NOT_PLANNED"}, "_closers_62": merged(tip)}, None),
+            ("otherrefs", "**Unblocks when:** the vendor ships v2 (see o/#62, v1.#62, x-#62)", lambda tip: {"_issue_62": closed}, None),
+            ("offdefault", "**Unblocks when:** #62 is merged", lambda tip: {"_issue_62": unclosed}, None),
+            ("unreadclosers", "**Unblocks when:** #62 is merged",
+             lambda tip: {"_issue_62": unclosed, "api graphql *ClosedEvent*": {"Exit": 1, "Out": "HTTP 502"}}, None),
+            ("unread", "**Unblocks when:** #62 is merged", lambda tip: {}, None)):
+        cf = Case("triagefired" + name)
+        tip = git(cf.origin, "rev-parse", "master")
+        table = {"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=line + "\n\n" + body, comments=[]), **extra(tip)}
+        if name == "offdefault":
+            table["_closers_62"] = merged(side(cf))
+        cf.set_table(table)
+        fires = fires and fires.format(tip=tip)
+        cf.node("TRIAGE", answer)
+        code, out, err = cf.ouro("triage", "1")
+        s, calls = cf.issue_state() or {"body": "", "comments": [{"body": ""}]}, cf.wrote()
+        brief_f = open(cf.nodes / cf.prompts("TRIAGE")[0], encoding="utf-8").read()
+        posted = s["comments"][-1]["body"]
+        if fires:
+            edit = next((x for x in calls if "--body-file" in x), None)
+            comment = next((x for x in calls if x.startswith("issue comment ")), None)
+            check(f"a fired trigger ({name}) is deleted before grading: the node never sees it, the body loses it before the comment, "
+                  "the comment names the line and the evidence, and the node's PROMOTE stands",
+                  code == 0 and line not in brief_f and line not in s["body"] and s["body"].startswith("## What")
+                  and edit is not None and comment is not None and calls.index(edit) < calls.index(comment)
+                  and f"Trigger cleared: the driver deleted the body's first line, `{line}`: {fires}." in posted
+                  and "Verdict: PROMOTE" in posted and "agent-ready" in labels_of(cf) and "blocked" not in labels_of(cf))
+        else:
+            check(f"a trigger that has not mechanically fired ({name}) stays: the line, the BLOCKED verdict, no clearing sentence",
+                  code == 0 and s["body"].startswith(line) and line in brief_f and "Trigger cleared" not in posted and "Verdict: BLOCKED" in posted
+                  and "blocked" in labels_of(cf) and "agent-ready" not in labels_of(cf)
+                  and notes.get(name, "") in posted)
 
 
 def sec_triage():
@@ -2682,6 +3436,139 @@ def sec_triage():
     check("a failed fetch says freshness is unknown and does not claim the checkout is current",
           code == 0 and "WARNING: Whether the main checkout's master is behind" in out
           and "is not behind origin" not in open(c7.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read())
+
+    def related_section(case):
+        brief_ = open(case.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read()
+        return brief_, brief_.split("## Closed issues and pull requests that may be the same work\n", 1)[-1].split("\n## ", 1)[0]
+    ruling = {"verdict": "NEEDS-RULING", "size": "M", "comment": "Two readings.", "question": "Which? I recommend the first."}
+    # the replay fixture: a report filed after the fix shipped under an earlier number, invented names throughout
+    repro = ("## What\nA user program that calls a function ends the task when it returns.\n\n```\nSetNine()\nx = Twice(21)   ' expect 42\n```\n\n"
+             '- `src/app.py` -- x -- "def compute_total(items):"\n')
+    cr = Case("triageRelated", binding=BINDING.format(policy="stop-at-pr", review="adversarial-review").replace('slug = "o/n"', 'slug = "vexmoor/relay-core"'))
+    other = cr.root / "other"
+    git(cr.root, "clone", "-q", str(cr.origin), str(other))
+    (other / "depth.txt").write_text("x\n", encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "keep the call depth")
+    fix = git(other, "rev-parse", "HEAD")
+    code, out, err = sh("git", "tag", "-a", "v2.1.0-rc3", "-m", "rc3", cwd=other, env={"GIT_COMMITTER_DATE": "2026-02-27T10:00:00+00:00"})
+    git(other, "push", "-q", "origin", "master", "v2.1.0-rc3")
+    cr.set_table(table_r := {"_issue_57": {**issue(57, labels=("needs-triage", "gates", "bug"), body=repro, title="Brimfield K-40: user-program function calls end the task"),
+                                "createdAt": "2026-03-09T08:00:00Z"},
+                  "_issue_41": {**issue(41, labels=("bug",), title="user-program calls end the task", state="CLOSED"), "closedAt": "2026-02-20T09:00:00Z"},
+                  "_prs": [{"number": 43, "title": "Keep the call depth across user functions", "body": "Fixes vexmoor/relay-core#41",
+                            "state": "MERGED", "mergeCommit": {"oid": fix}},
+                           {"number": 45, "title": "Pop the frame on return", "body": "Fixes https://github.com/vexmoor/relay-core/issues/41",
+                            "state": "MERGED", "mergeCommit": {"oid": fix}},
+                           {"number": 46, "title": "Mentions it only", "body": "See #41", "state": "MERGED", "mergeCommit": {"oid": fix}}],
+                  "_closers_41": [{"__typename": "PullRequest", "number": 44, "title": "Linked in the sidebar", "state": "MERGED", "mergeCommit": {"oid": fix}},
+                                  {"__typename": "Commit"}]})
+    cr.node("TRIAGE", ruling)
+    cr.ouro("triage", "57", "--dry-run")
+    brief_r, related = related_section(cr)
+    check("the tag the replay fixture needs was made", code == 0)
+    check("a code-block identifier's search finds the closed earlier issue: the brief lists it with its closed date and the search that found it",
+          "- #41, closed at 2026-02-20T09:00:00Z, found by `SetNine in:body`, `user-program function calls end the task`: user-program calls end the task" in related
+          and "This issue was created at 2026-03-09T08:00:00Z." in related)
+    check("and the merged PR that closes it by a slug-qualified reference, its merge commit, on the default branch: yes, and the tag that contains it",
+          f"  - fixed by #43 MERGED, merge commit {fix}; on origin/master: yes; in tags: v2.1.0-rc3 (2026-02-27): Keep the call depth" in related)
+    check("the lookup searched the identifier and the title less its prefix, closed issues only",
+          {"issue list --state closed --search SetNine in:body --limit 10 --json number,title,state,closedAt",
+           "issue list --state closed --search user-program function calls end the task --limit 10 --json number,title,state,closedAt"} <= set(cr.sigs())
+          and not any("--search Twice" in s for s in cr.sigs()))
+    check("a PR that closes it by the issue's URL is its fix too, one linked only in the sidebar is read from its closing event, and a mere mention is not",
+          f"  - fixed by #45 MERGED, merge commit {fix}; on origin/master: yes" in related
+          and f"  - fixed by #44 MERGED, merge commit {fix}; on origin/master: yes" in related and "#46" not in related)
+    check("a PR that only closes the earlier number still names no PR for this one", "## Pull requests that name the issue\n\n(none)\n" in brief_r)
+    git(other, "checkout", "-q", "-b", "side")
+    (other / "side.txt").write_text("y\n", encoding="utf-8")
+    git(other, "add", "-A")
+    git(other, "commit", "-q", "-m", "an unlanded fix")
+    unlanded = git(other, "rev-parse", "HEAD")
+    git(other, "push", "-q", "origin", "side")
+    hit41 = [{"number": 41, "title": "user-program calls end the task", "state": "CLOSED", "closedAt": "2026-02-20T09:00:00Z"}]
+    dup = {**ruling, "verdict": "DUPLICATE", "duplicate_of": 41, "question": "Which build did the reporter run? I recommend asking before closing."}
+    for why, answer_, table_, said in (
+            ("names no issue number", {**dup, "duplicate_of": None}, table_r, "duplicate_of None, which names no issue number"),
+            ("is not in the lookup's list", {**dup, "duplicate_of": 99}, table_r, "DUPLICATE of #99, which is not in the related-work lookup's list for #57"),
+            ("is still open (the search found it closed)", dup,
+             {**table_r, "_issue_41": {**table_r["_issue_41"], "state": "OPEN"}, "issue list --state closed --search *": {"Out": hit41}},
+             "DUPLICATE of #41, which is open, not closed"),
+            ("has only a fix whose merge commit is not on the default branch", dup,
+             {**table_r, "_closers_41": [], "_prs": [{**table_r["_prs"][0], "mergeCommit": {"oid": unlanded}}]},
+             "DUPLICATE of #41, which has no merged pull request closing it whose merge commit is on origin/master")):
+        cr.set_table(table_)
+        cr.node("TRIAGE", answer_)
+        before = len(cr.wrote())
+        code, out, err = cr.ouro("triage", "57")
+        check(f"a DUPLICATE whose duplicate_of {why} is a driver error naming that condition: exit 1, nothing written",
+              code == 1 and said in err and len(cr.wrote()) == before)
+    cr.set_table(table_r)
+    cr.node("TRIAGE", dup)
+    code, out, err = cr.ouro("triage", "57")
+    s57 = cr.issue_state(57)
+    last = s57["comments"][-1]["body"] if s57 else ""
+    check("a DUPLICATE of a listed closed issue whose fix landed moves the issue to needs-ruling and asks to close it as a duplicate",
+          code == 0 and last.startswith("**Triage**\n\nVerdict: DUPLICATE") and "Question for the owner:\n\nClose as a duplicate of #41?" in last
+          and [tag["name"] for tag in s57["labels"] if tag["name"] in triagemod.STATE_LABELS] == ["needs-ruling"])
+    check("the question carries the lookup's evidence for that issue and the node's own question after it",
+          "- #41, closed at 2026-02-20T09:00:00Z, found by" in last
+          and f"  - fixed by #43 MERGED, merge commit {fix}; on origin/master: yes; in tags: v2.1.0-rc3 (2026-02-27)" in last
+          and last.index("Close as a duplicate of #41?") < last.index("Which build did the reporter run?"))
+    check("the driver closes nothing", cr.wrote() and not any(s.startswith("issue close") for s in cr.sigs()))
+    check("the verdict's label move is needs-ruling's", triagemod.label_moves("DUPLICATE", "M", ["needs-triage", "gates"]) == (["needs-ruling"], ["needs-triage"]))
+    q_, rest_ = relatedmod.lookup_queries("t", "```\nUINT32 a; INT16 b; Read32(0); utf8 sha256 x86_64 HTTP2 base64 size_t uint8_t __init__\nSetNine()\n```")
+    check("type, encoding and register names are no identifier, so the cap cannot drop the real one", (q_, rest_) == (["SetNine in:body", "t"], []))
+    check("past the cap the identifiers are returned, not dropped",
+          relatedmod.lookup_queries("t", "```\naB_c getValue SetNine is_ready\n```") == (["aB_c in:body", "getValue in:body", "SetNine in:body", "t"], ["is_ready"]))
+    check("the title loses a short tag before its colon, never a main clause",
+          relatedmod.lookup_queries("Brimfield K-40: user-program calls", "")[0] == ["user-program calls"]
+          and relatedmod.lookup_queries("fix(gates): a thing", "")[0] == ["a thing"]
+          and relatedmod.lookup_queries("Triage misses an issue already fixed: search closed issues", "")[0] == ["Triage misses an issue already fixed: search closed issues"])
+    broad = [{"number": k, "title": f"broad {k}", "state": "CLOSED", "closedAt": None} for k in range(100, 110)]
+    cb = Case("triageRelatedBroad", table={"_issue_57": issue(57, labels=("needs-triage", "gates", "bug"), body=ISSUE_BODY + "\n```\ngetValue()\nSetNine()\nnextOne alpha_b gamma_d\n```\n", title="t"),
+                                           "issue list --state closed --search getValue in:body *": {"Out": broad},
+                                           "issue list --state closed --search SetNine in:body *": {"Out": [{"number": 41, "title": "the one", "state": "CLOSED", "closedAt": None}]},
+                                           "issue list --state closed --search *": {"Out": []},
+                                           "api graphql *ClosedEvent*": {"Exit": 1, "Out": "HTTP 502"}})
+    cb.node("TRIAGE", ruling)
+    cb.ouro("triage", "57", "--dry-run")
+    _, related = related_section(cb)
+    check("one broad search cannot fill the list: the other search's top hit is listed, and the cut is named",
+          "- #41, closed at an unknown time, found by `SetNine in:body`: the one" in related
+          and "- 3 more closed issues the searches found are not listed: #107, #108, #109." in related)
+    check("the identifiers past the cap are named as not searched", "- The code blocks hold 2 more identifiers this lookup did not search: `alpha_b`, `gamma_d`." in related)
+    check("an unreadable closing event is unknown, not a missing fix",
+          "  - #41's closing events are unreadable: a pull request linked only in its sidebar is unknown" in related
+          and "no merged pull request closes #41" not in related)
+    hit = {k: {"number": k, "title": f"hit {k}", "state": "CLOSED", "closedAt": None} for k in (301, 302, 303, 310, 311)}
+    # hit 301 is ranked 0 by the first search and 3 by the last that finds it, 302 is 1 by both, 303 is 0 by the title search alone
+    co = Case("triageRelatedOrder", table={"_issue_57": issue(57, labels=("needs-triage", "gates", "bug"), body=ISSUE_BODY + "\n```\ngetValue()\nSetNine()\n```\n", title="t"),
+                                           "issue list --state closed --search getValue in:body *": {"Out": [hit[301], hit[302]]},
+                                           "issue list --state closed --search SetNine in:body *": {"Out": [hit[310], hit[302], hit[311], hit[301]]},
+                                           "issue list --state closed --search *": {"Out": [hit[303]]},
+                                           "api graphql *ClosedEvent*": {"Exit": 1, "Out": "HTTP 502"}})
+    co.node("TRIAGE", ruling)
+    co.ouro("triage", "57", "--dry-run")
+    _, related = related_section(co)
+    at = {k: related.find(f"- #{k}, ") for k in (301, 302, 303)}
+    check("a hit two searches found is listed ahead of a hit one search ranks higher", -1 < at[302] < at[303])
+    check("two hits found by two searches each are ordered by their best rank, not their last", -1 < at[301] < at[302])
+    cn_ = Case("triageRelatedSelf", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=ISSUE_BODY + "\n```\nSetNine()\n```\n"),
+                                           "issue list --state closed --search SetNine in:body *": {"Out": [{"number": 1, "title": "Fix the total", "state": "CLOSED", "closedAt": None}]},
+                                           "issue list --state closed --search Fix the total *": {"Exit": 1, "Out": "HTTP 502"}})
+    cn_.node("TRIAGE", ruling)
+    cn_.ouro("triage", "1", "--dry-run")
+    _, related = related_section(cn_)
+    check("the issue is never its own candidate", "- #1," not in related)
+    check("a failed search writes an unknown line, not (none), and no line saying nothing was found",
+          "- The search `Fix the total` failed: whether a closed issue matches it is unknown." in related
+          and "(none)" not in related and "No search found" not in related)
+    cz = Case("triageRelatedNone", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"))})
+    cz.node("TRIAGE", ruling)
+    cz.ouro("triage", "1", "--dry-run")
+    check("with every search answered and no closed hit, the section says so (the control for the unknown line)",
+          "- No search found a closed issue other than this one." in related_section(cz)[1])
     c2 = Case("triageL", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
     c2.node("TRIAGE", {**answer, "size": "L", "comment": "Split into two."})
     code, out, err = c2.ouro("triage", "1")
@@ -2763,11 +3650,26 @@ def sec_triage():
           "No finding: every anchor line resolves." in brief.split("## The anchor gate's answer")[1].split("## The repository's files")[0] and "a match there is not the repository" in brief)
     check("a body with no parseable anchor reaches the brief as the gate's finding, as the shape gate reads it",
           "no parseable anchor" in open(c5.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read().split("## The anchor gate's answer")[1].split("## The repository's files")[0])
-    cd = Case("triageDead", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body="## What\nthing\n\n- `src/app.py` -- x -- \"def no_such_function(\"\n")})
+    cd = Case("triageDead", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body="## What\nthing\n\n## Anchors\n\n- `src/app.py` -- x -- \"def no_such_function(\"\n")})
     cd.node("TRIAGE", answer)
     code, out, err = cd.ouro("triage", "1", "--dry-run")
     gate = open(cd.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read().split("## The anchor gate's answer")[1].split("## The repository's files")[0]
     check("a fragment that does not grep reaches the brief as the gate's finding", code == 3 and "no_such_function" in gate and "No finding: every anchor line resolves." not in gate)
+    dead_body = "## What\nthing\n\n## Anchors\n\n- `src/app.py` -- x -- \"def no_such_function(\"\n"
+    live = "- `src/app.py` -- x -- \"def compute_total(items):\""
+    for k, proposed, kept in ((0, live, True), (1, "- `src/app.py` -- x -- \"def also_not_there(items):\"", False),
+                              (2, "- `src/app.py` -- x -- `cmd \"totally_absent_zzz_q\"`", False),  # the gate greps no quote in a command span
+                              (3, live + "\n# Other\n- `src/app.py` -- \"totally_absent_zzz_q\"", False),  # a second line is outside the check
+                              (4, "- `src/app.py` -- the total, unquoted", False),  # the gate greps no fragment on it, so nothing was checked
+                              (5, live + " -- `cmd \"totally_absent_zzz_q\"`", False)):  # a live fragment beside a quote the gate skips
+        cr = Case(f"triageDeadReplacement{k}", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=dead_body)})
+        cr.node("TRIAGE", {**answer, "replacements": [proposed]})
+        code, out, err = cr.ouro("triage", "1")
+        last = cr.issue_state()["comments"][-1]["body"]
+        question = last.split("Question for the owner:")[-1]
+        check(f"a dead anchor in a still-tracked file: the question {'carries the proposed line that greps' if kept else 'drops a proposal that does not grep and says none was found'}, the body untouched (row {k})",
+              code == 3 and last.startswith("**Triage**\n\nVerdict: NEEDS-RULING") and (proposed in question) == kept
+              and ("No replacement anchor line was found" in question) != kept and cr.issue_state()["body"] == dead_body)
     moved = "## What\nthing\n\n## Anchors @ 0123456\n\n- `src/app.py` -- x -- \"def moved_total(items):\"\n"
     half = moved + "- `src/app.py` -- y -- \"def gone_for_good(\"\n"  # one line re-pointable, the other dead in every file
     lib = {"src/lib.py": "def moved_total(items):\n    return 0\n"}
@@ -2794,12 +3696,166 @@ def sec_triage():
     check("a SPLIT on a ruled issue ends with umbrella and no other state label, and its comment says the owner files the children",
           code == 0 and last.startswith("**Triage**\n\nVerdict: SPLIT") and last.rstrip().endswith("The owner files the children this comment lists, by hand.")
           and "umbrella" in labels_of(cs) and not ({"needs-ruling", "needs-triage", "agent-ready"} & set(labels_of(cs))))
+    check("a SPLIT of an issue that is no ledger files nothing and posts no sweep mark",
+          not any(s.startswith("issue create") for s in cs.sigs()) and not any(c["body"].startswith("**Sweep**") for c in cs.issue_state()["comments"]))
     cs2 = Case("triageSplitOwnLine", table={"_issue_1": issue(labels=("needs-ruling", "gates", "bug"))})
     cs2.node("TRIAGE", {**answer, "verdict": "SPLIT", "size": "L", "comment": "Children: a, b.\n\nThe owner files the children by hand."})
     code, out, err = cs2.ouro("triage", "1")
     last = cs2.issue_state()["comments"][-1]["body"]
     check("a SPLIT whose node text ends with its own owner-files line states it once, the driver's, as the last line",
           code == 0 and last.lower().count("owner files the children") == 1 and last.rstrip().endswith(triagemod.SPLIT_LINE))
+    # a ledger SPLIT: the driver copies the named comments, checks them and the anchors before any write
+    line_a = "The total drops a line.\n\n## Anchors\n\n- `src/app.py` -- gone -- \"def gone_for_good(\"\n\n```\nx = 1\n```\n"
+    line_b = "Line B has `ticks` and trailing space   "
+    ledger = [{"id": "IC_0", "author": {"login": "o"}, "body": "an old line", "createdAt": "2026-01-15T00:00:00Z"},
+              {"id": "IC_1", "author": {"login": "o"}, "body": "**Sweep** at 0123456\n\n- swept", "createdAt": "2026-02-01T00:00:00Z"},
+              {"id": "IC_2", "author": {"login": "o"}, "body": line_a, "createdAt": "2026-03-01T00:00:00Z"},
+              {"id": "IC_3", "author": {"login": "stranger"}, "body": "**Sweep** at abcdef0", "createdAt": "2026-03-02T00:00:00Z"},
+              {"id": "IC_4", "author": {"login": "o"}, "body": line_b, "createdAt": "2026-03-03T00:00:00Z"}]
+    live = "- `src/app.py` -- the total -- \"def compute_total(items):\""
+    kid = {"title": "Fix the gates lines", "labels": ["gates", "nosuch"], "comments": ["IC_2"], "notes": [{"comment": "IC_2", "note": "now at line 2"}],
+           "exit": "The total sums every item.", "anchors": [live], "size": "S", "flow": "standard", "parts": [], "question": ""}
+    kid2 = {**kid, "title": "Sweep the B ledger line", "comments": ["IC_4"], "notes": [], "question": "Keep the space? I recommend not.",
+            "parts": [{"text": "A", "flow": "standard"}, {"text": "B", "flow": "express"}]}
+    split = {**answer, "verdict": "SPLIT", "size": "L", "comment": "Two children."}
+    cl = Case("triageLedger", table={"_issue_1": issue(title="Cleanup: gates", labels=("umbrella", "gates"), body="## What\nthe ledger\n", comments=ledger)})
+    cl.node("TRIAGE", {**split, "children": [kid, kid2]})
+    code, out, err = cl.ouro("triage", "1", "--dry-run")
+    out = out.replace("\r\n", "\n")  # print writes CRLF on Windows; the copies are compared as the ledger holds them
+    sha = git(cl.origin, "rev-parse", "master")
+    brief = open(cl.nodes / "TRIAGE.1.prompt.txt", encoding="utf-8").read()
+    check("the TRIAGE brief gives each comment its id and, on a ledger, asks for the children and names the newest trusted sweep mark",
+          "[o] (comment IC_2, 2026-03-01T00:00:00Z) The total" in brief and "This issue is a cleanup ledger: a SPLIT answers `children`" in brief
+          and "posted at 2026-02-01T00:00:00Z" in brief and "\"children\": [{" in brief)
+    check("a ledger SPLIT in --dry-run prints each child's body holding its comments byte for byte, a Part of line, the forced title and the sweep mark, and writes nothing",
+          code == 0 and cl.wrote() == [] and line_a in out and line_b + "\n````" in out and out.count("Part of #1") == 2
+          and "Sweep of ledger lines: Fix the gates lines; labels ['needs-triage', 'gates']" in out and ": Sweep the B ledger line;" in out
+          and "Where the tree has moved: now at line 2" in out and "- [ ] 2. **B (Flow: express).**" in out and "Keep the space? I recommend not." in out
+          and f"**Sweep** at {sha[:7]}\n\nThe children of this ledger's lines:" in out and f"## Anchors @ {sha[:7]}" in out)
+    check("the forced title is one sweep_child counts as a sweep child, and a copied comment's own dead quoted fragment is not grepped",
+          all("sweep" in t.lower() and "ledger line" in t.lower() for t in (ledgermod.child_title("Fix x"), ledgermod.child_title("Sweep the B ledger line")))
+          and "gone_for_good" not in err)
+    for name, kids, want in (("Unknown", [{**kid, "comments": ["IC_9"]}], "'IC_9', which is not on ledger #1"),
+                             ("Swept", [{**kid, "comments": ["IC_0"]}], "'IC_0', which is no newer than ledger #1's newest sweep mark"),
+                             ("Twice", [kid, {**kid2, "comments": ["IC_4", "IC_2"]}], "children 1 and 2 both name comment 'IC_2'"),
+                             ("Dead", [kid, {**kid2, "anchors": [live, "- `src/app.py` -- x -- \"def no_such_function(\""]}], "child 2 of ledger #1 has anchors the anchor gate finds dead")):
+        cx = Case("triageLedger" + name, table={"_issue_1": issue(title="Cleanup: gates", labels=("umbrella", "gates"), body="## What\nthe ledger\n", comments=ledger)})
+        cx.node("TRIAGE", {**split, "children": kids})
+        code, out, err = cx.ouro("triage", "1", *(["--dry-run"] if name == "Unknown" else []))  # the rest without it: still nothing written
+        check(f"a ledger SPLIT naming {name.lower()} comments or anchors is a driver error: exit 1, nothing written ({want})",
+              code == 1 and cx.wrote() == [] and want in err)
+    gone = "- `src/app.py` -- gone -- \"def gone_for_good_here(\""
+    fenced_lines = [{"id": "IC_5", "author": {"login": "o"}, "body": f"The template misses a line:\n```\n## Anchors\n```\n\n{gone}", "createdAt": "2026-03-04T00:00:00Z"},
+                    {"id": "IC_6", "author": {"login": "o"}, "body": f"```\nx = 1\n\n## Anchors\n\n{gone}", "createdAt": "2026-03-05T00:00:00Z"}]
+    cf = Case("triageLedgerFenced", table={"_issue_1": issue(title="Cleanup: gates", labels=("umbrella", "gates"), body="## What\nthe ledger\n", comments=ledger + fenced_lines)})
+    cf.node("TRIAGE", {**split, "children": [{**kid, "comments": ["IC_5", "IC_6"], "notes": []}]})
+    code, out, err = cf.ouro("triage", "1", "--dry-run")
+    check("a copied comment whose own code block, balanced or not, holds an Anchors heading has its dead fragment left ungrepped: the child is printed",
+          code == 0 and cf.wrote() == [] and "gone_for_good_here" not in err and out.count("def gone_for_good_here(") == 2)
+    # outside --dry-run the driver files the children, posts the sweep mark and triages each child with its own node
+    kid_body = "## What\nthing\n\n- `src/app.py` -- x -- \"def compute_total(items):\"\n"
+    filed = {"_issue_1": issue(title="Cleanup: gates", labels=("umbrella", "gates"), body="## What\nthe ledger\n", comments=ledger),
+             "_issue_98": issue(98, ("needs-triage", "gates", "bug"), body=kid_body, comments=[], title="Sweep of ledger lines: Fix the gates lines"),
+             "_issue_99": issue(99, ("needs-triage", "gates", "bug"), body=kid_body, comments=[], title="Sweep the B ledger line"),
+             "issue create *": {"Seq": [{"Out": "https://example.test/o/n/issues/98"}, {"Out": "https://example.test/o/n/issues/99"}]}}
+    cw = Case("triageLedgerFiles", table=filed)
+    cw.node("TRIAGE", {**split, "children": [kid, kid2]}, 1)
+    cw.node("TRIAGE", split, 2)  # the first child's own triage splits it: that split is the owner's to file
+    cw.node("TRIAGE", answer, 3)  # the second promotes, and the ledger triage's question holds it at needs-ruling
+    code, out, err = cw.ouro("triage", "1")
+    creates = [c for c in cw.calls() if c["sig"].startswith("issue create")]
+    led, k98, k99 = cw.issue_state(1)["comments"], cw.issue_state(98) or {}, cw.issue_state(99) or {}
+    sha = git(cw.origin, "rev-parse", "master")
+    check("a ledger SPLIT files each child with needs-triage, the forced title and its comments byte for byte, then posts the sweep mark naming them",
+          code == 0 and len(creates) == 2 and all("--label needs-triage --label gates" in c["sig"] for c in creates)
+          and "--title Sweep of ledger lines: Fix the gates lines" in creates[0]["sig"] and line_a in creates[0]["body"] and line_b + "\n````" in creates[1]["body"]
+          and led[-2]["body"].startswith("**Triage**\n\nVerdict: SPLIT") and led[-2]["body"].rstrip().endswith(triagemod.LEDGER_SPLIT_LINE)
+          and led[-1]["body"].startswith(f"**Sweep** at {sha[:7]}\n") and "- #98 Sweep of ledger lines: Fix the gates lines: comments IC_2" in led[-1]["body"]
+          and "- #99 Sweep the B ledger line: comments IC_4" in led[-1]["body"])
+    check("each child is triaged by a fresh TRIAGE node in the same command",
+          cw.prompts("TRIAGE") == ["TRIAGE.1.prompt.txt", "TRIAGE.2.prompt.txt", "TRIAGE.3.prompt.txt"]
+          and "## The issue (#98)" in open(cw.nodes / "TRIAGE.2.prompt.txt", encoding="utf-8").read()
+          and "## The issue (#99)" in open(cw.nodes / "TRIAGE.3.prompt.txt", encoding="utf-8").read())
+    check("a child whose own triage answers SPLIT files nothing further: its comment leaves the children to the owner",
+          k98.get("comments") and k98["comments"][-1]["body"].startswith("**Triage**\n\nVerdict: SPLIT")
+          and k98["comments"][-1]["body"].rstrip().endswith(triagemod.SPLIT_LINE) and "umbrella" in labels_of(cw, 98))
+    check("a child the ledger triage asks a question about is posted NEEDS-RULING with the question, though its own node promotes",
+          k99.get("comments") and k99["comments"][-1]["body"].startswith("**Triage**\n\nVerdict: NEEDS-RULING")
+          and "Question for the owner:\n\nKeep the space? I recommend not." in k99["comments"][-1]["body"]
+          and "needs-ruling" in labels_of(cw, 99) and "agent-ready" not in labels_of(cw, 99))
+    cz = Case("triageLedgerFilesFail", table={**filed, "issue create *": {"Seq": [{"Out": "https://example.test/o/n/issues/98"}, {"Exit": 1, "Out": "HTTP 502"},
+                                                                                 {"Out": "https://example.test/o/n/issues/99"}]}})
+    cz.node("TRIAGE", {**split, "children": [kid, kid2]}, 1)
+    code, out, err = cz.ouro("triage", "1")
+    posted = [c["body"] for c in cz.issue_state(1)["comments"][len(ledger):]]  # the ledger's own comments hold sweep marks already
+    check("a filing that fails after the first child exits 1 naming it, and posts no sweep mark and triages no child",
+          code == 1 and "the children already filed: #98." in err and "HTTP 502" in err
+          and len(posted) == 1 and posted[0].startswith("**Triage**\n\nVerdict: SPLIT") and cz.prompts("TRIAGE") == ["TRIAGE.1.prompt.txt"])
+    # a re-triage of a ledger whose split stopped partway files no child twice: the open `Part of` child stands for its comments
+    def resumed(case):
+        case.node("TRIAGE", split, 2)
+        case.node("TRIAGE", answer, 3)
+        code, out, err = case.ouro("triage", "1")
+        titles = [c["sig"].split("--title ", 1)[1].split(" --body-file", 1)[0] for c in case.calls() if c["sig"].startswith("issue create")]
+        led = case.issue_state(1)["comments"]
+        k99 = (case.issue_state(99) or {}).get("comments") or [{"body": ""}]
+        return (code == 0 and titles.count("Sweep of ledger lines: Fix the gates lines") == 1 and led[-1]["body"].startswith("**Sweep** at ")
+                and "- #98 Sweep of ledger lines: Fix the gates lines: comments IC_2" in led[-1]["body"] and "- #99 Sweep the B ledger line: comments IC_4" in led[-1]["body"]
+                and "## The issue (#98)" in open(case.nodes / "TRIAGE.2.prompt.txt", encoding="utf-8").read()
+                and "## The issue (#99)" in open(case.nodes / "TRIAGE.3.prompt.txt", encoding="utf-8").read()
+                and k99[-1]["body"].startswith("**Triage**\n\nVerdict: NEEDS-RULING") and "Keep the space? I recommend not." in k99[-1]["body"]), titles
+    ok, titles = resumed(cz)
+    check("a re-triage after a create that failed past the first child files only the unfiled one, posts the sweep mark naming both and triages both",
+          ok and titles == ["Sweep of ledger lines: Fix the gates lines", "Sweep the B ledger line", "Sweep the B ledger line"])
+    cm = Case("triageLedgerSweepFail", table={**filed, "issue comment 1 *": {"Seq": [{"Model": True}, {"Exit": 1, "Out": "HTTP 502"}, {"Model": True}]}})
+    cm.node("TRIAGE", {**split, "children": [kid, kid2]}, 1)
+    code, out, err = cm.ouro("triage", "1")
+    check("a sweep mark that fails to post exits 1 naming both filed children, and triages none",
+          code == 1 and "the children already filed: #98, #99." in err and "HTTP 502" in err and cm.prompts("TRIAGE") == ["TRIAGE.1.prompt.txt"]
+          and not any(c["body"].startswith("**Sweep**") for c in cm.issue_state(1)["comments"][len(ledger):]))
+    ok, titles = resumed(cm)
+    check("a re-triage after the sweep mark failed files no child, posts the sweep mark naming both, triages both and asks the filed child's question",
+          ok and len(titles) == 2)
+    # an open `Part of` issue of the ledger a stranger filed, or one copying only a comment an earlier sweep took, stands for no child
+    by_id = {c["id"]: c for c in ledger}
+    forged, old = ledgermod.child_body(1, kid, ["IC_2"], by_id, "0" * 40), ledgermod.child_body(1, kid, ["IC_0"], by_id, "0" * 40)
+    co = Case("triageLedgerNotFiled", table={**filed,
+              "_issue_96": {**issue(96, ("needs-triage", "gates"), body=forged, comments=[], title="Sweep of ledger lines: forged"), "author": {"login": "stranger"}},
+              "_issue_97": {**issue(97, ("needs-triage", "gates"), body=old, comments=[], title="Sweep of ledger lines: old"), "author": {"login": "o"}}})
+    co.node("TRIAGE", {**split, "children": [kid, kid2]})
+    code, out, err = co.ouro("triage", "1", "--dry-run")
+    shaped = all(b.startswith("Part of #1\n") and [m.group(1) for m in ledgermod.LEDGER_LINE.finditer(b)] == [cid]
+                 for b, cid in ((forged, "IC_2"), (old, "IC_0")))  # positive control: only the filter under test keeps each out
+    check("a stranger's open `Part of #1` issue copying a ledger comment is no filed child: the split still plans a new child for that comment",
+          code == 0 and shaped and "#96" not in out and "child 1/2 of ledger #1: Sweep of ledger lines: Fix the gates lines; labels" in out)
+    check("an open trusted child copying only a comment no newer than the newest sweep mark is no filed child of this split",
+          code == 0 and shaped and "#97" not in out and "child 2/2 of ledger #1: Sweep the B ledger line; labels" in out)
+    # a child filed moments before the re-run, which GitHub's search index does not hold yet, still stands for its comments
+    fresh = ledgermod.child_body(1, kid, ["IC_2"], by_id, "0" * 40)
+    lag = Case("triageLedgerIndexLag", table={**filed, "issue list --state open --search *": {"Out": []},
+               "_issue_98": {**issue(98, ("needs-triage", "gates"), body=fresh, comments=[], title="Sweep of ledger lines: Fix the gates lines"), "author": {"login": "o"}}})
+    lag.node("TRIAGE", {**split, "children": [kid, kid2]})
+    code, out, err = lag.ouro("triage", "1", "--dry-run")
+    check("a child the search index does not hold yet is read from the REST list: the re-run plans no new child for its comment",
+          code == 0 and lag.wrote() == [] and "child 1/2 of ledger #1: #98 Sweep of ledger lines: Fix the gates lines, filed already for comments IC_2" in out
+          and "child 2/2 of ledger #1: Sweep the B ledger line; labels" in out and out.count("Part of #1") == 1
+          and any(s.startswith("api repos/o/n/issues?per_page=100 --paginate --slurp") for s in lag.sigs()))
+    check("the REST list is read since the newest trusted sweep mark, the time a -f field and no `&` in the path",
+          "api repos/o/n/issues?per_page=100 --paginate --slurp -X GET -f since=2026-02-01T00:00:00Z" in lag.sigs())
+    # the REST list read past its first page, and with its pull requests dropped: fixed pages served in REST shape
+    rest = "api repos/o/n/issues?per_page=100 --paginate --slurp*"
+    kid_row = {"number": 98, "title": "Sweep of ledger lines: Fix the gates lines", "body": fresh, "state": "open", "user": {"login": "o"}}
+    p2 = Case("triageLedgerRestPage2", table={**filed, rest: {"Out": [[{"number": 50, "title": "other", "body": "unrelated", "state": "open", "user": {"login": "o"}}], [kid_row]]}})
+    p2.node("TRIAGE", {**split, "children": [kid, kid2]})
+    code, out, err = p2.ouro("triage", "1", "--dry-run")
+    page2 = (code == 0 and p2.wrote() == [] and "child 1/2 of ledger #1: #98 Sweep of ledger lines: Fix the gates lines, filed already for comments IC_2" in out
+             and "child 2/2 of ledger #1: Sweep the B ledger line; labels" in out and out.count("Part of #1") == 1)
+    check("a trusted child on the REST list's second page is filed already: the re-run plans no new child for its comment", page2)
+    pr = Case("triageLedgerRestPull", table={**filed, rest: {"Out": [[{**kid_row, "pull_request": {"url": "https://example.test/o/n/pulls/98"}}]]}})
+    pr.node("TRIAGE", {**split, "children": [kid, kid2]})
+    code, out, err = pr.ouro("triage", "1", "--dry-run")
+    check("a pull request the REST list holds is no filed child, though the row above qualifies without its pull_request key: the split plans a new child",
+          page2 and code == 0 and pr.wrote() == [] and "filed already" not in out and "child 1/2 of ledger #1: Sweep of ledger lines: Fix the gates lines; labels" in out)
     body = "## What\nthing\n\n- `src/app.py` -- x -- \"def compute_total(items):\"\n"  # the loop above rebinds it: a body that promotes
     cp2 = Case("triagePartsOwnLine", table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"), body=body)})
     cp2.node("TRIAGE", {**answer, "comment": "Anchors resolve.\n\nParts: none"})
@@ -3059,6 +4115,41 @@ def sec_resume():
     check("the next invocation opens the pull request with the door and blast radius the build answered, and asks it nothing",
           code == 0 and c.prompts("BUILD") == [] and f"- **Door:** {BUILD['door']}" in body and f"- **Blast radius:** {BUILD['blast_radius']}" in body)
     check("the record's Follow-up section holds the build's residue", "- the caller in src/report.py still rounds twice" in body.split("## Follow-up", 1)[-1])
+    c = Case("resumeusage")
+    c.node("BUILD", {**BUILD, "_session": "s-build", "_usage": {"num_turns": 4}})
+
+    def usage():
+        rows = recmod.read_record((c.pr() or {}).get("body", "")).get("usage")
+        return [(u["node"], u["session"], u["turns"]) for u in rows] if isinstance(rows, list) else rows
+    code, out, err = c.ouro("run", "1")
+    check("a run whose REVIEW node fails once the draft is open: exit 1, the record's usage rows hold BUILD with its turns",
+          code == 1 and usage() == [("BUILD", "s-build", 4)])
+    c.node("REVIEW", {**CLEAN, "_session": "s-review"})
+    wt = c.main / ".claude/worktrees/1-fix-the-total"
+    held = wt / git(wt, "rev-parse", "--git-path", runmod.Run.HELD)  # as a draft that opened but never read back leaves them
+    held.write_text(json.dumps([{"node": "BUILD", "session": "s-held", "turns": 2}]), encoding="utf-8")
+    code, out, err = c.ouro("run", "1")
+    body = (c.pr() or {}).get("body", "")
+    check("a resume with the draft open redraws the rows held from before it into the record and deletes the held file",
+          ("BUILD", "s-held", 2) in (usage() or []) and not held.exists())
+    check("the resume that runs REVIEW keeps the earlier invocation's BUILD row, once, and adds its own with turns unknown",
+          code == 0 and [u for u in usage() if u[1] != "s-held"] == [("BUILD", "s-build", 4), ("REVIEW", "s-review", None)]
+          and [x.rsplit("|", 3)[1].strip() for x in body.splitlines() if x.startswith(("| BUILD | s-build |", "| REVIEW | s-review |"))] == ["4", "unknown"])
+    express = issue(body=ISSUE_BODY.replace("Flow: standard", "Flow: express"), labels=("agent-ready", "trivial", "gates", "bug"))
+    c = Case("resumebeforedraft", table={"_issue_1": express, "pr create*": {"Exit": 1, "Out": "HTTP 502"}})
+    c.node("BUILD", {**BUILD, "writes": {"docs/note.md": "a note\n"}, "_session": "s-build"})  # a docs diff keeps express: the draft opens at convergence
+    c.node("REVIEW", {**CLEAN, "_session": "s-review"})
+    code, out, err = c.ouro("run", "1")
+    check("express: a pr create that fails at convergence ends the invocation before the draft opens: exit 1, no pull request",
+          code == 1 and c.pr() is None and len(c.prompts("BUILD")) == 1)
+    tbl = json.loads((c.root / "gh-table.json").read_text(encoding="utf-8"))
+    del tbl["pr create*"]
+    c.set_table(tbl)
+    c.clear_prompts()
+    code, out, err = c.ouro("run", "1")
+    rec = recmod.read_record((c.pr() or {}).get("body", ""))
+    check("the resume's draft records the BUILD row of the invocation that ended before the draft opened",
+          c.pr() is not None and c.prompts("BUILD") == [] and "s-build" in [u["session"] for u in rec.get("usage") or []])
     c = Case("resumetwo")
     c.node("BUILD", {**BUILD, "door": "one-way: a migration", "residue": ["first"], "writes": {**BUILD["writes"], "gates/exit.txt": "1"}}, 1)
     c.node("BUILD", {**BUILD, "subject": "fix(app): make the gate pass", "door": "two-way: later", "residue": ["second", "first"], "writes": {"gates/exit.txt": "0"}}, 2)
@@ -3137,6 +4228,82 @@ def sec_external():
     c = happy_case("readerM", binding=EXTERNAL.format(policy="stop-at-pr", review="external-audit"), table={"_issue_1": issue(body=M_BODY)})
     code, out, err = c.ouro("run", "1", extra=c.grok(ok))
     check("M x external-audit: the REVIEW node, the reader not called", code == 0 and c.grok_calls() == [] and c.prompts("REVIEW") == ["REVIEW.1.prompt.txt"])
+    sec_developer_reviewer(ok)
+
+
+def developer_review(name, text):
+    cfg = TMP / f"{name}-developer.toml"
+    cfg.write_text(text, encoding="utf-8")
+    return {"OURO_DEVELOPER_CONFIG": str(cfg)}
+
+
+def sec_developer_reviewer(ok):
+    """The developer binding's [review] over the repository's ship.review and reader keys, key by key."""
+    grok_dev = developer_review("grokreader", '[review]\nreviewer = "external-audit"\nexternal_cli = "grok"\n')
+    c = happy_case("devreviewgrok", table={"_issue_1": issue(body=WHAT_BODY)})
+    code, out, err = c.ouro("run", "1", extra={**c.grok(ok), **grok_dev})
+    check("a developer's external-audit with grok overrides the repository's adversarial-review: the grok reader runs, no REVIEW node",
+          code == 0 and len(c.grok_calls()) == 1 and c.prompts("REVIEW") == [])
+    check("the run note and the record name the reviewer and say the developer binding selected it",
+          "review external-audit (grok) from the developer binding" in out
+          and "Reviewer: external-audit (grok), selected by the developer binding's [review]." in c.pr()["body"])
+    model_dev = developer_review("grokmodel", '[review]\nexternal_model = "m2"\n')
+    cm = happy_case("devreviewkeys", binding=EXTERNAL.format(policy="stop-at-pr", review="external-audit"), table={"_issue_1": issue(body=WHAT_BODY)})
+    code, out, err = cm.ouro("run", "1", extra={**cm.grok(ok), **model_dev})
+    first = cm.grok_calls()[0] if cm.grok_calls() else ""
+    check("a key the developer leaves unset keeps the repository's: ship.external_cli's grok runs with the developer's model",
+          code == 0 and "-m m2" in first and "from the repository's [ship]" in out and "Reviewer:" not in cm.pr()["body"])
+    codexdir = TMP / "codexshim"
+    if not codexdir.exists():
+        (TMP / "fake_codex.py").write_text("import json, os, sys\nopen(os.environ['FAKE_CODEX_ARGV'], 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                                           "sys.stderr.write('codex: not signed in\\n')\nsys.exit(1)\n", encoding="utf-8")
+        shim(codexdir, "codex", TMP / "fake_codex.py")
+    cx = happy_case("devreviewcodex", table={"_issue_1": issue(body=WHAT_BODY)})
+    argv = cx.root / "codex-argv.json"
+    code, out, err = cx.ouro("run", "1", extra={**cx.grok(), "PATH": str(codexdir) + os.pathsep + str(GROKDIR) + os.pathsep + os.environ["PATH"],
+                                                 "FAKE_CODEX_ARGV": str(argv), **developer_review("codexreader", '[review]\nreviewer = "external-audit"\nexternal_cli = "codex"\n')})
+    check("a developer's external-audit with codex runs the codex reader, and its failure falls back to the REVIEW node",
+          code == 0 and argv.is_file() and json.loads(argv.read_text(encoding="utf-8"))[:1] == ["exec"] and cx.grok_calls() == []
+          and "The external reader (codex) was unavailable" in cx.pr()["body"] and cx.prompts("REVIEW") == ["REVIEW.1.prompt.txt"])
+    ca = happy_case("devreviewadversarial", binding=EXTERNAL.format(policy="stop-at-pr", review="external-audit"), table={"_issue_1": issue(body=WHAT_BODY)})
+    code, out, err = ca.ouro("run", "1", extra={**ca.grok(ok), **developer_review("adversarial", '[review]\nreviewer = "adversarial-review"\n')})
+    check("a developer's adversarial-review overrides the repository's external-audit: the REVIEW node, no reader call",
+          code == 0 and ca.grok_calls() == [] and ca.prompts("REVIEW") == ["REVIEW.1.prompt.txt"])
+    copilot_dev = developer_review("copilot", '[review]\nreviewer = "copilot"\n')
+    cc = Case("devreviewcopilot", binding=COPILOT.format(policy="stop-at-pr", review="adversarial-review"))
+    cc.node("BUILD", BUILD)
+    code, out, err = cc.ouro("run", "1", extra=copilot_dev)
+    check("a developer's copilot overrides adversarial-review where the repository names the bot: S asks Copilot, no REVIEW node",
+          code == 0 and cc.prompts("REVIEW") == [] and len([s for s in cc.sigs() if "requestReviews" in s]) == 1)
+    cn = happy_case("devreviewcopilotgate")
+    code, out, err = cn.ouro("run", "1", extra=copilot_dev)
+    check("copilot stays repository-gated: without ship.copilot_bot_id the run is refused before any tracker write",
+          code == 2 and "ship.copilot_bot_id" in err and cn.wrote() == [] and cn.branches() == ["master"])
+    codex_dev = developer_review("codexruntime", '[runtime]\nbackend = "codex"\n[runtime.models]\nreviewer = "gpt-fixture-reviewer"\n')
+    cd = happy_case("devreviewdefault", binding=BINDING.format(policy="stop-at-pr", review="x").replace('review = "x"\n', ""))
+    code, out, err = cd.ouro("run", "1", extra=codex_dev)
+    check("no developer [review] and no ship.review: the binding is accepted and the REVIEW node reviews on the developer's Codex backend",
+          code == 0 and "review adversarial-review from the default" in out and cd.node_call("REVIEW")["model"] == "gpt-fixture-reviewer")
+    code, out, err = happy_case("devreviewdry", binding=EXTERNAL.format(policy="stop-at-pr", review="external-audit")).ouro("run", "1", "--dry-run")
+    check("an absent [review] keeps the repository's reviewer, as the plan says", code == 0 and "[7] REVIEW: external-audit (grok) from the repository's [ship]" in out)
+    code, out, err = happy_case("devreviewclidry", binding=EXTERNAL.format(policy="stop-at-pr", review="external-audit")).ouro(
+        "run", "1", "--dry-run", extra=developer_review("codexcli", '[review]\nexternal_cli = "codex"\n'))
+    check("a developer's external_cli alone under the repository's external-audit: the plan credits the developer binding with the reader",
+          code == 0 and "[7] REVIEW: external-audit (codex) from the developer binding" in out)
+    from ouro import developer
+    for text, want in (('[review]\nreviewer = "none"\n', "a developer cannot opt out of review"),
+                       ('[review]\nreviewer = "bogus"\n', "review.reviewer must be one of adversarial-review, external-audit, copilot"),
+                       ('[review]\nexternal_cli = "nosuchcli"\n', "review.external_cli must be one of grok, claude, codex, copilot, qwen"),
+                       ('[review]\nexternal_model = ""\n', "review.external_model must be a non-empty string"),
+                       ('[review]\npolicy = "merge-on-green"\n', "unknown review key")):
+        cfg = TMP / "review-loader-developer.toml"
+        cfg.write_text(text, encoding="utf-8")
+        try:
+            developer.load(cfg)
+            refused = ""
+        except shmod.DriverError as ex:
+            refused = str(ex)
+        check(f"the developer loader refuses {text.splitlines()[1]!r}", want in refused)
 
 
 def audit_ok():
@@ -3322,10 +4489,11 @@ def sec_lane_pr_authority():
               and not list((c.main / ".git").rglob("ouro-validation/*/receipt.json")))
         if reason == "platform":
             prompt = (c.nodes / "BUILD.1.prompt.txt").read_text(encoding="utf-8")
-            check("fresh unsupported inline run selects CI ownership before its only BUILD; pending CI is not a lane trap",
+            check("fresh unsupported inline run selects the PR flow before its only BUILD, which is granted the cheap CI-covered gate; "
+                  "pending CI is not a lane trap",
                   "ordinary PR flow before BUILD" in out and len(c.prompts("BUILD")) == 1
-                  and "CI-owned" in prompt and "python3 gates/ci-owned.py" in prompt
-                  and "python3 gates/ci-owned.py" not in "\n".join(c.node_call("BUILD")["tools"]))
+                  and "- `python3 gates/ci-owned.py` (cheap: run it on every build)" in prompt
+                  and "Bash(python3 gates/ci-owned.py)" in c.node_call("BUILD")["tools"])
         if reason == "acceptance":
             check("prepared inline head cannot publish while explicit acceptance lies outside its floor",
                   "explicit acceptance is outside the trusted mandatory floor" in out and not c.prompts("BUILD"))
@@ -3399,7 +4567,7 @@ def sec_lane_guards():
             return shmod.R(0, json.dumps(packet), "", argv)
         return shmod.R(3, "fallback: express\n", "modeled publisher refusal, nothing published", argv)
     run = runmod.Run.__new__(runmod.Run)
-    run.env = types.SimpleNamespace(main=c.main, default="master", run=boundary,
+    run.env = types.SimpleNamespace(main=c.main, default="master", run=boundary, lookup=lambda key, default=None: default,
         git=lambda *args, **kw: shmod.run(shmod.argv_for("git", *args), cwd=c.main, **kw),
         ob=types.SimpleNamespace(plugin_root=lambda: None, OURO_TOKEN="<ouro>"))
     run.n, run.body = 1, DIRECT_BODY + f"\n## Acceptance\n`{command}` passes.\n"
@@ -3576,7 +4744,7 @@ def sec_lane():
     before = git(c.main, "rev-parse", "HEAD")
     code, out, err = c.ouro("run", "1", "--validate")
     check("a dirty main checkout does not take the lane: express uses a worktree and respects actual caller support",
-          code == 0 and "[2a] direct: not taken, the main checkout has uncommitted changes" in out
+          code == (0 if caller_supported else 4) and "[2a] direct: not taken, the main checkout has uncommitted changes" in out
           and (c.pr() is not None if caller_supported else 'waiting for validation' in out and c.pr() is None and not c.prompts('REVIEW')))
     check("the main checkout's files and HEAD are untouched", (c.main / "scratch.txt").read_text() == "mine\n" and git(c.main, "rev-parse", "HEAD") == before and git(c.main, "status", "--porcelain") == "?? scratch.txt")
     check("the BUILD node ran in a worktree, not in the main checkout", ".claude" in c.node_call("BUILD")["cwd"] and "worktrees" in c.node_call("BUILD")["cwd"])
@@ -3597,7 +4765,7 @@ def sec_lane():
     c.node("BUILD", {**NOTE_BUILD, "_run": ["python3 gates/doc_gate.py"], "_denied": [{"tool_name": "Edit", "tool_input": {"file_path": ".claude/rules/x.md"}}]})
     code, out, err = c.ouro("run", "1", "--validate")
     check("a lane build with a manual step does not ship through the lane: the commit moves to a worktree branch and a pull request lists the step",
-          code == 0 and "which the lane cannot carry" in out and git(c.origin, "rev-list", "--count", "master") == "1"
+          code == (0 if caller_supported else 4) and "which the lane cannot carry" in out and git(c.origin, "rev-list", "--count", "master") == "1"
           and ((c.pr() is not None and "- `.claude/rules/x.md`" in c.pr()["body"]) if caller_supported
                else 'waiting for validation' in out and c.pr() is None and not c.prompts('REVIEW'))
           and not any(s.startswith("pr merge") for s in c.sigs()))
@@ -3637,7 +4805,7 @@ def sec_lane():
         worktree = c.main / '.claude/worktrees/1-fix-the-total'
         footer = json.loads(git(worktree, 'log', '-1', '--format=%B').split('Ouro-Build: ', 1)[1])
         check('fallback: unsupported caller waits with original door/residue preserved and no PR, review or proof',
-              code == 0 and 'waiting for validation' in out and c.pr() is None and not c.prompts('REVIEW')
+              code == 4 and 'waiting for validation' in out and c.pr() is None and not c.prompts('REVIEW')
               and footer['door'] == 'one-way: a published note' and footer['residue'] == ['the index page still links the old note']
               and not list((pathlib.Path(git(worktree, 'rev-parse', '--absolute-git-dir')) / 'ouro-validation').glob('*/receipt.json'))
               and c.branches() == ['master'])
@@ -3655,7 +4823,7 @@ def sec_lane():
     outside, paths, _ = sh(sys.executable, BIN / "ouro-binding.py", "direct", "src/app.py",
                            "--binding", c.main / ".claude/ouro.toml", cwd=c.main)
     code, out, err = c.ouro("run", "1", "--validate")
-    check("a diff outside [ship].direct pushes nothing and continues from a worktree", code == 0
+    check("a diff outside [ship].direct pushes nothing and continues from a worktree", code == (0 if caller_supported else 4)
           and outside == 1 and paths.strip() == "src/app.py" and "stopped before a push" in out
           and "the commit moves to a worktree" in out and git(c.origin, "rev-list", "--count", "master") == "1"
           and (c.pr() is not None if caller_supported else 'waiting for validation' in out and c.pr() is None and not c.prompts('REVIEW'))
@@ -3817,6 +4985,8 @@ def sec_live():
     ans = nodemod.run_node("FOLLOWUP", 'Answer with the JSON object {"issues": []} and nothing else.', "haiku", list(nodemod.READ_TOOLS), str(TMP), 300)
     check("a real claude -p call returns a parsed answer", ans == {"issues": []} or isinstance(ans.get("issues"), list))
     check("the call's usage is recorded", bool(nodemod.USAGE) and (nodemod.USAGE[0]["input"] + nodemod.USAGE[0]["cache_read"] + nodemod.USAGE[0]["cache_creation"]) > 0 and nodemod.USAGE[0]["output"] > 0)
+    turns = nodemod.USAGE[0]["turns"] if nodemod.USAGE else None
+    check(f"the envelope's num_turns is recorded as a positive int (turns={turns!r})", type(turns) is int and turns > 0)
 
 
 def sec_builder_default():
@@ -3949,7 +5119,7 @@ def role_invariance():
               not cfg.mixed() and all(cfg.backend_of(r) == cfg.backend and cfg.of(r) is cfg for r in devmod.ROLES))
         seen = []
         runner = runmod.Run.__new__(runmod.Run)
-        runner.env = types.SimpleNamespace(runtime=cfg, dry=False)
+        runner.env = types.SimpleNamespace(runtime=cfg, dry=False, lookup=lambda key, default=None: default)
         runner.labels, runner.flow, runner.followup_only = ["agent-ready"], "standard", False
         with mock.patch.object(nodemod, "preflight", side_effect=lambda *a, **k: seen.append((a, k))):
             runner.preflight()
@@ -4080,6 +5250,12 @@ def sec_uncovered_commands():
     t5.node("TRIAGE", answer)
     code, out, err = t5.ouro("triage", "1", "--dry-run")
     check("triage says so of an issue whose acceptance names no command at all", code == 0 and "would get an empty command list" in out)
+    ci = notice.replace("[ship]\n", '[ship]\nvalidation = "ci"\nvalidation_checks = ["ci"]\n')
+    t6 = Case("emptylisttriageci", binding=ci, table={"_issue_1": issue(labels=("needs-triage", "gates", "bug"))})
+    t6.node("TRIAGE", answer)
+    code, out, err = t6.ouro("triage", "1", "--dry-run")
+    check("under CI validation a CI-owned gate covers the build, as the run counts it: triage says nothing of an empty command list",
+          code == 0 and "Verdict: PROMOTE" in out and "empty command list" not in out)
 
 
 def sec_other_pr():
@@ -4247,7 +5423,7 @@ def sec_validation_inheritance():
     c.clear_prompts()
     code, out, err = validation_run(c)
     check('legacy inherited overlap resumes by waiting without rewriting its footer or dropping obligations',
-          code == 0 and 'waiting for validation' in out and not validation_logs(c)
+          code == 4 and 'waiting for validation' in out and not validation_logs(c)
           and not c.prompts('BUILD') and not c.prompts('REVIEW') and not c.wrote()
           and git(wt, 'rev-parse', 'HEAD') == head and git(wt, 'log', '-1', '--format=%B') == message)
 
@@ -4311,7 +5487,7 @@ def sec_validation_inheritance():
         old_receipt = validation_receipts(c, commands=VALIDATION_CMDS)[0]
         old_proof = old_receipt.read_bytes()
         check('review fix preserves the worker observation and both caller obligations in its driver-created footer',
-              code == 0 and 'execution unavailable' in out and old_head != head
+              code == 4 and 'execution unavailable' in out and old_head != head
               and footer['gates_run'] == observed
               and [p['cmd'] for p in footer['validation_pending']] == list(reversed(VALIDATION_CMDS))
               and json.loads(old_proof)['sha'] == old_head and len(validation_receipts(c, commands=VALIDATION_CMDS)) == 1
@@ -4320,7 +5496,7 @@ def sec_validation_inheritance():
         c.clear_prompts()
         code, out, err = validation_run(c)
         check('fresh resume of the inherited fix waits: worker success and valid old-head proof cannot start verification',
-              code == 0 and 'waiting for validation' in out and not c.prompts('BUILD')
+              code == 4 and 'waiting for validation' in out and not c.prompts('BUILD')
               and not c.prompts('REVIEW') and validation_logs(c) == before and c.pr()['isDraft']
               and git(wt, 'rev-parse', 'HEAD') == head and old_receipt.read_bytes() == old_proof)
         (c.root / 'mode').write_text('pass')
@@ -4348,7 +5524,7 @@ def sec_validation_gate_removed():
     wt = validation_wt(c)
     built = git(wt, 'rev-parse', 'HEAD')
     check('gate-removed: the first run records the binding gate as a pending request and waits',
-          code == 0 and 'waiting for validation' in out and 'python3 gates/check.py' in git(wt, 'log', '-1', '--format=%B'))
+          code == 4 and 'waiting for validation' in out and 'python3 gates/check.py' in git(wt, 'log', '-1', '--format=%B'))
     binding = c.main / '.claude/ouro.toml'
     binding.write_text(binding.read_text(encoding='utf-8').replace(
         '[[gate]]\nrun = "python3 gates/check.py"\nci = "echo SKIP: the checks cannot run this gate"\n', ''), encoding='utf-8')
@@ -4377,7 +5553,7 @@ def sec_validation_handoff():
         c = validation_case('unsupported-lifecycle')
         code, out, err = validation_run(c, '--validate')
         check('unsupported lifecycle accounting waits before launching validation',
-              code == 0 and 'waiting for validation' in out and not validation_logs(c)
+              code == 4 and 'waiting for validation' in out and not validation_logs(c)
               and not validation_receipts(c) and not c.prompts('REVIEW'))
         check('and the wait names both ways forward: CI validation, or --validate from native Linux',
               'ship.validation = "ci"' in out and 'ouro run 1 --validate' in out
@@ -4390,7 +5566,7 @@ def sec_validation_handoff():
         c.clear_prompts()
         code, out, err = validation_run(c)
         check('unsupported resume names inherited obligations without rebuilding or changing the prepared commit',
-              code == 0 and all(cmd in out for cmd in VALIDATION_CMDS) and not c.prompts('BUILD')
+              code == 4 and all(cmd in out for cmd in VALIDATION_CMDS) and not c.prompts('BUILD')
               and not c.prompts('REVIEW') and not c.pr() and not c.wrote()
               and git(wt, 'rev-parse', 'HEAD') == head and git(wt, 'log', '-1', '--format=%B') == message)
         print(f'SKIP: supported POSIX validation execution rows; {ex}')
@@ -4410,13 +5586,13 @@ def sec_validation_handoff():
             c = validation_case('probe-' + probe)
             code, out, err = validation_run(c)
             if probe == 'barrier':
-                check('mutation canary: waiting cannot start review', code == 0 and 'waiting for validation' in out and not c.prompts('REVIEW') and not c.pr())
+                check('mutation canary: waiting cannot start review', code == 4 and 'waiting for validation' in out and not c.prompts('REVIEW') and not c.pr())
             else:
                 validation_run(c, '--validate')
                 git(validation_wt(c), 'commit', '-q', '--allow-empty', '-m', 'changed head')
                 c.clear_prompts()
                 code, out, err = validation_run(c)
-                check('mutation canary: previous head cannot clear validation', code == 0 and 'waiting for validation' in out and not c.prompts('REVIEW'))
+                check('mutation canary: previous head cannot clear validation', code == 4 and 'waiting for validation' in out and not c.prompts('REVIEW'))
         return
     c = validation_case('wait')
     code, out, err = validation_run(c)
@@ -4424,13 +5600,13 @@ def sec_validation_handoff():
     head = git(wt, 'rev-parse', 'HEAD')
     facts = json.loads(git(wt, 'log', '-1', '--format=%B').split('Ouro-Build: ', 1)[1])
     check('denied BUILD execution commits pending facts and waits without review, push or tracker changes',
-          code == 0 and 'waiting for validation' in out and len(facts['validation_pending']) == 2
+          code == 4 and 'waiting for validation' in out and len(facts['validation_pending']) == 2
           and not c.prompts('REVIEW') and not c.pr() and not c.wrote() and not validation_logs(c)
           and c.branches() == ['master'])
     c.clear_prompts()
     code, out, err = validation_run(c)
     check('a fresh unchanged resume waits without BUILD/REVIEW, commands, ruling or a fix round',
-          code == 0 and 'waiting for validation' in out and not c.prompts('BUILD') and not c.prompts('REVIEW')
+          code == 4 and 'waiting for validation' in out and not c.prompts('BUILD') and not c.prompts('REVIEW')
           and git(wt, 'rev-parse', 'HEAD') == head and not validation_logs(c) and not c.wrote())
     code, out, err = validation_run(c, '--validate')
     logs, receipts = validation_logs(c), validation_receipts(c, commands=VALIDATION_CMDS)
@@ -4456,7 +5632,7 @@ def sec_validation_handoff():
     receipts[0].write_text('{corrupt')
     code, out, err = validation_run(c)
     check('a corrupt receipt blocks even an already reviewed PR without executing anything',
-          code == 0 and 'waiting for validation' in out and validation_logs(c) == logs and not c.prompts('REVIEW'))
+          code == 4 and 'waiting for validation' in out and validation_logs(c) == logs and not c.prompts('REVIEW'))
     # Move a completely valid receipt, attempt and log outside Git-private state.
     # The symlink preserves log path identities, so all other checks still pass.
     root = receipts[0].parent.parent
@@ -4481,18 +5657,18 @@ def sec_validation_handoff():
         external.rename(root)
     receipts[0].write_text(json.dumps({**proof, 'commands': list(reversed(VALIDATION_CMDS))}))
     code, out, err = validation_run(c)
-    check('ordered command identity is required, not just head or a green result', code == 0 and 'waiting for validation' in out and validation_logs(c) == logs)
+    check('ordered command identity is required, not just head or a green result', code == 4 and 'waiting for validation' in out and validation_logs(c) == logs)
     receipts[0].write_text(json.dumps(proof))
     pathlib.Path(proof['results'][0]['log']).write_text('tampered output')
     code, out, err = validation_run(c)
-    check('corrupt evidence does not satisfy a receipt', code == 0 and 'waiting for validation' in out)
+    check('corrupt evidence does not satisfy a receipt', code == 4 and 'waiting for validation' in out)
     code, out, err = validation_run(c, '--validate')
     check('explicit revalidation repairs corrupt proof by actual execution', code == 0 and len(validation_logs(c)) == 4)
     git(wt, 'commit', '-q', '--allow-empty', '-m', 'head changed')
     c.clear_prompts()
     code, out, err = validation_run(c)
     check('a changed HEAD cannot use previous-head proof or start review',
-          code == 0 and 'waiting for validation' in out and len(validation_logs(c)) == 4 and not c.prompts('REVIEW'))
+          code == 4 and 'waiting for validation' in out and len(validation_logs(c)) == 4 and not c.prompts('REVIEW'))
 
     c = validation_case('fail-pass', mode='fail-once')
     c.node('BUILD', {**BUILD, 'validation_pending': [{'cmd': cmd, 'reason': 'sandbox'} for cmd in VALIDATION_CMDS]}, 1)
@@ -4551,7 +5727,7 @@ def sec_validation_handoff():
     c.clear_prompts()
     code, out, err = validation_run(c)
     check('changed pending order rejects transplanted proof and blocks review',
-          code == 0 and 'waiting for validation' in out and not c.prompts('REVIEW') and len(validation_logs(c)) == 2)
+          code == 4 and 'waiting for validation' in out and not c.prompts('REVIEW') and len(validation_logs(c)) == 2)
     code, out, err = validation_run(c, '--validate')
     check('explicit validation preserves the updated request order',
           code == 0 and [r[0] for r in validation_logs(c)[2:]] == [['second'], ['first']])
@@ -4560,11 +5736,11 @@ def sec_validation_handoff():
     code, out, err = validation_run(c, '--validate')
     head = git(validation_wt(c), 'rev-parse', 'HEAD')
     check('exit75 waits without a receipt, ruling, review or fix build',
-          code == 0 and 'execution unavailable' in out and not validation_receipts(c) and not c.wrote()
+          code == 4 and 'execution unavailable' in out and not validation_receipts(c) and not c.wrote()
           and not c.prompts('REVIEW') and c.prompts('BUILD') == ['BUILD.1.prompt.txt'])
     code, out, err = validation_run(c)
     check('a fresh plain resume after exit75 does not repeat the unavailable command',
-          code == 0 and len(validation_logs(c)) == 1 and git(validation_wt(c), 'rev-parse', 'HEAD') == head)
+          code == 4 and len(validation_logs(c)) == 1 and git(validation_wt(c), 'rev-parse', 'HEAD') == head)
     (c.root / 'mode').write_text('pass')
     code, out, err = validation_run(c, '--validate')
     check('explicit admitted replay of unavailable commands can resume', code == 0 and len(validation_logs(c)) == 3 and c.pr() is not None)
@@ -4576,7 +5752,7 @@ def sec_validation_handoff():
     c = validation_case('missing', commands=[missing], binding=binding)
     code, out, err = validation_run(c, '--validate')
     check('a missing executable waits with exit75 evidence and no owner ruling',
-          code == 0 and 'exit 75' in out and 'execution unavailable' in out and not c.wrote()
+          code == 4 and 'exit 75' in out and 'execution unavailable' in out and not c.wrote()
           and not validation_receipts(c) and not c.prompts('REVIEW') and not c.pr()
           and c.prompts('BUILD') == ['BUILD.1.prompt.txt'])
     check('an approved caller environment prefix is never an acceptance worker grant',
@@ -4600,6 +5776,9 @@ def sec_validation_handoff():
           code == 0 and c.pr() is not None and len(validation_receipts(c, commands=VALIDATION_CMDS)) == 1
           and '(no pull request yet)' in brief and 'Driver validation evidence:' in brief
           and all(r[1] in brief for r in validation_logs(c)))
+    check('local mode: the REVIEW brief holds no CI evidence line, and the paragraph it would join reads as before',
+          bool(brief) and runmod.CI_EVIDENCE_LINE.strip() not in brief and '<<ci_evidence>>' not in brief
+          and 'only the changed hunks and their claims.\n\nReport only what you verified' in brief)
 
     malformed = [None, {}, ['python3 gates/validate.py first'], [{'cmd': VALIDATION_CMDS[0]}],
                  [{'cmd': VALIDATION_CMDS[0], 'reason': ''}],
@@ -4742,6 +5921,9 @@ def sec_ci_validation():
     def receipts(c):
         return list(c.main.rglob("ouro-validation/*/receipt.json"))
 
+    def ci_owned(prompt):  # the BUILD brief's CI-owned block, up to the next section
+        return (prompt.split("\nCI-owned commands (", 1)[1:] or [""])[0].split("\n## ", 1)[0]
+
     def case(name, *, token=False, scoped=False, merge=False, flow="standard", table=None, acceptance=None, answer=None, sync=None):
         binding = BINDING.format(policy="merge-on-green" if merge else "stop-at-pr", review="adversarial-review")
         if sync:
@@ -4785,14 +5967,14 @@ def sec_ci_validation():
         wt = pathlib.Path(c.node_call("BUILD")["cwd"])
         prepared = git(wt, "rev-parse", "HEAD")
         check("Mac/Windows BUILD prepares a commit before a metadata-only validation wait",
-              code == 0 and len(c.prompts("BUILD")) == 1 and "authority=local" in out
+              code == 4 and len(c.prompts("BUILD")) == 1 and "authority=local" in out
               and "python3 gates/acceptance.py" in out and windows in out
               and "exact gate.run" in out and "check names alone" in out
               and not c.prompts("REVIEW") and not receipts(c) and not c.wrote())
         c.clear_prompts()
         code, out, err = c.ouro("run", "1")
         check("the unsupported input-check resume keeps the prepared commit without a new BUILD or owner stop",
-              code == 0 and "python3 gates/acceptance.py" in out and not c.prompts("BUILD")
+              code == 4 and "python3 gates/acceptance.py" in out and not c.prompts("BUILD")
               and not c.prompts("REVIEW") and not c.wrote() and not c.pr()
               and git(wt, "rev-parse", "HEAD") == prepared)
 
@@ -4823,15 +6005,114 @@ def sec_ci_validation():
     check("real CLI lands a fresh scoped CI-only change without a local Windows toolchain/caller validator",
           code == 0 and "done: #1 landed" in out and any(sig.startswith("pr merge") for sig in c.sigs())
           and len(c.prompts("BUILD")) == 1 and c.prompts("REVIEW") and not receipts(c))
+    review = (c.nodes / "REVIEW.1.prompt.txt").read_text(encoding="utf-8") if c.prompts("REVIEW") else ""
+    listed = json.loads((review.split("\nRepository CI validation evidence: ", 1)[1:] or ["[]"])[0].split("\n", 1)[0])
+    check("CI mode: the REVIEW brief points at the CI evidence list, and each rollup row in it carries its conclusion",
+          runmod.CI_EVIDENCE_LINE.strip() in review and "<<ci_evidence>>" not in review
+          and listed and all(row.get("conclusion") == "SUCCESS" and "run_id" not in row for row in listed))
     prompt = (c.nodes / "BUILD.1.prompt.txt").read_text(encoding="utf-8")
     check("before the first scoped edit, CI ownership is named without granting the absent command",
           "CI-owned" in prompt and windows in prompt and windows not in "\n".join(c.node_call("BUILD")["tools"]))
+    check("CI mode: a gate the checks run that is not cheap stays CI-owned and is not granted",
+          f"- `{windows}`" in ci_owned(prompt) and f"`{windows}` (cheap" not in prompt
+          and f"Bash({windows})" not in c.node_call("BUILD")["tools"])
     check("the PR records CI authority, not a local execution receipt",
           "- CI validation @ " in (c.pr() or {}).get("body", "") and observations(c) and not receipts(c))
     sigs = c.sigs()
     check("express opens a draft before the first exact-head CI query",
           next(i for i, sig in enumerate(sigs) if sig.startswith("pr create"))
           < next(i for i, sig in enumerate(sigs) if "statusCheckRollup" in sig))
+
+    c = case("cheap-unselected-pending", merge=True, flow="express",
+             answer={"validation_pending": [{"cmd": windows, "reason": "no Windows toolchain here"}]})
+    binding = c.main / ".claude/ouro.toml"
+    binding.write_text(binding.read_text(encoding="utf-8").replace("cheap = true", 'cheap = true\npaths = ["never/"]', 1), encoding="utf-8")
+    git(c.main, "add", "-A")
+    git(c.main, "commit", "-qm", "owner scopes the cheap CI-run gate elsewhere")
+    git(c.main, "push", "-q", "origin", "master")
+    code, out, err = c.ouro("run", "1")
+    check("CI mode: a pending cheap CI-run gate the diff does not select waits on nothing, so the change lands",
+          code == 0 and "done: #1 landed" in out and "waiting for validation" not in out and not receipts(c))
+    check("the PR record shows that request awaiting nothing, not as an open caller obligation",
+          recmod.read_record((c.pr() or {}).get("body", "")).get("validation_pending")
+          == [{"cmd": windows, "reason": "no Windows toolchain here", "awaiting": "nothing: this diff selects none of its gate's paths"}])
+
+    c = case("unselected-stale-evidence", answer={"validation_pending": [{"cmd": windows, "reason": "no Windows toolchain here"}]})
+    binding = c.main / ".claude/ouro.toml"
+    binding.write_text(binding.read_text(encoding="utf-8").replace("cheap = true", 'cheap = true\npaths = ["never/"]', 1), encoding="utf-8")
+    git(c.main, "add", "-A")
+    git(c.main, "commit", "-qm", "owner scopes the cheap CI-run gate elsewhere")
+    git(c.main, "push", "-q", "origin", "master")
+    code, out, err = c.ouro("run", "1")
+    check("unselected-stale-evidence: the first run builds and exits 0", code == 0 and c.prompts("BUILD"))
+    wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+    head = git(wt, "rev-parse", "HEAD")
+    stale = pathlib.Path(git(wt, "rev-parse", "--absolute-git-dir")) / "ouro-validation" / runmod.validation.key(head, [windows])
+    (stale / "attempt-stale").mkdir(parents=True)
+    (stale / "attempt-stale" / "0.log").write_bytes(b"stale\n")
+    result = {"cmd": windows, "sha": head, "exit": 0, "log": str(stale / "attempt-stale" / "0.log"), "digest": hashlib.sha256(b"stale\n").hexdigest()}
+    (stale / "attempt-stale" / "attempt.json").write_text(json.dumps({"sha": head, "commands": [windows], "results": [result]}), encoding="utf-8")
+    (stale / "receipt.json").write_text(json.dumps({"attempt": "attempt-stale", "sha": head, "commands": [windows], "results": [result]}), encoding="utf-8")
+    ob = shmod.load_binding_module()
+    env = shmod.Env(c.main, ob, ob.load(c.main / ".claude/ouro.toml"), False)
+    env._pr_checks = True
+    r = runmod.Run(env, 1, None, runmod.RunOptions())
+    r.tree, r.flow, r.body, r.areas, r.labels = Tree(env, wt, None), "standard", ISSUE_BODY, ["gates"], ["agent-ready"]
+    r.spec_amendments = lambda: []
+    facts = r.build_facts()
+    seeded = runmod.validation.attempts(r.tree) == [result] and (not native_caller or runmod.validation.receipt(r.tree, [{"cmd": windows}]) == [result])
+    check("a stale receipt and attempt for a pending CI-run gate this diff does not select stay out of the record's validation evidence",
+          seeded and facts["validation_results"] == [] and facts["validation_attempts"] == [])
+
+    suite, whole = "python3 gates/suite.py", "python3 gates/whole.py"
+
+    def suite_case(name, **kw):  # the checks run both: a suite scoped to the change's paths, and a gate with no paths
+        c = case(name, **kw)
+        binding = c.main / ".claude/ouro.toml"
+        binding.write_text(binding.read_text(encoding="utf-8") + f'\n[[gate]]\nrun = "{suite}"\npaths = ["src/"]\n'
+                           f'\n[[gate]]\nrun = "{whole}"\n', encoding="utf-8")
+        c.write("gates/suite.py", "print('suite ran')\n")
+        c.write("gates/whole.py", "print('whole ran')\n")
+        git(c.main, "add", "-A")
+        git(c.main, "commit", "-qm", "owner adds CI-run gates with and without paths")
+        git(c.main, "push", "-q", "origin", "master")
+        return c
+
+    c = suite_case("suite-pending", merge=True, flow="express",
+                   answer={"validation_pending": [{"cmd": suite, "reason": "no interpreter for the suite here"}]})
+    code, out, err = c.ouro("run", "1")
+    prompt = (c.nodes / "BUILD.1.prompt.txt").read_text(encoding="utf-8") if c.prompts("BUILD") else ""
+    tools = c.node_call("BUILD")["tools"] if c.prompts("BUILD") else []
+    check("CI mode: a gate with paths the checks run is on the BUILD list with the paths note, granted, and not CI-owned",
+          f"- `{suite}` (run it when the change touches: src/)" in prompt and f"Bash({suite})" in tools
+          and suite not in ci_owned(prompt))
+    check("CI mode: a gate without paths the checks run stays CI-owned and is not granted",
+          f"- `{whole}`" in ci_owned(prompt) and f"Bash({whole})" not in tools)
+    check("CI mode: a granted gate the builder reports pending goes on to the checks, which prove it; the run neither stops nor waits",
+          code == 0 and "done: #1 landed" in out and "waiting for validation" not in out and stops_of(c) == []
+          and f"Bash({suite})" in tools and not receipts(c)
+          and suite in [m["cmd"] for m in recmod.read_record((c.pr() or {}).get("body", "")).get("validation_met") or []])
+
+    c = suite_case("suite-passed", table={"_rollup": [{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": None}]},
+                   answer={"_run": [suite], "gates_run": [{"cmd": suite, "exit": 0}]})
+    code, out, err = c.ouro("run", "1")
+    check("CI mode: a granted gate the builder ran and reports passed still waits on the checks' proof before review",
+          code == 0 and "waiting for CI validation" in out and c.pr() and c.pr()["isDraft"]
+          and not ready(c) and not c.prompts("REVIEW") and not receipts(c))
+    # The wait above holds for any CI-mode change; this pins the suite itself as an obligation only the checks clear.
+    ob = shmod.load_binding_module()
+    env = shmod.Env(c.main, ob, ob.load(c.main / ".claude/ouro.toml"), False)
+    env._pr_checks = True
+    r = runmod.Run(env, 1, None, runmod.RunOptions())
+    wt = pathlib.Path(c.node_call("BUILD")["cwd"]) if c.prompts("BUILD") else c.main
+    r.tree, r.flow, r.body, r.areas, r.labels = Tree(env, wt, None), "standard", ISSUE_BODY, ["gates"], ["agent-ready"]
+    r.spec_amendments = lambda: []
+    head = git(wt, "rev-parse", "HEAD")
+    unproven = suite in r.build_commands()[1] and suite in r.ci_commands() and suite in r.missing_execution()
+    env.gh_json = lambda *args: {"headRefOid": head, "statusCheckRollup": [
+        {"__typename": "StatusContext", "context": "ci", "state": "SUCCESS"}]}
+    check("CI mode: the granted suite the builder reports passed stays a missing obligation until the checks succeed at its head",
+          unproven and r.check_ci({"number": 7}, head) and suite not in r.missing_execution())
 
     success = {"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
     c = case("local-resume", token=True, table={"_rollup": [{**success, "status": "IN_PROGRESS", "conclusion": None}]},
@@ -4844,6 +6125,10 @@ def sec_ci_validation():
           code == 0 and "waiting for CI validation" in out and c.pr() and c.pr()["isDraft"]
           and not ready(c) and not c.prompts("REVIEW") and marker.is_file()
           and set(marker.read_text(encoding="utf-8").splitlines()) == {old} and not receipts(c))
+    prompt = (c.nodes / "BUILD.1.prompt.txt").read_text(encoding="utf-8")
+    check("CI mode: a cheap gate the checks run is on the BUILD list with the cheap note, granted, and not CI-owned",
+          f"- `{windows}` (cheap: run it on every build)" in prompt and f"Bash({windows})" in c.node_call("BUILD")["tools"]
+          and windows not in ci_owned(prompt))
     (wt / "src/app.py").write_text("def compute_total(items):\n    return sum(items) + 1\n", encoding="utf-8")
     git(wt, "commit", "-qam", "owner: advance the prepared PR")
     new = git(wt, "rev-parse", "HEAD")
@@ -4916,6 +6201,34 @@ def sec_ci_validation():
           and sh("git", "merge-base", "--is-ancestor", landed, head, cwd=wt)[0] == 0
           and sh("git", "merge-base", "--is-ancestor", before, head, cwd=wt)[0] != 0
           and git(wt, "rev-list", "--merges", f"{landed}..{head}") == ""
+          and git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total") == head
+          and "<<<<<<<" not in (wt / "src/app.py").read_text(encoding="utf-8") and "waiting for CI validation" in out)
+
+    c, wt, before = built("checks-conflict")
+    pr, base = c.pr(), git(c.origin, "symbolic-ref", "--short", "HEAD")
+    # GitHub reports a conflict while origin's default branch is no ancestor of the branch; the real watcher reads that only after a minute with no run
+    (TMP / "checks_conflict_pwsh.py").write_text(
+        "import os, subprocess, sys\n"
+        "behind = subprocess.run(['git', '--git-dir', os.environ['STUB_GH_ORIGIN'], 'merge-base', '--is-ancestor',"
+        f" {'refs/heads/' + base!r}, {'refs/heads/' + pr['head']!r}]).returncode != 0\n"
+        "if behind and any(a.endswith('Watch-PullRequestChecks.ps1') for a in sys.argv):\n"
+        f"    print('STOP: #{pr['number']} conflicts with {base} and GitHub runs no pull_request workflow for a conflicting pull request: '\n"
+        "          'sync the branch (Sync-Branch.ps1), push it, then come back')\n"
+        "    sys.exit(1)\n"
+        f"sys.exit(subprocess.run([{shutil.which('pwsh')!r}, *sys.argv[1:]]).returncode)\n", encoding="utf-8")
+    shim(TMP / "checksconflictshim", "pwsh", TMP / "checks_conflict_pwsh.py")
+    c.write("src/app.py", "def compute_total(items):\n    return sum(items) - 999\n")
+    git(c.main, "commit", "-qam", "a conflicting edit on the default branch")
+    git(c.main, "push", "-q", "origin", "master")
+    landed = git(c.main, "rev-parse", "HEAD")
+    code, out, err = c.ouro("run", "1", extra={"PATH": str(TMP / "checksconflictshim") + os.pathsep + os.environ["PATH"]})
+    head = git(wt, "rev-parse", "HEAD")
+    check("a resume on a pushed head whose checks report a conflict syncs as the push step does: the BUILD node gets the conflict, "
+          "the merge commit is pushed, and no driver error",
+          code == 0 and "conflicts with master (the checks): syncing" in out and "sync changed nothing" not in err
+          and "sync conflict: the BUILD node gets it" in out
+          and len(c.prompts("BUILD")) == 1 and "Resolve this merge conflict" in (c.nodes / c.prompts("BUILD")[0]).read_text(encoding="utf-8")
+          and sh("git", "merge-base", "--is-ancestor", landed, head, cwd=wt)[0] == 0
           and git(c.origin, "rev-parse", "refs/heads/gates/1-fix-the-total") == head
           and "<<<<<<<" not in (wt / "src/app.py").read_text(encoding="utf-8") and "waiting for CI validation" in out)
 
@@ -5094,6 +6407,9 @@ def sec_ci_validation():
                 check(label + " cannot retain prior caller proof",
                       not r.check_ci({"number": 7}, head) and r.ci_execution_head is None
                       and windows in r.missing_execution())
+            check("CI mode: the cheap gate the BUILD node is granted still needs the checks' proof before review",
+                  windows in r.build_commands()[1] and windows in r.ci_commands()
+                  and not r.check_ci({"number": 7}, head) and windows in r.missing_execution())
             for conclusion in ("failure", "skipped", "neutral", "cancelled", "timed_out", None):
                 table, calls = clone(baseline), {}
                 key = "actions/runs/2/attempts/1/jobs?per_page=100&page=1"
@@ -5293,19 +6609,58 @@ def sec_ci_validation():
         caller_supported = True
     except shmod.DriverError:
         caller_supported = False
-    check("an uncovered acceptance keeps the real caller platform boundary", code == 0
+    check("an uncovered acceptance keeps the real caller platform boundary", code == (0 if caller_supported else 4)
           and (ready(c) and receipts(c) if caller_supported else "waiting for validation" in out
                and "authority=ci" in out and "python3 gates/acceptance.py" in out
                and "exact gate.run" in out and "check names alone" in out
                and len(c.prompts("BUILD")) == 1 and not c.wrote()
                and not ready(c) and not c.prompts("REVIEW") and not receipts(c)))
 
+    covered_request = {"cmd": windows, "reason": "no Windows toolchain in the worker"}
+    c = case("covered-request", table=pending_ci, answer={"validation_pending": [covered_request]})
+    code, out, err = c.ouro("run", "1")
+    record = recmod.read_record((c.pr() or {}).get("body", "")) or {}
+    wt = pathlib.Path(c.node_call("BUILD")["cwd"])
+    check("a CI-covered request with no passing check at the head is shown awaiting the checks, never met",
+          code == 0 and "waiting for CI validation" in out and record.get("validation_met") == []
+          and record.get("validation_pending") == [{**covered_request, "awaiting": "the declared CI checks at this head"}])
+    c.clear_prompts()
+    c.set_table({"_issue_1": issue()})
+    code, out, err = c.ouro("run", "1")
+    head = git(wt, "rev-parse", "HEAD")
+    record = recmod.read_record(c.pr()["body"])
+    met = record.get("validation_met") or []
+    prompt = (c.nodes / "REVIEW.1.prompt.txt").read_text(encoding="utf-8")
+    check("green exact-head checks move the CI-covered request to met, with the head and the checks, in the record and the review brief",
+          code == 0 and ready(c) and record["validation_pending"] == [] and len(met) == 1 and met[0]["cmd"] == windows
+          and met[0]["head"] == head and [g["name"] for g in met[0]["checks"]] == ["ci"]
+          and "proved at this head" in prompt and json.dumps(met) in prompt
+          and '"awaiting": "the declared CI checks at this head"' not in prompt)
+
+    if not caller_supported:
+        print("SKIP: the mixed CI-covered and caller request rows need the native Linux caller boundary")
+        return
+    c = case("mixed-requests", acceptance="python3 gates/acceptance.py",
+             answer={"validation_pending": [covered_request, {"cmd": "python3 gates/acceptance.py", "reason": "explicit extra caller environment"}]})
+    c.write("gates/acceptance.py", "print('real explicit caller acceptance')\n")
+    git(c.main, "add", "-A")
+    git(c.main, "commit", "-qm", "fixture explicit acceptance")
+    git(c.main, "push", "-q", "origin", "master")
+    code, out, err = c.ouro("run", "1", "--validate")
+    record = recmod.read_record((c.pr() or {}).get("body", "")) or {}
+    prompt = (c.nodes / "REVIEW.1.prompt.txt").read_text(encoding="utf-8") if c.prompts("REVIEW") else ""
+    met = record.get("validation_met") or []
+    check("green checks meet the CI-covered request while the caller request stays pending as BUILD wrote it",
+          code == 0 and ready(c) and [m["cmd"] for m in met] == [windows]
+          and record.get("validation_pending") == [{"cmd": "python3 gates/acceptance.py", "reason": "explicit extra caller environment"}]
+          and json.dumps(met) in prompt and receipts(c))
+
 
 # Heaviest first, by the slower CI leg's section time: the pool starts sections in this order.
-SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("run: full class gates by paths", sec_full_paths),
+SECTIONS = [("run: issue coordination", sec_coordination), ("run: a fix round's gates and OUTSIDE findings", sec_fix_round_scope), ("run: lane outcomes", sec_lane), ("run: flake and real check failure", sec_check_flake), ("run: both legs of a check failed", sec_check_both_legs), ("run: coordination resume controls", sec_coordination_resume), ("run: execution evidence", sec_execution_evidence), ("run: external reader", sec_external), ("run: validation handoff", sec_validation_handoff), ("run: a reused worktree catches up", sec_catch_up), ("run: Copilot", sec_copilot), ("run: direct PR authority", sec_lane_pr_authority), ("run: an unmoved finding", sec_unchanged_finding), ("run: the fix-now round", sec_fix_now), ("run: review findings and the fix round", sec_findings_fix), ("triage: the TRIAGE node", sec_triage), ("triage: a fired unblock trigger", sec_triage_fired_trigger), ("run: full class gates by paths", sec_full_paths),
             ("run: manual steps", sec_manual), ("run: executable acceptance", sec_executable_acceptance), ("run: review none and size tightening", sec_review_none), ("run: CI validation authority", sec_ci_validation), ("run: a conflict with the base", sec_conflict), ("run: no pull_request workflow", sec_no_pr_workflow), ("run: validation inheritance", sec_validation_inheritance), ("run: a pending validation the binding no longer grants", sec_validation_gate_removed),("run: the builder default", sec_builder_default), ("run: repo.setup in each new worktree", sec_setup), ("run: review cap", sec_review_cap), ("run: a pull request head GitHub serves late", sec_head_lag), ("run: sync conflict", sec_sync_conflict), ("run: rebase sync stops", sec_sync_rebase_stops), ("run: another branch's pull request", sec_other_pr),
-            ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: a developer's [[ship.person]] entry", sec_ship_person), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
-            ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: ship.review_sandbox", sec_review_sandbox),("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
+            ("run: BUILD stop", sec_build_stop), ("run: merge refused", sec_merge_refused), ("run: flow tightens", sec_flow_tighten), ("run: acceptance review corrections", sec_acceptance_review_corrections), ("run: parts", sec_parts), ("run: local worktree cleanup", sec_worktree_cleanup), ("run: direct lane", sec_direct), ("run: developer runtime", sec_developer_runtime), ("run: trivial-merge", sec_trivial_merge), ("run: a landing triages its blocked successors", sec_successor_triage), ("run: a developer's [[ship.person]] entry", sec_ship_person), ("run: resume from the tracker", sec_resume), ("run: express base moves", sec_express_base_moves), ("run: an acceptance command no node can run", sec_uncovered_commands), ("run: spec trust", sec_spec_trust), ("run: the BUILD brief's commands", sec_brief),
+            ("triage: anchor promotion preflight", sec_triage_anchor_preflight), ("run: not agent-ready", sec_not_ready), ("run: preflight", sec_preflight), ("run: ship.review_sandbox", sec_review_sandbox),("run: happy path, resume, owner merge", sec_happy), ("run: dead anchor", sec_dead_anchor), ("run: branch_prefix", sec_branch_prefix), ("run: red gate", sec_gate_red), ("run: a bug fix's base check", sec_base_check),("run: checks still running", sec_checks_running), ("run: direct lane guards", sec_lane_guards), ("run: express", sec_express), ("run: symlinked worktrees directory", sec_worktree_symlink), ("triage: publication ordering", sec_triage_publication), ("run: gate uncovered", sec_gate_uncovered), ("triage: checkpoint exit", sec_triage_checkpoint_exit), ("run: --dry-run", sec_dry_run),
             ("run: node garbage", sec_node_garbage), ("run: shape finding", sec_shape), ("pure: parsers, markers, the Review line", sec_pure), ("run: a binding the reader refuses", sec_bad_binding), ("run: direct source guard", sec_lane_source_guard), ("stub: the gh stand-in shadows gh and refuses the unlisted", sec_stub_proof), ("run: no binding", sec_no_binding), ("triage: label moves and body lines", sec_labels), ("node: the adapter in stub mode", sec_node), ("ops: weekly and compile", sec_ops), ("live: one real claude -p call", sec_live)]
 INDEX = os.environ.get("OURO_TEST_INDEX")
 WORKERS = int(os.environ.get("OURO_TEST_WORKERS") or min(8, os.cpu_count() or 1))

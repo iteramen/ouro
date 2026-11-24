@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from ouro import developer, sh
-from ouro.runtime import PROBE, READ, Capabilities, builder, process, qwen, qwen_isolation, schema
+from ouro.runtime import PROBE, READ, SANDBOXED_PROBE, Capabilities, builder, process, qwen, qwen_isolation, schema
 
 ANSWER = {"finding": "the interface matrix", "stop": None}
 # The event array Qwen Code 0.26.6 prints for `-o json`, trimmed to the fields the adapter reads.
@@ -47,7 +47,8 @@ def text_run(text, message="Model produced plain text instead of calling the str
 
 
 class QwenTests(unittest.TestCase):
-    def execute(self, events, *, tools=READ, model="qwen3-coder", code=0, hooked=HOOKED, raises=None, name="CHECKPOINT", cwd=None):
+    def execute(self, events, *, tools=READ, model="qwen3-coder", code=0, hooked=HOOKED, raises=None, name="CHECKPOINT", cwd=None,
+                diagnostic=None):
         seen = {}
 
         def run(argv, cwd=None, prompt=None, timeout=None, env=None):
@@ -64,7 +65,8 @@ class QwenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, patch.object(sh, "argv_for", side_effect=lambda *a: list(a)), \
                 patch.object(process, "run", side_effect=run):
             pathlib.Path(d, "AGENTS.md").write_text("repo rule", encoding="utf-8")
-            out = qwen._execute(name, "the brief", model, tools, cwd or d, 30, None, {}, developer.Settings("qwen"), {})
+            out = qwen._execute(name, "the brief", model, tools, cwd or d, 30, None, {}, developer.Settings("qwen"),
+                                {} if diagnostic is None else diagnostic)
         return out, seen
 
     def test_the_command_line_is_headless_file_only_and_takes_the_prompt_on_stdin(self):
@@ -83,6 +85,15 @@ class QwenTests(unittest.TestCase):
              "error": "Qwen Code requires permission to use \"run_shell_command\", but that permission was declined."}])
         self.assertEqual((usage["input_tokens"], usage["provider"], usage["model"], usage["hook"]), (66, "qwen", "qwen3-coder", HOOKED))
 
+    def test_the_result_events_num_turns_fills_the_diagnostic_turns(self):
+        for events, turns in ((EVENTS, 3), ([*EVENTS[:-1], {k: v for k, v in EVENTS[-1].items() if k != "num_turns"}], None),
+                              (result(num_turns="3"), None)):
+            with self.subTest(turns=turns, events=events[-1].get("num_turns")):
+                diagnostic = {}
+                usage = self.execute(events, diagnostic=diagnostic)[0][2]
+                self.assertEqual(diagnostic["turns"], turns)
+                self.assertEqual(usage["num_turns"], events[-1].get("num_turns"))  # the usage row reads its turns from the usage
+
     def test_the_default_model_passes_no_model_flag(self):
         self.assertNotIn("--model", self.execute(EVENTS, model="default")[1]["argv"])
 
@@ -95,8 +106,8 @@ class QwenTests(unittest.TestCase):
         self.assertEqual(qwen_isolation.ALLOWED, ("read_file", "glob", "grep_search", "structured_output"))
         (hook,) = settings["hooks"]["PreToolUse"]
         self.assertEqual(hook["matcher"], "*")
-        self.assertEqual(hook["hooks"][0]["command"], shlex.join(
-            [sys.executable, str(qwen_isolation.HOOK), "read_file,glob,grep_search,structured_output", str(evidence)]))
+        self.assertEqual(qwen_isolation.hook_argv(hook["hooks"][0]["command"]),
+                         [sys.executable, str(qwen_isolation.HOOK), "read_file,glob,grep_search,structured_output", str(evidence)])
         self.assertEqual(settings["permissions"]["deny"], ["run_shell_command", "exec", "monitor", "write_file", "edit",
                                                            "notebook_edit", "web_fetch", "agent"])
         self.assertNotIn("tool_search", settings["permissions"]["deny"])  # denying the bridge registers every deferred tool
@@ -144,10 +155,10 @@ class QwenTests(unittest.TestCase):
         argv, settings, evidence = seen["argv"], seen["settings"], seen["evidence"]
         self.assertEqual(argv[argv.index("--approval-mode") + 1], "yolo")
         self.assertEqual(settings["permissions"]["deny"], ["exec", "monitor", "web_fetch", "agent"])
-        self.assertEqual(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], shlex.join(
-            [sys.executable, str(qwen_isolation.HOOK),
-             "read_file,glob,grep_search,structured_output,run_shell_command,write_file,edit,notebook_edit",
-             str(evidence), str(evidence.with_name("policy.json"))]))
+        self.assertEqual(qwen_isolation.hook_argv(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]),
+                         [sys.executable, str(qwen_isolation.HOOK),
+                          "read_file,glob,grep_search,structured_output,run_shell_command,write_file,edit,notebook_edit",
+                          str(evidence), str(evidence.with_name("policy.json"))])
         self.assertEqual(seen["policy"]["edit"], True)
         self.assertEqual(seen["policy"]["commands"], list(tools.commands))
         prompt = seen["input"]
@@ -231,7 +242,8 @@ class QwenTests(unittest.TestCase):
 
     def test_a_command_contract_runs_under_yolo_with_the_shell_decided_by_the_hook(self):
         for tools, scope in ((Capabilities(commands=("python3 check.py",)), "only these exact commands: `python3 check.py`"),
-                             (PROBE, "any single command but git push, git commit and gh, with no `$`, glob, brace or git `-c`")):
+                             (PROBE, "any single command but git push, git commit and gh, with no `$`, no git `-c` and no "
+                                     "glob or brace that could name git or gh")):
             with self.subTest(tools=tools):
                 (answer, *_), seen = self.execute(EVENTS, tools=tools)
                 argv, settings, evidence = seen["argv"], seen["settings"], seen["evidence"]
@@ -240,9 +252,9 @@ class QwenTests(unittest.TestCase):
                 self.assertEqual(settings["permissions"]["deny"], ["exec", "monitor", "write_file", "edit", "notebook_edit",
                                                                    "web_fetch", "agent"])
                 policy = evidence.with_name("policy.json")
-                self.assertEqual(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"], shlex.join(
-                    [sys.executable, str(qwen_isolation.HOOK), "read_file,glob,grep_search,structured_output,run_shell_command",
-                     str(evidence), str(policy)]))
+                self.assertEqual(qwen_isolation.hook_argv(settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]),
+                                 [sys.executable, str(qwen_isolation.HOOK),
+                                  "read_file,glob,grep_search,structured_output,run_shell_command", str(evidence), str(policy)])
                 self.assertTrue(seen["input"].startswith("Use only read_file, glob, grep_search and run_shell_command. "
                                                          "run_shell_command takes " + scope + ", one per call"))
                 self.assertEqual(answer, {"finding": "the interface matrix"})
@@ -388,7 +400,9 @@ class QwenTests(unittest.TestCase):
                 patch.object(qwen, "hook_proof"), patch.object(qwen, "_execute", side_effect=execute), \
                 patch.object(claude, "preflight", return_value=None):
             # Qwen Code alone, a distinct model per role: the roles Run.contracts names, each at its own contract.
-            runner.env = SimpleNamespace(runtime=cfg, dry=False)
+            def unset(key, default=None):  # the binding sets no ship.review_sandbox
+                return default
+            runner.env = SimpleNamespace(runtime=cfg, dry=False, lookup=unset)
             for labels, flow, merged, expected in (
                     ([], "standard", False, [("read", "builder"), ("read", "reviewer"), ("read", "triager"),
                                              ("PROBE", "reviewer"), ("BUILD", "builder")]),
@@ -409,14 +423,14 @@ class QwenTests(unittest.TestCase):
             self.assertEqual(calls, [("read", "triager")])
             # A diff that tightens an express run to standard proves the reviewer's model at PROBE before REVIEW.
             del calls[:]
-            runner.env = SimpleNamespace(runtime=cfg, ob=SimpleNamespace(gate_paths=lambda gates: []))
+            runner.env = SimpleNamespace(runtime=cfg, ob=SimpleNamespace(gate_paths=lambda gates: []), lookup=unset)
             runner.flow, runner.size, runner.notes, runner.gate_entries = "express", "M", [], lambda: []
             runner.tree, runner._note = SimpleNamespace(changed=lambda: ["src/app.py"]), lambda **k: None
             runner.rederive()
             self.assertEqual((runner.flow, calls), ("standard", [("read", "reviewer"), ("PROBE", "reviewer")]))
             # Mixed: builder and reviewer on Qwen Code; an express run reads its review, so no PROBE call.
             runner.env = SimpleNamespace(runtime=developer.Settings("claude", roles={
-                "builder": {"backend": "qwen", "model": "qb"}, "reviewer": {"backend": "qwen", "model": "qr"}}), dry=False)
+                "builder": {"backend": "qwen", "model": "qb"}, "reviewer": {"backend": "qwen", "model": "qr"}}), dry=False, lookup=unset)
             for flow, expected in (("express", [("read", "qb"), ("read", "qr"), ("BUILD", "qb")]),
                                    ("standard", [("read", "qb"), ("read", "qr"), ("PROBE", "qr"), ("BUILD", "qb")])):
                 with self.subTest(flow=flow):
@@ -434,7 +448,7 @@ class QwenTests(unittest.TestCase):
 
     def test_preflight_proves_each_served_contract_live_and_refuses_a_missing_or_ungranted_tool(self):
         replies = {"--version": sh.R(0, "0.26.6\n", "", []), "--help": sh.R(0, " ".join(qwen.FLAGS), "", [])}
-        seen = []
+        seen, systems = [], []
 
         def turn(i, name, args, error=None):
             return [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": f"p{i}", "name": name, "input": args}]}},
@@ -443,16 +457,19 @@ class QwenTests(unittest.TestCase):
 
         def recorded(mode):
             """A transcript per call: the read proof always passes; a live proof's shell call is granted, declined by
-            Qwen Code (the untrusted folder's headless default: no hook record) or refused by the hook."""
+            Qwen Code (the untrusted folder's headless default: no hook record) or refused by the hook; under the
+            sandbox, with no hook record, it runs or the sandbox refuses it."""
             def run(argv, cwd=None, prompt=None, timeout=None, env=None):
                 system = pathlib.Path(env["QWEN_CODE_SYSTEM_SETTINGS_PATH"])
                 trust = json.loads(pathlib.Path(env["QWEN_CODE_TRUSTED_FOLDERS_PATH"]).read_text(encoding="utf-8"))
                 seen.append((argv[argv.index("--approval-mode") + 1], trust.get(str(pathlib.Path(cwd).resolve()))))
+                systems.append(json.loads(system.read_text(encoding="utf-8")))
                 if "readiness.txt" in prompt:
                     events, hooked, finding = turn(0, "read_file", {"file_path": "readiness.txt"}), [{"tool": "read_file", "granted": True}], "ouro-ready"
                 else:
                     shell = {"granted": (None, True), "missing": ("permission was declined.", None),
-                             "ungranted": ("ouro: command is not on the node's approved list", False)}[mode]
+                             "ungranted": ("ouro: command is not on the node's approved list", False),
+                             "sandboxed": (None, None), "sandbox-refused": ("bwrap: Operation not permitted", None)}[mode]
                     events = turn(1, "run_shell_command", {"command": qwen.LISTED}, shell[0])
                     hooked = [] if shell[1] is None else [{"tool": "run_shell_command", "command": qwen.LISTED, "granted": shell[1]}]
                     if qwen.ASKS["write"] in prompt:
@@ -481,19 +498,36 @@ class QwenTests(unittest.TestCase):
                 preflight(mode, developer.Settings("qwen"), None)
         with self.assertRaisesRegex(sh.DriverError, r"the PROBE contract's run proof failed"):
             preflight("ungranted", dataclasses.replace(developer.Settings("qwen"), serves={"triager": READ, "reviewer": PROBE}), None)
+        # ship.review_sandbox: the PROBE call launches with the review node's sandbox settings and no hook, and the
+        # transcript alone proves the listed command ran.
+        sandboxed = dataclasses.replace(developer.Settings("qwen"), serves={"triager": READ, "reviewer": SANDBOXED_PROBE})
+        del seen[:], systems[:]
+        self.assertEqual(len(preflight("sandboxed", sandboxed, None)), 2)
+        self.assertEqual(seen[-1], ("yolo", "TRUST_FOLDER"))
+        self.assertEqual(systems[-1]["tools"], {"executionSandbox": qwen_isolation.SANDBOX})
+        self.assertNotIn("hooks", systems[-1])
+        self.assertLessEqual(set(qwen_isolation.SANDBOX_DENIED), set(systems[-1]["permissions"]["deny"]))
+        self.assertIn("hooks", systems[0], "the file-read proof keeps the hook")
+        with self.assertRaisesRegex(sh.DriverError, r"PROBE contract's run proof failed \(call observed False, hook observed none: sandboxed\)"):
+            preflight("sandbox-refused", sandboxed, None)
+        with self.assertRaisesRegex(sh.DriverError, r"PROBE contract's run proof failed \(call observed False, hook observed none: sandboxed\)"):
+            preflight("missing", sandboxed, None)
         with tempfile.TemporaryDirectory() as root:
             run = {"tool": "run", "path": None, "command": qwen.LISTED, "error": None}
             write = {"tool": "write", "path": qwen.WRITTEN, "error": None}
             hooked = [{"tool": "run_shell_command", "granted": True}, {"tool": "write_file", "granted": True}]
             qwen.contract_proof("BUILD", ("run", "write"), {"tool_calls": [run, write], "hook": hooked}, root)
-            for usage, message in (({"tool_calls": [write], "hook": hooked}, "run proof failed .call observed False, hook observed True"),
-                                   ({"tool_calls": [{**run, "command": "git status"}, write], "hook": hooked},
-                                    "run proof failed .call observed False, hook observed True"),
-                                   ({"tool_calls": [run, write], "hook": hooked[1:]}, "run proof failed .call observed True, hook observed False"),
-                                   ({"tool_calls": [run, {**write, "path": "../x.txt"}], "hook": hooked}, "write proof failed .call observed False"),
-                                   ({"tool_calls": [run, write], "hook": [hooked[0], {"tool": "write_file", "granted": False}]},
-                                    "write proof failed .call observed True, hook observed False")):
-                with self.subTest(message=message), self.assertRaisesRegex(sh.DriverError, message):
+            for case, usage, message in (
+                    ("no run call", {"tool_calls": [write], "hook": hooked}, "run proof failed .call observed False, hook observed True"),
+                    ("another command", {"tool_calls": [{**run, "command": "git status"}, write], "hook": hooked},
+                     "run proof failed .call observed False, hook observed True"),
+                    ("run not hooked", {"tool_calls": [run, write], "hook": hooked[1:]},
+                     "run proof failed .call observed True, hook observed False"),
+                    ("write outside", {"tool_calls": [run, {**write, "path": "../x.txt"}], "hook": hooked},
+                     "write proof failed .call observed False"),
+                    ("write refused", {"tool_calls": [run, write], "hook": [hooked[0], {"tool": "write_file", "granted": False}]},
+                     "write proof failed .call observed True, hook observed False")):
+                with self.subTest(case=case), self.assertRaisesRegex(sh.DriverError, message):
                     qwen.contract_proof("BUILD", ("run", "write"), usage, root)
 
     def test_the_hook_blocks_ungranted_tools_admits_granted_ones_and_fails_closed(self):
@@ -541,12 +575,14 @@ class QwenTests(unittest.TestCase):
                 policies[name].write_text(json.dumps({"root": str(root), "commands": commands, "probe": probe}), encoding="utf-8")
 
             def hook(policy, command, **extra):
-                argv = shlex.split(qwen_isolation.hook_command(evidence, policies[policy]))
+                argv = qwen_isolation.hook_argv(qwen_isolation.hook_command(evidence, policies[policy]))
                 event = {"tool_name": "run_shell_command", "tool_input": {"command": command, **extra}}
-                return subprocess.run(argv, input=json.dumps(event), capture_output=True, text=True, timeout=60).returncode
+                return subprocess.run(argv, input=json.dumps(event), capture_output=True, text=True, timeout=60)
             admitted = [("listed", "python3 check.py"), ("listed", " python3 check.py "), ("listed", "git diff --stat HEAD"),
                         ("probe", "git status"), ("probe", "python3 -c 'print(1)'"), ("probe", 'grep -rn "a|b" src'),
                         ("probe", "ls"), ("probe", "git -C . status"), ("probe", "grep -n a# src"), ("probe", "/usr/lib/git-core/git-log --oneline"),
+                        ("probe", "ls *.py"), ("probe", "grep -E '[a-z]+' f"), ("probe", "echo {a,b}"), ("probe", "echo {1..3}"),
+                        ("probe", "env GIT_CONFIG_NOSYSTEM=1 ls"), ("probe", "ls [ab].py"), ("probe", "grep \"x[ab]\" 'f g'"),
                         ("listed","python3 check.py", {"directory": str(root)}),
                         ("listed", "python3 check.py", {"is_background": False, "description": "the check"})]
             refused = [("listed", "python3 other.py"), ("listed", "python3 check.py --flag"), ("listed", "git log"),
@@ -566,17 +602,33 @@ class QwenTests(unittest.TestCase):
                        ("probe", "git config ALIAS.p '!true'"), ("probe", "/usr/lib/git-core/git-push origin HEAD"),
                        ("probe", "/usr/lib/git-core/git-commit --allow-empty -m x"),
                        ("probe", "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p origin HEAD"),
-                       ("probe", "env git_config_parameters=x git p")]
+                       ("probe", "env git_config_parameters=x git p"), ("probe", "grep 'x$' f"), ("probe", "{g,x}it push"),
+                       ("probe", "{f..h}it status"), ("probe", "/usr/lib/git-core/git-pu?h origin HEAD"),
+                       ("probe", "/usr/bin/g[^x]t push"), ("probe", "/usr/bin/g[[:alpha:]]t push"), ("probe", "g?t.exe push"),
+                       ("probe", "/usr/bin/g[!I]t push origin HEAD"), ("probe", "/usr/bin/g[^A-Z]t push origin HEAD"),
+                       ("probe", "/usr/bin/g[[=i=]]t push origin HEAD"), ("probe", "/usr/bin/g[[.i.]]t push origin HEAD"),
+                       ("probe", "/usr/bin/[!F-H]h pr merge 1"), ("probe", r"/usr/bin/g[\!iI]t push origin HEAD"),
+                       ("probe", '/usr/bin/g["!"iI]t push origin HEAD'), ("probe", "/usr/bin/g['^'iI]t push origin HEAD"),
+                       ("probe", r"/usr/bin/g[i\]]t push origin HEAD"), ("probe", r"/usr/bin/[\!gG]h pr merge 1"),
+                       ("probe", "/usr/bin/g[\x0bi]t push origin HEAD"), ("probe", "/usr/bin/g[\x0ci]t commit -m x"),
+                       ("probe", "/usr/bin/g[\xa0i]t push origin HEAD"), ("probe", "/usr/bin/[\x1fg]h pr merge 1"),
+                       ("probe", r"/usr/bin/g[\!iI]t commit -m x"), ("probe", "gi?.[e]xe push"), ("probe", "gi*e push"),
+                       ("probe", "/usr/lib/git-core/git-pus*.?xe origin HEAD"),
+                       ("probe", "echo {a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}"), ("probe", "echo {1..100000}"),
+                       ("probe", "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x git status"),
+                       ("probe", 'git {commit,"-m}"} --allow-empty'), ("probe", 'git {push,"-o}"}'), ("probe", "git {push,'}'}"),
+                       ("probe", r"git {push,\}}"), ("probe", "git \"x\"{push,}")]
             for policy, command, *extra in admitted:
                 with self.subTest(policy=policy, command=command, extra=extra):
-                    self.assertEqual(hook(policy, command, **(extra[0] if extra else {})), 0)
+                    self.assertEqual(hook(policy, command, **(extra[0] if extra else {})).returncode, 0)
             for policy, command, *extra in refused:
                 with self.subTest(policy=policy, command=command, extra=extra):
-                    self.assertEqual(hook(policy, command, **(extra[0] if extra else {})), 2)
+                    self.assertEqual(hook(policy, command, **(extra[0] if extra else {})).returncode, 2)
+            self.assertIn("no whitespace but space and tab", hook("probe", "grep \"a\xa0b\" f").stderr)
             logged = [json.loads(line) for line in evidence.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(logged[0], {"tool": "run_shell_command", "command": "python3 check.py", "granted": True})
             self.assertEqual(logged[len(admitted)], {"tool": "run_shell_command", "command": "python3 other.py", "granted": False})
-            no_policy = shlex.split(qwen_isolation.hook_command(evidence))
+            no_policy = qwen_isolation.hook_argv(qwen_isolation.hook_command(evidence))
             event = json.dumps({"tool_name": "run_shell_command", "tool_input": {"command": "ls"}})
             self.assertEqual(subprocess.run(no_policy, input=event, capture_output=True, text=True, timeout=60).returncode, 2)
             missing = [*no_policy[:2], f"{no_policy[2]},run_shell_command", no_policy[3]]  # the shell granted with no policy file
@@ -605,7 +657,7 @@ class QwenTests(unittest.TestCase):
                                                       "edit": edit}), encoding="utf-8")
 
             def hook(tool, args, policy="build", edit=True):
-                argv = shlex.split(qwen_isolation.hook_command(evidence, policies[policy], edit))
+                argv = qwen_isolation.hook_argv(qwen_isolation.hook_command(evidence, policies[policy], edit))
                 event = {"tool_name": tool, "tool_input": args}
                 return subprocess.run(argv, input=json.dumps(event), capture_output=True, text=True, timeout=60).returncode
             admitted = [("write_file", {"file_path": "src/a.py", "content": "x"}),
@@ -634,3 +686,62 @@ class QwenTests(unittest.TestCase):
             self.assertEqual(logged[len(admitted)], {"tool": "write_file", "path": ".claude/rules/x.md", "granted": False,
                                                      "input": {"file_path": ".claude/rules/x.md", "content": "x"}})
             self.assertEqual(logged[-1], {"tool": "write_file", "granted": False})
+
+    def test_the_hook_command_is_quoted_for_the_shell_qwen_code_runs_it_under(self):
+        for env, windows, shell in (({}, False, "bash"), ({"MSYSTEM": "MINGW64"}, False, "bash"), ({}, True, "cmd"),
+                                    ({"ComSpec": r"C:\Windows\system32\cmd.exe", "TERM": "xterm-256color"}, True, "cmd"),
+                                    ({"MSYSTEM": "MINGW64"}, True, "bash"), ({"MSYSTEM": "MSYS"}, True, "bash"),
+                                    ({"TERM": "cygwin"}, True, "bash"), ({"TERM": "xterm-msys"}, True, "bash"),
+                                    ({"ComSpec": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"}, True, "powershell"),
+                                    ({"ComSpec": r"C:\Program Files\PowerShell\7\PWSH.EXE"}, True, "powershell")):
+            with self.subTest(env=env, windows=windows):
+                self.assertEqual(qwen_isolation.hook_shell(env, windows), shell)
+        folder = r"C:\Users\RUNNER~1\AppData\Local\Temp\a~1,b'$#"
+        argv = [r"C:\Python312\python.exe", r"C:\ouro\bin\ouro\runtime\qwen_hook.py",
+                "read_file,glob,grep_search,structured_output,run_shell_command", folder + r"\hook.jsonl", folder + r"\policy.json"]
+        with patch.object(sys, "executable", argv[0]), patch.object(qwen_isolation, "HOOK", pathlib.PureWindowsPath(argv[1])):
+            def command(shell, evidence=argv[3]):
+                with patch.object(qwen_isolation, "hook_shell", return_value=shell):
+                    made = qwen_isolation.hook_command(evidence, argv[4])
+                    return made, qwen_isolation.hook_argv(made)
+            self.assertEqual(command("bash"), (shlex.join(argv), argv))
+            self.assertEqual(command("cmd"), (" ".join(argv), argv))
+            spaced = r"C:\Users\Some One\hook.jsonl"
+            self.assertEqual(command("bash", spaced)[1], [*argv[:3], spaced, argv[4]])
+            for bad in ' \t"&|<>^%':
+                with self.subTest(bad=bad), self.assertRaisesRegex(sh.DriverError, re.escape(f"holds {bad!r}, which cmd.exe cannot")):
+                    command("cmd", rf"C:\a{bad}b\hook.jsonl")
+            with self.assertRaisesRegex(sh.DriverError, "ComSpec names PowerShell"):
+                command("powershell")
+
+    def test_cmd_exe_hands_the_hook_its_arguments_unchanged(self):
+        if os.name != "nt":
+            print("  SKIP: the cmd.exe rows of the hook command run on Windows only")
+            return
+        comspec = os.environ.get("ComSpec") or "cmd.exe"
+
+        def launch(command, stdin=""):
+            # Qwen Code's hook launch: Node spawns [ComSpec, /d, /s, /c, command] without verbatim arguments, which quotes the
+            # line as list2cmdline does; the string goes to CreateProcess as it is.
+            return subprocess.run(subprocess.list2cmdline([comspec, "/d", "/s", "/c", command]), input=stdin,
+                                  capture_output=True, text=True, encoding="utf-8", timeout=60)
+        with tempfile.TemporaryDirectory() as d, patch.dict(os.environ):
+            for key in ("MSYSTEM", "TERM"):
+                os.environ.pop(key, None)
+            self.assertEqual(qwen_isolation.hook_shell(), "cmd")
+            folder = pathlib.Path(d, "a~1,b'$#")  # under TEMP, an 8.3 short path on the Windows leg
+            folder.mkdir()
+            echo, evidence, policy = folder / "echo.py", folder / "hook.jsonl", folder / "policy.json"
+            echo.write_text("import json, sys\nprint(json.dumps(sys.argv))\n", encoding="utf-8")
+            with patch.object(qwen_isolation, "HOOK", echo):
+                r = launch(qwen_isolation.hook_command(evidence, policy, edit=True))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout), [str(echo), ",".join((*qwen_isolation.ALLOWED, qwen_isolation.SHELL,
+                                                                           *qwen_isolation.WRITES)), str(evidence), str(policy)])
+            command = qwen_isolation.hook_command(evidence)
+            for tool, code in (("read_file", 0), ("run_shell_command", 2)):
+                with self.subTest(tool=tool):
+                    r = launch(command, json.dumps({"tool_name": tool, "tool_input": {}}))
+                    self.assertEqual(r.returncode, code, r.stderr)
+            self.assertEqual([(e["tool"], e["granted"]) for e in map(json.loads, evidence.read_text(encoding="utf-8").splitlines())],
+                             [("read_file", True), ("run_shell_command", False)])

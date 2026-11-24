@@ -159,7 +159,7 @@ def read_path(value, root, ready):
 
 
 def execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, settings):
-    with diagnostics.attempt(name, "codex", model) as diagnostic:
+    with diagnostics.attempt(name, "codex", model, settings.effort) as diagnostic:
         return _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, settings, diagnostic)
 
 
@@ -187,10 +187,17 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
         bridge = {"ouro": {"command": sh.which("python3"),
                   "args": [str(Path(__file__).with_name("tools.py")), str(scratch / "policy.json")],
                   "required": True, "tool_timeout_sec": 660, "default_tools_approval_mode": "approve"}}
-        # MCP's default environment omits CODEX_HOME. Preserve the caller's exact
-        # configuration context, including aliases that PROBE admission must refuse.
-        if "CODEX_HOME" in os.environ:
-            bridge["ouro"]["env"] = {"CODEX_HOME": os.environ["CODEX_HOME"]}
+        # MCP's default environment omits CODEX_HOME, and a PROBE launch's HOME is private: name the caller's
+        # configuration home, a declared one verbatim, so PROBE admission still refuses an alias.
+        codex_home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+        bridge["ouro"]["env"] = {"CODEX_HOME": codex_home}
+        (scratch / "gh").mkdir()
+        # The bridge's commands get the same removals there: Codex hands an MCP server a filtered environment.
+        env = {**worker_env(settings), **process.probe_env(tools.probe, scratch / "gh")}
+        if tools.probe:
+            home = process.private_home(scratch)
+            env.update(home, CODEX_HOME=codex_home)
+            bridge["ouro"]["env"].update(home)
         # Resolve .cmd/.ps1 Python launchers in the same way as every driver subprocess.
         bridge["ouro"]["command"], *bridge["ouro"]["args"] = [*sh.argv_for("python3"), *bridge["ouro"]["args"]]
         argv = [*sh.argv_for("codex"), "-a", "never", "exec", "--ignore-user-config", "--ignore-rules",
@@ -209,9 +216,6 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
                     "task-owned partial files and retained logs, preserve unrelated edits before a normal run; "
                     "stop if ownership or liveness is unproved. Require a new completed BUILD and fresh "
                     "exact-head proof/review" if name == "BUILD" else "")
-        # The bridge's commands get the same removals there: Codex hands an MCP server a filtered environment.
-        (scratch / "gh").mkdir()
-        env = {**worker_env(settings), **process.probe_env(tools.probe, scratch / "gh")}
         try:
             r = process.run([*argv, "-"], cwd=cwd, prompt=prompt, timeout=timeout, env=env,
                             observe=lambda output, code: diagnostics.transport(diagnostic, output, code),

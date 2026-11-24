@@ -103,10 +103,12 @@ def promoted(n, t=None, **kw):
     return issue(n, kw.pop("created", d(1)), [(t or d(10, 10), "+", "agent-ready")] + events, **kw)
 
 
-def pr(n, body, state="MERGED", merged=None, oid=None, comments=()):
-    return {"number": n, "state": state, "mergedAt": merged, "body": body,
+def pr(n, body, state="MERGED", merged=None, oid=None, comments=(), head=None, commits=()):
+    """commits: (message, authoredDate) of the head's commits."""
+    return {"number": n, "state": state, "mergedAt": merged, "body": body, "headRefName": head or f"topic/{n}",
             "mergeCommit": {"oid": oid} if oid else None,
-            "comments": conn([{"createdAt": t, "author": {"login": a}, "body": b} for t, a, b in comments])}
+            "comments": conn([{"createdAt": t, "author": {"login": a}, "body": b} for t, a, b in comments]),
+            "commits": conn([{"commit": {"message": m, "authoredDate": t}} for m, t in commits])}
 
 
 def fake(n):
@@ -123,7 +125,8 @@ def git_in(repo, *args, env=None):
 
 
 def make_repo(specs):
-    """A repository whose commits are specs: msg (or a function of the earlier shas), date, files."""
+    """A repository whose commits are specs: msg (or a function of the earlier shas), date, files, and an author date
+    other than date."""
     repo = pathlib.Path(tempfile.mkdtemp(prefix="repo-", dir=TMP))
     git_in(repo, "init", "-q", "-b", "main")
     shas = []
@@ -135,7 +138,7 @@ def make_repo(specs):
         msg = s["msg"](shas) if callable(s["msg"]) else s["msg"]
         git_in(repo, "add", "-A")
         git_in(repo, "commit", "-q", "--allow-empty", "-m", msg,
-               env={"GIT_AUTHOR_DATE": s["date"], "GIT_COMMITTER_DATE": s["date"]})
+               env={"GIT_AUTHOR_DATE": s.get("author", s["date"]), "GIT_COMMITTER_DATE": s["date"]})
         shas.append(git_in(repo, "rev-parse", "HEAD"))
     git_in(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     lo.GIT_CWD = str(repo)
@@ -965,7 +968,7 @@ def quality_pr_rows():
           none_only["median"] is None and none_only["max"] is None and none_only["counted"] == 0)
     check("control: the week with PRs and no line reads them as no line, not as clean",
           lo.pr_figures([None, None])["no_line"] == 2 and lo.pr_figures([None, None])["line"] == 0)
-    text = lo.render_quality(got, [], at("2026-09-01"), at(NOW))
+    text = lo.render_quality(got, {}, {}, [], at("2026-09-01"), at(NOW))
     row = next(x for x in text.splitlines() if x.startswith("| 2026-W37 |"))
     cells = [c.strip() for c in row.strip("|").split("|")]
     check("W37 row: landed, line, none, no line, unread", cells[1:6] == ["7", "5", "1", "2", "1"])
@@ -1038,16 +1041,217 @@ def flake_rows():
           verdict.get((19, 1)) is False and verdict.get((19, 2)) is False)
     flaky = sum(verdict.values())
     check("4 flaky and 8 failed of the 12 failed attempts", (flaky, len(verdict) - flaky) == (4, 8))
-    text = lo.render_quality({}, got, at("2026-09-01"), at(NOW))
+    text = lo.render_quality({}, {}, {}, got, at("2026-09-01"), at(NOW))
     row = next(x for x in text.splitlines() if x.startswith("| all |"))
     cells = [c.strip() for c in row.strip("|").split("|")]
     check("the all row reads the flake figures: 12 failed attempts, 4 flaky, 8 failed, 33% (4/12)", cells[-4:] == ["12", "4", "8", "33% (4/12)"])
     check("the weeks are by the failed attempt's start", "| 2026-W37 |" in text)
-    empty = lo.render_quality({}, [], at("2026-09-01"), at(NOW))
+    empty = lo.render_quality({}, {}, {}, [], at("2026-09-01"), at(NOW))
     weeks = [x.split("|")[1].strip() for x in empty.splitlines() if x.startswith("| 20") or x.startswith("| all")]
     check("every ISO week from --since to now has a row, zero-filled, then all",
           weeks == ["2026-W36", "2026-W37", "2026-W38", "2026-W39", "2026-W40", "2026-W41", "all"])
     check("with no run the rate reads n/a, not 0%", "n/a" in empty and "0%" not in empty)
+
+
+# ---- the quality table: turns per node ---------------------------------------------------------
+
+
+def record(usage):
+    return f"<!-- ouro-record: {json.dumps({'flow': 'standard', 'usage': usage})} -->"
+
+
+def turns_rows():
+    def row(node, session, turns):
+        return {"node": node, "session": session, "input": 1, "output": 2, "cache_read": 0,
+                "cache_creation": 0, "cost": None, "backend": "claude", "turns": turns}
+    usage = [row("BUILD", "s1", 7), row("REVIEW", "s2", 3), row("FOLLOWUP", "s3", None), row("PREFLIGHT", "s0", 9)]
+    check("turns_of reads each BUILD, REVIEW and FOLLOWUP row of the record, a missing count as None, and no other node",
+          lo.turns_of("Fixes #1\n" + record(usage)) == [("BUILD", 7), ("REVIEW", 3), ("FOLLOWUP", None)])
+    check("a count of 0 stays 0, not unknown", lo.turns_of(record([row("BUILD", "s1", 0)])) == [("BUILD", 0)])
+    check("a record whose usage is the table a record drew before it kept rows, no record, or an unreadable one, holds no turns",
+          [lo.turns_of(b) for b in (record("| node | session |\n|---|---|\n| BUILD | s1 |"), "Fixes #1", "<!-- ouro-record: {x -->")]
+          == [None, None, None])
+    iss = [promoted(1, body="Size: S"), promoted(2, body="Size: S")]
+    prs = [pr(5, "Fixes #1\n" + record(usage), merged=d(11), oid=fake(5)), pr(6, "Fixes #2", merged=d(11), oid=fake(6))]
+    with tempfile.TemporaryDirectory(dir=TMP) as cache:
+        for name, data in (("issues.json", iss), ("prs.json", prs), ("runs.json", [])):
+            pathlib.Path(cache, name).write_text(json.dumps(data), encoding="utf-8")
+        with patched(binding=fake_binding(), first_parent=lambda ref: BASE_COMMITS):
+            code, out, err = call_main(["--from-cache", cache, "--since", "2026-09-01"])
+    lines = out.splitlines()
+    head = next((x for x in lines if x.startswith("| Week |")), "")
+    w37 = next((x for x in lines if x.startswith("| 2026-W37 |")), "")
+    cells = dict(zip([c.strip() for c in head.strip("|").split("|")], [c.strip() for c in w37.strip("|").split("|")]))
+    check("--from-cache on a record with turns and one without: the BUILD and REVIEW columns hold the first's count "
+          "and one unknown for the second", code == 0 and cells.get("BUILD turns") == "7/7, unknown 1"
+          and cells.get("REVIEW turns") == "3/3, unknown 1")
+    check("FOLLOWUP: the row with no count and the PR with no turns are two unknowns, never a zero",
+          cells.get("FOLLOWUP turns") == "n/a, unknown 2")
+    check("the turns columns sit before the flake columns", cells.get("Failed attempts") == "0")
+
+
+# ---- the quality table: follow-ups filed per landing ---------------------------------------------
+
+URL = "https://github.com/o/r/issues/"
+LISTED = f"**Follow-ups filed**\n\n- {URL}201\n- {URL}202\n- #150 Cleanup: gates (appended)\n"
+PARTIAL = (f"**Follow-ups filed**\n\n- {URL}203\n\nNot filed, a resume files them: gh failed\n\n- Second title\n- Cleanup\n\n"
+           '<!-- ouro-pending: [{"title": "Second title"}, {"title": "Cleanup"}] -->\n')
+ROUTED = (f"**Follow-ups filed**\n\n- {URL}207 (route: issue)\n- {URL}208 (route: idea)\n"
+          "- #150 Cleanup: gates (appended) (route: ledger) — Cleanup: gates, filed with anchors that do not resolve at abc1234: a\n")
+
+
+def follow_up_rows():
+    def of(*comments):
+        return lo.follow_ups_of(pr(1, "", comments=comments)["comments"]["nodes"], {"owner"})
+    check("a comment with no routes listing two issues and one ledger append counts its issues under issue: 2, 0 and 1",
+          of((d(11), "github-actions", LISTED)) == (2, 0, 1))
+    check("a comment with one entry of each route reads 1 issue, 1 idea and 1 ledger line",
+          of((d(11), "github-actions", ROUTED)) == (1, 1, 1))
+    check("the route tag decides over the entry's text: a tagged issue titled as a ledger is an issue, an idea is no issue",
+          of((d(11), "github-actions", f"**Follow-ups filed**\n\n- #151 Cleanup (appended) (route: issue)\n- {URL}209 (route: idea)\n"))
+          == (1, 1, 0))
+    check("a comment that says none, and no comment, each read 0",
+          of((d(11), "github-actions", "**Follow-ups filed**\n\nnone\n")) == (0, 0, 0) and of() == (0, 0, 0))
+    gap = "\n\nResidue routes not tied to the record:\n- the review routes no item 'a leftover', so it is filed as `issue`\n"
+    check("the bullets of the gap section after the entries are not counted: one idea and a gap read 0, 1 and 0",
+          of((d(11), "github-actions", f"**Follow-ups filed**\n\n- {URL}209 (route: idea)" + gap)) == (0, 1, 0))
+    check("a comment that says none and carries a gap section reads 0",
+          of((d(11), "github-actions", "**Follow-ups filed**\n\nnone" + gap)) == (0, 0, 0))
+    check("a comment from an untrusted author is not counted", of((d(11), "stranger", LISTED)) == (0, 0, 0))
+    check("control: the same comment by an approver, in another case, is counted", of((d(11), "Owner", LISTED)) == (2, 0, 1))
+    check("the entries after a Not filed line are not counted", of((d(11), "github-actions", PARTIAL)) == (1, 0, 0))
+    check("the newest trusted comment alone counts: a resume's comment repeats the earlier entries",
+          of((d(12), "github-actions", LISTED), (d(11), "github-actions", PARTIAL), (d(13), "stranger", PARTIAL)) == (2, 0, 1))
+    ledgers = [f"{URL}204 (ledger filed)", f"{URL}205 (ledger filed, without the label 'x', which [labels].area does not declare)",
+               "#150 Cleanup (reopened)", "#150 Cleanup: gates (appended) — Cleanup: gates, filed with anchors that do not resolve at abc1234: a"]
+    issues = [f"{URL}206", "Cleanup: gates (appended)", "#151 A title (appended)"]
+    body = "**Follow-ups filed**\n\n" + "".join(f"- {x}\n" for x in ledgers + issues)
+    check("with no route, a ledger filed, reopened or appended to is a ledger line; an issue's entry is not, whatever its text",
+          of((d(11), "github-actions", body)) == (3, 0, 4))
+    comments = {5: LISTED, 6: "**Follow-ups filed**\n\nnone\n", 8: LISTED, 9: PARTIAL, 10: ROUTED}
+    authors, merged = {8: "stranger"}, {9: 15, 10: 22}
+    iss = [promoted(n, body="Size: S") for n in range(5, 11)]
+    prs = [pr(n, f"Fixes #{n}", merged=d(merged.get(n, 11)), oid=fake(n),
+              comments=[(d(23), authors.get(n, "github-actions"), comments[n])] if n in comments else ())
+           for n in range(5, 11)]
+    with tempfile.TemporaryDirectory(dir=TMP) as cache:
+        for name, data in (("issues.json", iss), ("prs.json", prs), ("runs.json", [])):
+            pathlib.Path(cache, name).write_text(json.dumps(data), encoding="utf-8")
+        with patched(binding=fake_binding(), first_parent=lambda ref: BASE_COMMITS):
+            code, out, err = call_main(["--from-cache", cache, "--since", "2026-09-01"])
+    lines = out.partition("## Quality")[2].splitlines()  # the outcome tables above it hold `| all |` rows of their own
+    head = [c.strip() for c in next((x for x in lines if x.startswith("| Week |")), "").strip("|").split("|")]
+
+    def four(week):
+        row = dict(zip(head, [c.strip() for c in next((x for x in lines if x.startswith(f"| {week} |")), "").strip("|").split("|")]))
+        return [row.get(k) for k in ("Follow-up issues", "Issues per landing", "Follow-up ideas", "Ledger lines")]
+    check("--from-cache: W37's four landings (two issues and a ledger append with no routes, none, no comment, an untrusted "
+          "comment) read 2 issues, 0.50 per landing, 0 ideas, 1 ledger line", code == 0 and four("2026-W37") == ["2", "0.50", "0", "1"])
+    check("--from-cache: W38's landing counts only the entry before its Not filed line", four("2026-W38") == ["1", "1.00", "0", "0"])
+    check("--from-cache: W39's landing with one entry of each route reports 1, 1 and 1", four("2026-W39") == ["1", "1.00", "1", "1"])
+    check("--from-cache: the all row sums them over the six landings", four("all") == ["4", "0.67", "1", "2"])
+    check("a week with no landing has no rate per landing", four("2026-W36") == ["0", "n/a", "0", "0"])
+    check("the follow-up columns sit between the turns and the flake columns, ideas between the rate and the ledger lines",
+          head.index("FOLLOWUP turns") + 1 == head.index("Follow-up issues") and head.index("Issues per landing") + 1
+          == head.index("Follow-up ideas") and head.index("Follow-up ideas") + 1 == head.index("Ledger lines")
+          and head.index("Ledger lines") + 1 == head.index("Failed attempts"))
+
+
+# ---- direct publications per week -------------------------------------------------------------
+
+
+def direct_rows():
+    repo, shas = make_repo([
+        {"msg": "init", "date": "2026-08-20T00:00:00Z", "files": {"a.txt": "x\n"}},
+        {"msg": "docs: issue-bound direct\n\nFixes #96", "date": d(8), "files": {"a.txt": "y\n"}},
+        {"msg": "docs: issue-less direct", "date": d(9), "files": {"a.txt": "z\n"}},
+        {"msg": "docs: a squash (#97)\n\nFixes #98", "date": d(10), "files": {"a.txt": "w\n"}},
+        {"msg": "Merge pull request 100 from o/b\n\nFixes #101", "date": d(10), "files": {"a.txt": "v\n"}},
+        {"msg": "chore: issue-less, next week", "date": d(15), "files": {"a.txt": "u\n"}},
+    ])
+    commits = lo.first_parent("origin/main")
+    got = lo.direct_publications([pr(100, "Fixes #101", merged=d(10), oid=shas[4])], commits, at("2026-09-01"))
+    check("a first-parent commit with no (#PR) subject is a direct publication, with or without a Fixes line, by week",
+          got == {"2026-W37": [False, True], "2026-W38": [False]})
+    check("control: with no pull request named, the merge commit with no (#PR) subject counts too",
+          lo.direct_publications([], commits, at("2026-09-01"))["2026-W37"].count(True) == 2)
+    check("a commit before --since is left out, and a (#PR) subject is no direct publication",
+          sum(len(v) for v in lo.direct_publications([], commits, at("2026-08-01")).values()) == 5)
+    text = lo.render_direct(got, at("2026-09-01"), at(NOW))
+    rows = {x.split("|")[1].strip(): [c.strip() for c in x.strip("|").split("|")[1:]] for x in text.splitlines()
+            if x.startswith("| 20") or x.startswith("| all")}
+    check("the W37 row reads 2 direct, 1 with a Fixes line, 1 issue-less", rows.get("2026-W37") == ["2", "1", "1"])
+    check("the all row sums the weeks: 3 direct, 1 with a Fixes line, 2 issue-less", rows.get("all") == ["3", "1", "2"])
+    check("every ISO week from --since to now has a row, zero-filled", rows.get("2026-W40") == ["0", "0", "0"]
+          and list(rows)[0] == "2026-W36")
+    with tempfile.TemporaryDirectory(dir=TMP) as cache:
+        for name, data in (("issues.json", []), ("prs.json", []), ("runs.json", [])):
+            pathlib.Path(cache, name).write_text(json.dumps(data), encoding="utf-8")
+        with patched(binding=fake_binding(), first_parent=lambda ref: commits):
+            code, out, err = call_main(["--from-cache", cache, "--since", "2026-09-01"])
+    section_text = out.partition("## Direct publications")[2]
+    check("--from-cache: the report prints the direct publications after the quality table, issue-less ones counted",
+          code == 0 and out.index("## Quality") < out.index("## Direct publications")
+          and "| 2026-W38 | 1 | 0 | 1 |" in section_text)
+
+
+def vehicle_rows():
+    repo, shas = make_repo([
+        {"msg": "init", "date": "2026-08-20T00:00:00Z", "files": {"a.txt": "x\n"}},
+        {"msg": "docs: plain push", "date": d(8), "files": {"a.txt": "y\n"}},
+        {"msg": "docs: squash vehicle (#110)\n\nFixes #96", "date": d(9), "files": {"a.txt": "z\n"}},
+        {"msg": "docs: rebased\none", "date": d(15, 1), "author": d(14), "files": {"a.txt": "w\n"}},
+        {"msg": "docs: rebased two\n\nFixes #97", "date": d(15, 2), "author": d(14, 1), "files": {"a.txt": "v\n"}},
+        {"msg": "docs: rebased one", "date": d(16), "author": d(14, 5), "files": {"a.txt": "u\n"}},
+        {"msg": "Merge pull request 112 from o/direct/123456789012", "date": d(17), "files": {"a.txt": "t\n"}},
+    ])
+    commits = lo.first_parent("origin/main")
+    check("control: git's subject of a two-line first paragraph is what git_subject derives from the message",
+          commits[3]["subject"] == lo.git_subject("docs: rebased\none") == "docs: rebased one")
+    verbatim = pathlib.Path(tempfile.mkdtemp(prefix="verbatim-", dir=TMP))
+    git_in(verbatim, "init", "-q", "-b", "main")
+    differ = []
+    for message in ("a b  \n\nbody", "a\r\nb\r\n\r\nbody", "a\n \nb", "a\nb\n\nc", "  lead\n\nx", "a\tb\n", "a\n\n\nb",
+                    "\n \na\n"):
+        git_in(verbatim, "commit", "-q", "--allow-empty", "--cleanup=verbatim", "-m", message)
+        if git_in(verbatim, "log", "-1", "--format=[%s]") != f"[{lo.git_subject(message)}]":
+            differ.append(message)
+    check("git_subject is the subject git prints for a verbatim message: trailing whitespace, a CR and a "
+          "whitespace-only line included", differ == [])
+    check("first_parent reads the author date apart from the committer date",
+          commits[3]["authored"] == at(d(14)) and commits[3]["date"] == at(d(15, 1)))
+    prs = [pr(110, "Fixes #96", merged=d(9), oid=shas[2], head="direct/96"),
+           pr(111, "docs: rebased", merged=d(15, 2), oid=shas[4], head="direct/0123456789ab",
+              commits=[("docs: rebased\none", d(14)), ("docs: rebased two\n\nFixes #97", d(14, 1))]),
+           pr(112, "", merged=d(17), oid=shas[6], head="direct/123456789012"),
+           pr(113, "Fixes #98", state="CLOSED", head="direct/98", commits=[("docs: plain push", d(8))]),
+           pr(114, "", merged=d(16), oid=fake(114), head="topic/x", commits=[("docs: rebased one", d(14, 5))])]
+    got = {w: sorted(v) for w, v in lo.direct_publications(prs, commits, at("2026-09-01")).items()}
+    check("a squash-merged vehicle on direct/<Issue> counts once, naming an issue, beside the plain push of its week",
+          got.get("2026-W37") == [False, True])
+    check("a rebase-merged issue-less vehicle counts once and its rebased commits not at all; a 12-digit head is issue-less; "
+          "a commit of the same subject at another author date, or matching only a closed vehicle or a non-vehicle PR, "
+          "is a plain push", got.get("2026-W38") == [False, False, False])
+    no_match = [dict(p, commits=conn([])) for p in prs]
+    check("control: with no vehicle commits to match, the rebased commit that is no mergeCommit counts as a plain push",
+          len(lo.direct_publications(no_match, commits, at("2026-09-01"))["2026-W38"]) == 4)
+    check("control: on a non-vehicle head the same pull requests count nothing, and only the three plain pushes count",
+          sum(map(len, lo.direct_publications([dict(p, headRefName="topic/y") for p in prs], commits, at("2026-09-01")).values())) == 3)
+    with tempfile.TemporaryDirectory(dir=TMP) as cache:
+        def main_with(prs_json):
+            for name, data in (("issues.json", []), ("prs.json", prs_json), ("runs.json", [])):
+                pathlib.Path(cache, name).write_text(json.dumps(data), encoding="utf-8")
+            with patched(binding=fake_binding(), first_parent=lambda ref: commits):
+                return call_main(["--from-cache", cache, "--since", "2026-09-01"])
+        code, out, err = main_with(prs)
+        check("--from-cache: the W38 row reads 3 direct, none with a Fixes line",
+              code == 0 and "| 2026-W38 | 3 | 0 | 3 |" in out.partition("## Direct publications")[2])
+        old = [{k: v for k, v in p.items() if k not in ("headRefName", "commits")} for p in prs]
+        code, out, err = main_with(old)
+        check("a cache whose pull requests carry no headRefName is a failed read, never no vehicles",
+              code == 1 and "headRefName" in err and out == "")
+        code, out, err = main_with([{k: v for k, v in p.items() if k != "commits"} for p in prs])
+        check("a cache whose vehicles carry no commits is a failed read", code == 1 and "commits" in err and out == "")
 
 
 # ---- the comment flag, the cache, failed reads -----------------------------------------------
@@ -1159,7 +1363,9 @@ def issue_node(n, nxt):
             "timelineItems": conn([{"__typename": "LabeledEvent", "createdAt": "2026-09-01T00:00:00Z", "actor": {"login": "o"}, "label": {"name": "bug"}}], nxt)}
 EXTRA = {"userContentEdits": {"editedAt": "2026-09-03T00:00:00Z", "diff": "d2"},
          "comments": {"createdAt": "2026-09-03T00:00:00Z", "author": {"login": "o"}, "body": "c2"},
-         "timelineItems": {"__typename": "UnlabeledEvent", "createdAt": "2026-09-03T00:00:00Z", "actor": {"login": "o"}, "label": {"name": "bug"}}}
+         "timelineItems": {"__typename": "UnlabeledEvent", "createdAt": "2026-09-03T00:00:00Z", "actor": {"login": "o"}, "label": {"name": "bug"}},
+         "commits": {"commit": {"message": "m2", "authoredDate": "2026-09-03T00:00:00Z"}}}
+COMMIT1 = {"commit": {"message": "m1", "authoredDate": "2026-09-02T00:00:00Z"}}
 if argv[:2] == ["issue", "list"]:
     print(os.environ.get("STUB_ISSUES", "[]"))
 elif argv[:2] == ["issue", "create"]:
@@ -1174,7 +1380,7 @@ elif argv[:2] == ["api", "graphql"]:
     elif q == "stub-errors":
         print(json.dumps({"errors": [{"message": "stub-rejected"}]})); sys.exit(0)
     elif "issue(number: $n)" in q or "pullRequest(number: $n)" in q:
-        field = re.search(r"(timelineItems|comments|userContentEdits)\(first: 100, after: \$c", q).group(1)
+        field = re.search(r"(timelineItems|comments|userContentEdits|commits)\(first: 100, after: \$c", q).group(1)
         one = "issue" if "issue(number" in q else "pullRequest"
         data = {"repository": {one: {field: conn([EXTRA[field]])}}}
     elif "issues(first: 25" in q:
@@ -1184,8 +1390,13 @@ elif argv[:2] == ["api", "graphql"]:
         if "cursor" not in v:
             data["repository"]["issues"]["pageInfo"]["endCursor"] = "p1"
     elif "pullRequests(first: 25" in q:
+        if "headRefName" not in q or "commits(first: 100) { nodes { commit { message authoredDate } }" not in q:
+            print("stub: a pull-request query that does not select headRefName and the commits"); sys.exit(3)
         data = {"repository": {"pullRequests": conn([{"number": 5, "state": "MERGED", "mergedAt": "2026-09-11T00:00:00Z", "body": "Fixes #1",
-                "mergeCommit": {"oid": "a" * 40}, "comments": conn([{"createdAt": "2026-09-02T00:00:00Z", "author": {"login": "o"}, "body": "c1"}], True)}])}}
+                "headRefName": "topic/5", "mergeCommit": {"oid": "a" * 40}, "commits": conn([COMMIT1], True),
+                "comments": conn([{"createdAt": "2026-09-02T00:00:00Z", "author": {"login": "o"}, "body": "c1"}], True)},
+               {"number": 6, "state": "MERGED", "mergedAt": "2026-09-12T00:00:00Z", "body": "", "headRefName": "direct/6",
+                "mergeCommit": {"oid": "b" * 40}, "commits": conn([COMMIT1], True), "comments": conn([])}])}}
     else:
         print("stub: unanswered query " + q); sys.exit(3)
     print(json.dumps({"data": data}))
@@ -1231,8 +1442,11 @@ def stub_rows():
         check("fetch drains a truncated timeline, comment list and edit history",
               len(i1["timelineItems"]["nodes"]) == 2 and len(i1["comments"]["nodes"]) == 2 and len(i1["userContentEdits"]["nodes"]) == 2)
         check("fetch drains a pull request's comments", len(prs[0]["comments"]["nodes"]) == 2)
+        check("fetch drains a direct/ vehicle's truncated commits, and leaves another pull request's as the page gave them",
+              len(prs[1]["commits"]["nodes"]) == 2 and len(prs[0]["commits"]["nodes"]) == 1)
         made = calls()
-        check("fetch made 7 calls: 2 issue pages, 3 follow-ups, a PR page and its follow-up", len(made) == 7)
+        check("fetch made 8 calls: 2 issue pages, 3 follow-ups, a PR page, its comment follow-up and the vehicle's commit follow-up",
+              len(made) == 8)
         check("every call names the repository", all('owner: "o"' in c["argv"][-1] or 'owner: "o"' in " ".join(c["argv"]) for c in made)
               and all('name: "r"' in " ".join(c["argv"]) for c in made))
         log.unlink()
@@ -1416,7 +1630,7 @@ for name, fn in (("attempts", attempts_rows), ("size at promotion", size_rows), 
                  ("reverts", revert_rows), ("anchor-attributed bugs", anchor_rows), ("assisted", assisted_rows),
                  ("refusals and parking", refusal_rows), ("precision", precision_rows), ("checkpoints", checkpoint_rows),
                  ("open, abandoned, provisional", open_rows), ("report", report_rows), ("rates", rate_rows), ("reviewer findings", reviewer_rows), ("per round", per_round_rows), ("unchanged stop", unchanged_stop_rows), ("review line", review_rows), ("quality PR rows", quality_pr_rows),
-                 ("flake rate", flake_rows), ("comment flag and cache", flag_rows),
+                 ("flake rate", flake_rows), ("turns per node", turns_rows), ("follow-ups per landing", follow_up_rows), ("direct publications", direct_rows), ("direct PR vehicles", vehicle_rows),("comment flag and cache", flag_rows),
                  ("gh stand-in", stub_rows), ("runs fetch", runs_fetch_rows), ("resolver", resolver_rows), ("binding", binding_rows), ("usage", usage_rows),
                  ("vendored layout", vendored_rows)):
     section(name, fn)

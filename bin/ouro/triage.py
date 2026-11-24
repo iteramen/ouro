@@ -3,14 +3,16 @@ import json
 import re
 
 from . import briefs, developer, node, sh
-from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, declared_source, empty_list
+from .acceptance import acceptance_commands, acceptance_declarations, acceptance_problems, declared_source, empty_list, runners
+from .ledger import file_children, is_ledger, ledger_note, print_children
 from .records import REPO_POLICY, body_line, parse_parts, restamped, ship_policy
+from .related import closing_prs, duplicate_question, graphql_issue, on_default, pr_line, related_work
 from .run import Run
 from .sh import DriverError, argv_for, say
 
 STATE_LABELS = ("agent-ready", "human-ready", "needs-ruling", "blocked", "needs-triage", "idea")  # umbrella is cleared by its children closing, never by a re-triage
 MODIFIERS = ("checkpoint", "trivial")  # ride on agent-ready only
-VERDICTS = ("PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE")
+VERDICTS = ("PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE", "DUPLICATE")
 
 
 def label_moves(verdict, size, labels, named=()):
@@ -22,7 +24,7 @@ def label_moves(verdict, size, labels, named=()):
         add = ["agent-ready"]
     elif verdict == "CHECKPOINT":
         add = ["agent-ready", "checkpoint"]
-    elif verdict == "NEEDS-RULING":
+    elif verdict in ("NEEDS-RULING", "DUPLICATE"):  # a duplicate is proposed to the owner, never closed
         add = ["needs-ruling"]
     elif verdict == "BLOCKED":
         add = ["blocked"]
@@ -82,6 +84,7 @@ def with_manual(body, wanted):
 VERDICT_OPENING = re.compile(r"\A\s*(?:\*\*)?verdict(?:\*\*)?:(?:\*\*)?[ \t]*(?:\*\*)?[\w-]+(?:\*\*)?(?:[ \t]*\([^)\r\n]*\))?"
                              r"(?:[ \t]*[.,:]|[ \t]*(?:[\u2014\u2013]|-(?=\s))|[ \t]*(?:\r?\n|\Z))\s*", re.I)
 SPLIT_LINE = "The owner files the children this comment lists, by hand."
+LEDGER_SPLIT_LINE = "The driver files the children, posts the sweep mark that names them and triages each one."
 # the closing lines the driver writes itself, by verdict: a node's own copy of one, as its last line, is dropped
 DRIVER_TAILS = {"SPLIT": re.compile(r"(?im)\s*^[ \t]*the owner files (?:the|its) children\b[^\n]*\bby hand\b[^\n]*\s*\Z"),
                 "PROMOTE": re.compile(r"(?m)\s*^[ \t]*Parts:[ \t]*\S[^\n]*\s*\Z")}
@@ -112,14 +115,9 @@ ISSUE_TYPE_QUERY = "query($o:String!,$r:String!,$n:Int!){repository(owner:$o,nam
 def issue_type(env, n):
     """The issue's native GitHub type (an organization's issue types), or None; `gh issue view` does not expose it.
     A read that fails says so and leaves the labels to count, as the shape gate does."""
-    owner, repo = env.slug.split("/", 1)
-    r = env.gh("api", "graphql", "-f", f"query={ISSUE_TYPE_QUERY}", "-f", f"o={owner}", "-f", f"r={repo}", "-F", f"n={n}", check=False)
-    try:
-        issue = json.loads(r.out)["data"]["repository"]["issue"] if r.code == 0 else None
-    except (ValueError, KeyError, TypeError):
-        issue = None
-    if r.code != 0 or not isinstance(issue, dict):
-        say(f"issue type unreadable (gh exit {r.code}): the type labels alone count")
+    issue, code = graphql_issue(env, ISSUE_TYPE_QUERY, n)
+    if issue is None:
+        say(f"issue type unreadable (gh exit {code}): the type labels alone count")
         return None
     return (issue.get("issueType") or {}).get("name")
 
@@ -135,16 +133,7 @@ def referencing_prs(env, n):
     prs = env.gh_json("pr", "list", "--state", "all", "--search", f"{n} in:title,body", "--limit", "50",
                       "--json", "number,title,body,state,mergeCommit")
     ref = re.compile(rf"(?<![\w/])#{n}\b")
-    lines = []
-    for p in prs:
-        if not ref.search(f"{p.get('title') or ''}\n{p.get('body') or ''}"):
-            continue
-        sha = (p.get("mergeCommit") or {}).get("oid") or ""
-        landed = ""
-        if sha:  # the node has no shell, so the driver runs the ancestry check
-            r = env.git("merge-base", "--is-ancestor", sha, f"origin/{env.default}", check=False)
-            landed = f"; on origin/{env.default}: " + ("yes" if r.code == 0 else "no" if r.code == 1 else "unknown")
-        lines.append(f"- #{p['number']} {p['state']}, merge commit {sha or 'none'}{landed}: {p['title']}")
+    lines = [f"- {pr_line(env, p)}: {p['title']}" for p in prs if ref.search(f"{p.get('title') or ''}\n{p.get('body') or ''}")]
     return "\n".join(lines) or "(none)"
 
 
@@ -168,19 +157,28 @@ def granted_gates(env):
             if (g.get("cheap") is True or not env.pr_checks() or not Run.notice(g) and (Run.locally_run(str(g.get("run") or ""), g) or g.get("paths")))]
 
 
+def ci_covered(env):
+    """The gate runs the run's ci_commands(selected=False) counts as CI-covered. None without a pull_request workflow: the run
+    refuses CI validation there, and granted_gates already grants every gate."""
+    if env.lookup("ship.validation") != "ci" or not env.pr_checks():
+        return []
+    return [cmd for cmd, _ in Run.ci_covered((str(g.get("run") or ""), g) for g in env.data.get("gate", []))]
+
+
 def acceptance_callers(env):
     """The gate commands the run admits as approved callers when it checks acceptance (its validation_commands, less acceptance)."""
     return granted_gates(env) + [str(g["ci"]) for g in env.data.get("gate", []) if g.get("ci")]
 
 
-def ungranted_declarations(text, body, callers):
+def ungranted_declarations(text, body, callers, prefixes):
     """The node's comment with each `Acceptance command:` field the run would refuse turned into prose, and what was turned:
     the run reads the newest triage's fields as grants, so a refused one would stop every run of the issue."""
     turned = []
     for cmd in acceptance_declarations(text):
-        why = [p.split(": ", 1)[1] for p in acceptance_problems(declared_source(body, [cmd]), callers) if p.startswith(f"`{cmd}`: ")]
+        why = [p.split(": ", 1)[1] for p in acceptance_problems(declared_source(body, [cmd]), callers, prefixes) if p.startswith(f"`{cmd}`: ")]
         if why:
-            field = rf"(?m)^([ ]{{0,3}}(?:[-*][ ]+)?)(?:Acceptance command:|\*\*Acceptance command:\*\*)(\s*`{re.escape(cmd)}`)"
+            tag = r"(?:[ \t]+\(part[ \t]+\d+\))?"
+            field = rf"(?m)^([ ]{{0,3}}(?:[-*][ ]+)?)(?:Acceptance command{tag}:|\*\*Acceptance command{tag}:\*\*)(\s*`{re.escape(cmd)}`)"
             text = re.sub(field, lambda m: f"{m.group(1)}Acceptance check, not a grant ({why[0]}):{m.group(2)}", text)
             turned.append(cmd)
     return text, turned
@@ -193,11 +191,77 @@ def binding_notes(env, body, labels):
     if body_line(body, "Flow") == "direct" and not env.lookup("ship.direct", []):
         notes.append("The body asks `Flow: direct`, and the binding declares no `ship.direct` globs: the run takes the class the diff warrants, not the direct lane.")
     policy, _, whose = ship_policy(env)
+    whose = whose.split(", unattended_classes from ")[0]  # the policy's own source
     if "trivial" in labels and policy != "trivial-merge":
         where = f'`ship.policy = "{policy}"`' if whose == REPO_POLICY else f'`policy = "{policy}"` in {whose}'
         notes.append(f"The issue carries `trivial`, which does not let the driver merge under {where} (only `trivial-merge` merges on it): "
                      "here it picks the trivial builder and nothing more.")
     return notes
+
+
+TRIGGER_REF = re.compile(r"(?<![\w/.-])#(\d+)")  # Get-CompileProgram.ps1's unblock rule: a #N after a word character, `/`, `.` or `-` is another reference
+LANDS = re.compile(r"[ \t]*(?:part[ \t]+\d+[ \t]+)?(?:lands|landed|has[ \t]+landed|merges|is[ \t]+merged|closes|is[ \t]+closed|ships|has[ \t]+shipped)\b",
+                   re.IGNORECASE)  # contract section 4: the wordings that say only that the named issue lands
+
+
+def trigger_refs(body):
+    """The issue numbers the body's first line names by TRIGGER_REF when it is an `**Unblocks when:**` trigger; empty otherwise."""
+    first = body.lstrip().partition("\n")[0]
+    return {int(x) for x in TRIGGER_REF.findall(first)} if first.startswith("**Unblocks when:**") else set()
+
+
+def fired_trigger(env, body):
+    """(body, note): the body less its first line when that line is an `**Unblocks when:**` trigger naming exactly one issue that
+    is closed as completed, or closed by a pull request whose merge commit is on the fetched default branch, and the text right
+    after the reference says only that it lands (LANDS); the note is the comment's sentence on it, None when the line names no
+    single issue or that issue has not landed."""
+    first, _, rest = body.lstrip().partition("\n")
+    if len(refs := trigger_refs(body)) != 1:
+        return body, None
+    m = refs.pop()
+    try:
+        i = env.gh_json("issue", "view", str(m), "--json", "state,stateReason")
+    except DriverError as exc:  # the line stays: an unread trigger is not a fired one
+        return body, f"The body's first line names #{m}, whose read failed ({exc}), so the line stays in place."
+    reason = str(i.get("stateReason") or "").upper()
+    if i.get("state") != "CLOSED" or reason == "NOT_PLANNED":
+        return body, None
+    if reason == "COMPLETED":
+        evidence = f"#{m} is closed as completed"
+    else:
+        closers = closing_prs(env, m)
+        if closers is None:
+            return body, f"The body's first line names #{m}, closed as {reason.lower() or 'no reason'}, whose closing pull requests are unreadable, so the line stays in place."
+        landed = [(p["number"], sha) for p in closers if (sha := (p.get("mergeCommit") or {}).get("oid")) and on_default(env, sha) == "yes"]
+        if not landed:
+            return body, None
+        evidence = f"#{m} is closed by #{landed[0][0]}, whose merge commit {landed[0][1]} is an ancestor of origin/{env.default}"
+    if not LANDS.match(first, TRIGGER_REF.search(first).end()):
+        return body, (f"The body's first line, `{first.strip()}`, names #{m}, and #{m} has landed ({evidence}), but the line does not say only "
+                      f"that #{m} lands, so it stays in place: the owner clears it once its event has happened.")
+    return re.sub(r"\A(?:[ \t]*\r?\n)+", "", rest), f"Trigger cleared: the driver deleted the body's first line, `{first.strip()}`: {evidence}."
+
+
+def replacement_note(env, dead, proposed):
+    """The question's paragraph on the dead anchor lines whose file is still tracked (a fragment finding): the node's proposed lines
+    that name such a file, are one line, quote nothing inside a command span (which the gate does not grep) and that the anchor gate
+    finds live at the default branch's tip, grepping at least one fragment; None when no finding is of that kind. Triage edits no
+    such line: whoever answers the question pastes it."""
+    paths = {p for a in dead if (m := re.match(r"fragment no longer greps in '(.+?)': ", a)) for p in m.group(1).split("', '")}
+    if not paths:
+        return None
+    kept = []
+    for line in dict.fromkeys(str(p).strip() for p in proposed or []):
+        m = re.match(r"(?:[-*+]|\d+[.)])\s[^`\r\n]*`([^`\r\n]+)`", line)
+        base = re.split(r"[:#]", m.group(1), 1)[0].removeprefix("./") if m else ""  # the gate cuts a span at its first : or #
+        if (base and any(p == base or p.endswith("/" + base) for p in paths) and not re.search(r"[\r\n]", line)
+                and not any(t[0] == "`" and re.search(r'(?<!\\)"', t) for t in re.findall(r'"(?:[^"\\\r\n]|\\.)*\\?"|`[^`\r\n]*`', line))
+                and not env.dead_anchors(f"## Anchors\n\n{line}\n", f"origin/{env.default}", need_frag=True)):
+            kept.append(line)
+    if not kept:
+        return "No replacement anchor line was found that greps in its file at the tip: write one under the body's `Anchors` heading."
+    return ("Proposed replacement anchor lines, each fragment checked to grep in its file at the tip; paste them under the body's "
+            "`Anchors` heading in place of the dead lines:\n\n```markdown\n" + "\n".join(kept) + "\n```")
 
 
 def shape_findings(env, issue, body, labels, comment):
@@ -218,26 +282,39 @@ def shape_findings(env, issue, body, labels, comment):
     return findings
 
 
-def triage(env, n, dry):
+def triage(env, n, dry, asked=None):
+    """Grade #n and post the verdict; the exit. `asked` is None for the issue the command names; for a ledger child the same command
+    filed, it is that child's question from the ledger triage ("" when it has none), and the node is already preflighted."""
+    return graded(env, n, dry, asked)[0]
+
+
+def graded(env, n, dry, asked=None):
+    """triage's (exit, verdict): the verdict as posted, or what stopped it from being written."""
     needs = {"triager": node.READ}  # the TRIAGE node runs even in a dry run
-    if isinstance(env.runtime, developer.Settings):
+    if asked is None and isinstance(env.runtime, developer.Settings):
         node.preflight(env.runtime, needs=needs)
-    else:
+    elif asked is None:
         node.preflight(env.runtime, capabilities=node.READ)
-    i = env.gh_json("issue", "view", str(n), "--json", "number,title,body,labels,comments,state")
+    i = env.gh_json("issue", "view", str(n), "--json", "number,title,body,labels,comments,state,createdAt")
     labels = [tag["name"] for tag in i.get("labels", [])]
     body = i.get("body") or ""
-    comments = "\n\n".join(f"[{(c.get('author') or {}).get('login')}] {c.get('body')}" for c in i.get("comments", [])) or "(none)"
+    comments = "\n\n".join(f"[{(c.get('author') or {}).get('login')}] (comment {c.get('id') or 'with no id'}, {c.get('createdAt')}) {c.get('body')}"
+                           for c in i.get("comments", [])) or "(none)"
     sets = {k: env.lookup(f"labels.{k}", []) for k in ("scope", "area", "type")}
     native = issue_type(env, n) if sets.get("type") else None  # counts as the type label when the type set names it
     if native:
         i["issueType"] = {"name": native}  # the shape preflight reads it from the issue it is handed
     files = [f for f in env.git("ls-files", "-z").out.split("\0") if f]
+    prefixes = runners(env)
     behind = behind_note(env)  # fetches origin: the ancestry checks below and the anchor gate read the fetched ref
+    posted = body
+    body, trigger_note = fired_trigger(env, posted)  # contract section 4: a fired single-issue trigger is cleared before grading
+    trigger_text = f"\n{trigger_note}\n" if trigger_note else ""
     anchors = env.dead_anchors(body, f"origin/{env.default}", need_one=True)
-    prompt = briefs.render("triage", number=n, title=i["title"], body=body, comments=comments,
-                           prs=referencing_prs(env, n), behind=behind,
-                           grants=", ".join(f"`{cmd}`" for cmd in acceptance_commands(body)) or "none, the body grants no command",
+    candidates = {}
+    prompt = briefs.render("triage", number=n, title=i["title"], body=body, comments=comments, ledger=ledger_note(env, i),
+                           prs=referencing_prs(env, n), related=related_work(env, n, i["title"], body, i.get("createdAt"), candidates), behind=behind,
+                           grants=", ".join(f"`{cmd}`" for cmd in acceptance_commands(body, prefixes)) or "none, the body grants no command",
                            labels=json.dumps({**sets, "state": list(STATE_LABELS)}), issue_labels=", ".join(labels + ([f"{native} (its issue type)"] if native else [])) or "(none)", trusted=", ".join(sorted(env.trusted())),
                            authority="\n".join(f"- {p}" for p in env.lookup("authority.local", [])) or "(none declared)",
                            anchors="\n".join(f"- {a}" for a in anchors) or "No finding: every anchor line resolves.",
@@ -250,6 +327,8 @@ def triage(env, n, dry):
         raise DriverError(f"node TRIAGE answered verdict {ans.get('verdict')!r}")
     if verdict == "PROMOTE" and str(ans.get("deliverable") or "").strip().lower() == "finding":
         raise DriverError("node TRIAGE answered PROMOTE for a deliverable that is a finding: that is CHECKPOINT")
+    if verdict == "DUPLICATE":
+        ans["question"] = duplicate_question(env, n, ans.get("duplicate_of"), candidates) + (f"\n\n{ans['question']}" if ans.get("question") else "")
     size = str(ans.get("size") or "").strip().strip(".,;:").upper()
     flow = str(ans.get("flow") or "").strip().strip(".,;:").lower()
     if verdict in ("PROMOTE", "CHECKPOINT") and size == "L":  # the node found no split lines: the contract's question, not a silent split
@@ -270,6 +349,9 @@ def triage(env, n, dry):
         verdict = "NEEDS-RULING"
         ans["question"] = ("The issue waits on an event, but its body's first line names none: write `**Unblocks when:** <the trigger>` "
                            "as the first line, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
+    if asked:  # the ledger triage's question for this child: a ruling to take, whatever the child's own verdict
+        verdict = "NEEDS-RULING"
+        ans["question"] = asked + (f"\n\n{ans['question']}" if ans.get("question") else "")
     new_body = with_lines(body, size, flow, str(ans.get("doc_impact") or "").strip()) if verdict in ("PROMOTE", "CHECKPOINT") else body
     declared = {str(x).lower(): str(x) for k in ("area", "type") for x in sets.get(k) or []}
     types, have = {str(x).lower() for x in sets.get("type") or []}, {str(tag).lower() for tag in labels + ([native] if native else [])}
@@ -278,7 +360,7 @@ def triage(env, n, dry):
         if tag in declared and tag not in have and not (tag in types and (have & types or any(n.lower() in types for n in named))):
             named.append(declared[tag])
     problem = label_problem(labels + named + ([native] if native else []), sets) if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else None
-    dead = [a for a in anchors if a != sh.NO_ANCHOR] if verdict in ("PROMOTE", "CHECKPOINT") and size != "L" else []
+    dead = [a for a in anchors if a != sh.NO_ANCHOR]
     if dead and (moved := restamped(env, body, dead)) != body and not env.dead_anchors(moved, f"origin/{env.default}"):
         dead = []  # the run re-points these lines at the file their fragments moved to, as it reads them
     preflight_failed = False
@@ -292,25 +374,27 @@ def triage(env, n, dry):
         verdict = "NEEDS-RULING"
         ans["question"] = (f"The body holds {size_problem(new_body)}. The shape gate refuses the promotion as the body stands; fix the "
                            f"line, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
-    elif dead:  # the run would stop on a dead anchor: ask first, and post once
+    elif dead and verdict in ("PROMOTE", "CHECKPOINT") and size != "L":  # the run would stop on a dead anchor: ask first, and post once
         preflight_failed = True
         verdict = "NEEDS-RULING"
         ans["question"] = ("The anchor gate finds:\n\n" + "\n".join(f"- {a}" for a in dead) + "\n\nThe run stops on a dead anchor; fix the "
                            "anchors, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
-    elif verdict == "PROMOTE" and (unrunnable := acceptance_problems(body, acceptance_callers(env))):  # the run stops on these
+    elif verdict == "PROMOTE" and (unrunnable := acceptance_problems(body, acceptance_callers(env), prefixes)):  # the run stops on these
         preflight_failed = True
         verdict = "NEEDS-RULING"
         ans["question"] = ("The run refuses the body's acceptance as written:\n\n" + "\n".join(f"- {p}" for p in unrunnable)
                            + "\n\nName a single exact runner command without shell operators or environment prefixes, or state the "
                              "check as prose, then run triage again." + (f"\n\n{ans['question']}" if ans.get("question") else ""))
-    ans["comment"], turned = ungranted_declarations(str(ans.get("comment") or ""), body, acceptance_callers(env))
+    if verdict == "NEEDS-RULING" and (note := replacement_note(env, dead, ans.get("replacements"))):
+        ans["question"] = (f"{ans['question']}\n\n" if ans.get("question") else "") + note
+    ans["comment"], turned = ungranted_declarations(str(ans.get("comment") or ""), body, acceptance_callers(env), prefixes)
     if turned:
         say("acceptance fields the run would refuse, kept as prose: " + ", ".join(f"`{cmd}`" for cmd in turned))
-    comment = f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n"
+    comment = f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n{trigger_text}"
     if verdict != "STALE" and (notes := binding_notes(env, body, labels)):  # a stale issue runs nowhere
         comment += "\n" + "\n".join(f"- {x}" for x in notes) + "\n"
-    if verdict not in ("STALE", "CHECKPOINT", "BLOCKED") and not (acceptance_commands(body) + granted_gates(env)):
-        comment += "\n- " + empty_list(body) + " A worktree BUILD dispatch stops with `gate uncovered`; the direct lane runs every selected gate in the driver.\n"
+    if verdict not in ("STALE", "CHECKPOINT", "BLOCKED") and not (acceptance_commands(body, prefixes) + granted_gates(env) + ci_covered(env)):
+        comment += "\n- " + empty_list(body, prefixes) + " A worktree BUILD dispatch stops with `gate uncovered`; the direct lane runs every selected gate in the driver.\n"
     if ans.get("question"):
         comment += f"\nQuestion for the owner:\n\n{ans['question']}\n"
     add, remove = label_moves(verdict, size, labels, named)
@@ -321,7 +405,11 @@ def triage(env, n, dry):
         new_body, manual = with_manual(new_body, [str(p) for p in ans.get("manual") or []])
         if manual:
             comment += "\nManual steps (the build node cannot edit under `.claude/`):\n\n" + "\n".join(f"- `{p}`" for p in manual) + "\n"
-    if verdict == "SPLIT":  # nothing files the children: say who does
+    children = None
+    if verdict == "SPLIT" and is_ledger(i) and asked is None:  # a ledger child is no ledger: its own SPLIT is the owner's to file
+        children, sha = print_children(env, n, i, ans, declared)
+        comment += f"\n{LEDGER_SPLIT_LINE}\n"
+    elif verdict == "SPLIT":  # nothing files the children: say who does
         comment += f"\n{SPLIT_LINE}\n"
     if verdict in ("PROMOTE", "CHECKPOINT"):
         findings = shape_findings(env, i, new_body, [label for label in labels if label not in remove] + add, comment)
@@ -332,18 +420,19 @@ def triage(env, n, dry):
                         + "\n".join(f"- {finding}" for finding in findings)
                         + "\n\nThe promotion was withheld; fix these findings and run triage again."
                         + (f"\n\n{ans['question']}" if ans.get("question") else ""))
-            comment = (f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n"
+            comment = (f"**Triage**\n\nVerdict: {verdict}\n\n{reasoning(str(ans.get('comment') or ''), verdict)}\n{trigger_text}"
                        f"\nQuestion for the owner:\n\n{question}\n")
             add, remove = label_moves(verdict, size, labels, named)
     say(f"verdict {verdict}; labels +{add} -{remove}" + ("; body lines written" if new_body != body else ""))
     say("comment:\n" + comment)
-    if (env.gh_json("issue", "view", str(n), "--json", "body").get("body") or "") != body:  # an edit landed while the node graded
+    if (env.gh_json("issue", "view", str(n), "--json", "body").get("body") or "") != posted:  # an edit landed while the node graded
         say(f"#{n}'s body changed while triage ran: nothing written, stop posted")
         env.comment_issue(n, "**Stop:** open decision\n\nThe issue's body changed while triage ran, so this verdict graded a body that is no "
                              "longer the issue's: no body line, label or verdict is written. Run triage again on the body as it stands.\n")
-        return 3
-    if new_body != body:
-        env.write("write the Size/Flow/Doc impact lines",
+        return 3, f"{verdict} not written: the body changed while triage ran"
+    if new_body != posted:
+        edits = [what for what, done in (("delete the fired trigger line", body != posted), ("write the Size/Flow/Doc impact lines", new_body != body)) if done]
+        env.write(" and ".join(edits),
                   argv_for("gh", "issue", "edit", str(n), "-R", env.slug, "--body-file", env.body_file("issue-body.md", new_body)))
     if add or remove:
         argv = argv_for("gh", "issue", "edit", str(n), "-R", env.slug)
@@ -353,4 +442,6 @@ def triage(env, n, dry):
             argv += ["--add-label", tag]
         env.write("set the labels", argv)
     env.comment_issue(n, comment)
-    return 3 if preflight_failed else 0
+    if children is not None and not dry:
+        return file_children(env, n, children, sha, triage), verdict
+    return 3 if preflight_failed else 0, verdict

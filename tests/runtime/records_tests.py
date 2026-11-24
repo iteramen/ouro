@@ -1,4 +1,5 @@
 """The pure record and issue-body helpers, without a driver fixture."""
+import hashlib
 import re
 import unittest
 
@@ -144,3 +145,65 @@ class RecordsTests(unittest.TestCase):
         again = recmod.drawn_body(rec, "r2", drawn.replace("- Nothing here has been executed", "- the tests ran"))
         self.check("drawn_body keeps a section a person edited and redraws the one they left alone",
                    "- the tests ran" in again and "Nothing here" not in again.split("<!--")[0] and "## Summary\ns2" in again)
+        added = recmod.drawn_body(recmod.read_record(again), "r2", again.replace("## Follow-up", "## Acceptance\nhttps://x/run\n\n## Follow-up", 1))
+        self.check("drawn_body keeps a section a person added under a heading it does not draw, before ## Follow-up",
+                   "## Acceptance\nhttps://x/run\n\n## Follow-up" in added)
+        old = recmod.drawn_body({"fixes_line": "Fixes #5", "gates": [{"sha": "a" * 40, "cmd": "OLDGATE", "exit": 0}]}, "Review: r1")
+        def redraw(body):
+            rec = recmod.read_record(body)
+            rec["gates"] = [{"sha": "b" * 40, "cmd": "NEWGATE", "exit": 0}]
+            return recmod.drawn_body(rec, "Review: r2", body).split("<!--")[0]
+        mid = redraw(old.replace("<details>", "## Acceptance\nhttps://u\n\n<details>", 1))
+        self.check("a section a person adds above the Verification block keeps only their text, and the block is redrawn once",
+                   "## Acceptance\nhttps://u\n\n## Follow-up" in mid and mid.count("NEWGATE") == 1 and "OLDGATE" not in mid)
+        top = redraw(old.replace("Fixes #5\n", "## Notes\nmine\n\nFixes #5\n", 1))
+        self.check("a section a person adds above the Fixes and Review lines keeps only their text; those lines are redrawn",
+                   "## Notes\nmine\n\n## Follow-up" in top and top.startswith("Fixes #5\nReview: r2\n") and top.count("Fixes #5") == 1
+                   and "Review: r1" not in top)
+        inside = old.replace("<details><summary>Verification</summary>\n\n", "<details><summary>Verification</summary>\n\n## Notes\nmine\n", 1)
+        rec = recmod.read_record(inside)
+        rec["gates"] = [{"sha": "b" * 40, "cmd": "NEWGATE", "exit": 0}]
+        once = recmod.drawn_body(rec, "Review: r2", inside)
+        twice = recmod.drawn_body(recmod.read_record(once), "Review: r2", once)
+        self.check("a section a person adds inside the Verification block keeps only their text; the block is redrawn once",
+                   "## Notes\nmine\n\n## Follow-up" in once and once.count("<details><summary>Verification</summary>") == 1
+                   and once.split("<!--")[0].count("NEWGATE") == 1 and "OLDGATE" not in once.split("<!--")[0] and twice == once)
+        spaced_in = redraw(inside.replace("## Notes\n", "## Notes \n", 1))
+        self.check("a section a person adds inside the Verification block under a heading with trailing whitespace keeps no stale gate line",
+                   "## Notes\nmine\n\n## Follow-up" in spaced_in and spaced_in.count("NEWGATE") == 1 and "OLDGATE" not in spaced_in)
+        logs = redraw(old.replace("## Follow-up", "## Logs\n<details><summary>my log</summary>\n\nline1\n\n</details>\n\n## Follow-up", 1))
+        self.check("a section a person adds outside the Verification block keeps its own </details> line",
+                   "## Logs\n<details><summary>my log</summary>\n\nline1\n\n</details>\n\n## Follow-up" in logs)
+        legacy = recmod.read_record(old)
+        def old_digest(body):
+            return hashlib.sha256(dict(recmod.body_sections(body, cut=False))["## Changes"].encode()).hexdigest()[:16]
+        legacy["drawn"]["## Changes"] = old_digest(old)
+        legacy["changes"] = ["a new commit"]
+        self.check("a record an older driver drew, its Changes digest taken with the Verification block, still redraws Changes",
+                   "## Changes\n- a new commit" in recmod.drawn_body(legacy, "Review: r2", old))
+        base = recmod.drawn_body({"changes": ["c1"]}, "Review: r1")
+        legacy = recmod.read_record(base)
+        legacy["drawn"]["## Changes"] = old_digest(base)
+        del legacy["drawn_lines"]
+        legacy["changes"] = ["c1", "c2"]
+        edited = recmod.drawn_body(legacy, "Review: r2", base.replace("<details>", "## Acceptance\nhttps://u\n\n<details>", 1)).split("<!--")[0]
+        self.check("an older driver's Changes digest with a person's section between Changes and the block still redraws Changes",
+                   "## Changes\n- c1\n- c2\n" in edited and "## Acceptance\nhttps://u\n\n## Follow-up" in edited)
+        stale = recmod.drawn_body({"manual": [{"path": "x/y", "edit": ""}]}, "Review: r1")
+        rec = recmod.read_record(stale)
+        del rec["drawn"]
+        rec["manual"] = []
+        undrawn = recmod.drawn_body(rec, "Review: r2", stale.replace("## Follow-up", "## Acceptance\nhttps://u\n\n## Follow-up", 1)).split("<!--")[0]
+        self.check("a record with no drawn table drops a heading the driver no longer draws and keeps one it never drew",
+                   "## Manual steps" not in undrawn and "## Acceptance\nhttps://u\n\n## Follow-up" in undrawn)
+        dup = redraw(old.replace("## Follow-up", "## Notes\nfirst\n\n## Notes\nsecond\n\n## Follow-up", 1))
+        self.check("two added sections under the same heading both survive the redraw, in order",
+                   "## Notes\nfirst\n\n## Notes\nsecond\n\n## Follow-up" in dup)
+        spaced = redraw(old.replace("## Summary\n", "## Summary \n", 1))
+        self.check("a drawn heading with trailing whitespace is that heading: the body keeps one ## Summary",
+                   spaced.count("## Summary") == 1)
+        rec = recmod.read_record(old)
+        del rec["drawn_lines"]
+        top = recmod.drawn_body(rec, "Review: r2", old.replace("Fixes #5\n", "## Notes\nmine\n\nFixes #5\n", 1)).split("<!--")[0]
+        self.check("a record with no drawn_lines keeps no stale Fixes or Review line inside a section a person added above them",
+                   "## Notes\nmine\n\n## Follow-up" in top and top.count("Fixes #5") == 1 and "Review: r1" not in top)

@@ -7,7 +7,9 @@
     from the plugin repo, a nested consumer checkout, or a vendored scripts dir (one
     comment-identity case runs only where an ouro plugin.json sits beside the gate). Cases
     are the parser's false-positive classes (a backticked command line, a //-span,
-    enclosing backticks and prose-code composites in quoted fragments, the prose
+    enclosing backticks in quoted fragments, a quote off an anchor line under an Anchors
+    heading -- an anchor-shaped line under no such heading, a prose line, a fenced heading --
+    the prose
     between two quoted phrases on one line, an unterminated quote, env-var /
     placeholder tokens, and the non-repo-relative path families -- rooted, home,
     leading-parent-escape, scheme-qualified, drive-letter, drive-relative, UNC), the
@@ -63,6 +65,9 @@ $scratch = Join-Path ([IO.Path]::GetTempPath()) "anchor-findings-test-$PID"
 if (Test-Path -LiteralPath $scratch) { Remove-Item -LiteralPath $scratch -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $scratch 'src') -Force | Out-Null
 $bt = '`'
+# A fragment is checked only on an anchor line under an Anchors heading; most rows below open one.
+$anchors = "## Anchors`n"
+$onFixture = $anchors + '- ' + $bt + 'src/fixture.ps1' + $bt + ' -- '
 @(
     '$fixtureAnchor = 12345',
     "# release rule: bumps go in ${bt}plugin.json${bt} and a tag.",
@@ -122,52 +127,54 @@ try {
         'to-be-created path inside a prose span is not a finding' | Out-Null
 
     # --- class 2: enclosing backticks are stripped from quoted fragments --------------------
-    Assert-Case ('Anchor: "' + $bt + '$fixtureAnchor = 12345' + $bt + '"') 0 0 1 `
+    Assert-Case ($onFixture + '"' + $bt + '$fixtureAnchor = 12345' + $bt + '"') 0 1 1 `
         'enclosing backticks stripped, fragment counted and greps' | Out-Null
 
-    Assert-Case "- Check ${bt}git grep -n `"foo_bar.*baz`" src${bt} here." 0 0 0 `
+    Assert-Case ($onFixture + "${bt}git grep -n `"foo_bar.*baz`" src${bt} here.") 0 1 0 `
         'a double-quoted argument inside a backticked command is no fragment' | Out-Null
-    Assert-Case "- Check ${bt}git grep -n `"foo_bar.*baz`" src${bt} and `"zzz_gone_fragment();`" here." 1 0 1 `
+    Assert-Case ($onFixture + "${bt}git grep -n `"foo_bar.*baz`" src${bt} and `"zzz_gone_fragment();`" here.") 1 1 1 `
         'a stale quoted fragment beside a backticked command is still reported' | Out-Null
-    Assert-Case "- ${bt}src/fixture.ps1${bt} - `"zzz_gone${bt}n_frag();`" ${bt}:171 @ abc1234${bt}" 1 1 1 `
+    Assert-Case "$anchors- ${bt}src/fixture.ps1${bt} - `"zzz_gone${bt}n_frag();`" ${bt}:171 @ abc1234${bt}" 1 1 1 `
         'a stale fragment holding a backtick is reported despite a later span' | Out-Null
 
     # --- class 2b: a cited-file fragment the file wraps is found on a second look --------------
-    Assert-Case "- ${bt}src/fixture.ps1${bt} -- `"every code is checked here, so the fixture password alone cannot bypass the second factor.`"" 0 1 1 `
+    Assert-Case "$anchors- ${bt}src/fixture.ps1${bt} -- `"every code is checked here, so the fixture password alone cannot bypass the second factor.`"" 0 1 1 `
         'a comment quote the file wraps across two leader lines greps on the second look' | Out-Null
-    Assert-Case "- ${bt}src/fixture.ps1${bt} -- `"password alone cannot bypass the second factor. every code is checked here, so the fixture`"" 1 1 1 `
+    Assert-Case "$anchors- ${bt}src/fixture.ps1${bt} -- `"password alone cannot bypass the second factor. every code is checked here, so the fixture`"" 1 1 1 `
         'the same tokens in another order are still a finding' | Out-Null
-    Assert-Case "- ${bt}src/join.py${bt} -- `"--retries 3 by default`"" 1 1 1 `
+    Assert-Case "$anchors- ${bt}src/join.py${bt} -- `"--retries 3 by default`"" 1 1 1 `
         'the fragment keeps its leader: a quoted flag the file does not hold is a finding' | Out-Null
-    Assert-Case "- ${bt}src/join.py${bt} -- `"the cache is disabled`"" 1 1 1 `
+    Assert-Case "$anchors- ${bt}src/join.py${bt} -- `"the cache is disabled`"" 1 1 1 `
         'a comment is not joined into the code under it' | Out-Null
-    Assert-Case "- ${bt}src/join.py${bt} -- `"Never retry a failed upload`"" 1 1 1 `
+    Assert-Case "$anchors- ${bt}src/join.py${bt} -- `"Never retry a failed upload`"" 1 1 1 `
         'two comments across a blank line are not joined' | Out-Null
-    Assert-Case "- ${bt}src/join.py${bt} -- `"------------------`"" 1 1 1 `
+    Assert-Case "$anchors- ${bt}src/join.py${bt} -- `"------------------`"" 1 1 1 `
         'a fragment of leader characters alone is still a finding' | Out-Null
-    Assert-Case "- ${bt}src/edited.ps1${bt} -- `"beta gamma delta epsilon`"" 1 1 1 `
+    Assert-Case "$anchors- ${bt}src/edited.ps1${bt} -- `"beta gamma delta epsilon`"" 1 1 1 `
         'with no ref the second look reads the working tree the first pass grepped, not the index' | Out-Null
-    $concat = Assert-Case "- ${bt}src/concat.ps1${bt} -- `"an anonymous call learns nothing it did not itself create.`"" 1 1 1 `
+    $concat = Assert-Case "$anchors- ${bt}src/concat.ps1${bt} -- `"an anonymous call learns nothing it did not itself create.`"" 1 1 1 `
         'a phrase split by string concatenation is still a finding'
     Assert-Match 'string concatenation' ($concat.Findings -join "`n") 'and the finding says the phrase may be split so'
     Assert-Match "^fragment no longer greps in 'src/concat\.ps1': " ($concat.Findings -join "`n") 'and keeps the prefix the driver re-points by'
 
-    # --- class 3: //-spans and prose-code composites are not anchors ------------------------
+    # --- class 3: //-spans and quotes in prose are not anchors -------------------------------
     Assert-Case "Loads ${bt}//cdn.example.com/lib.js${bt} at startup." 0 0 0 `
         'protocol-relative //-span is not a path' | Out-Null
     Assert-Case ('See "set ' + $bt + '$fixtureAnchor = 12345' + $bt + ' and ' + $bt + '$other' + $bt + '" above.') 0 0 0 `
-        'quoted prose-code composite is skipped, not grepped' | Out-Null
+        'a quote holding backticked code, in prose, is not grepped' | Out-Null
 
     # --- interior backticks that ARE verbatim source must still verify ----------------------
-    Assert-Case ('Rule: "bumps go in ' + $bt + 'plugin.json' + $bt + ' and a tag."') 0 0 1 `
+    Assert-Case ($onFixture + '"bumps go in ' + $bt + 'plugin.json' + $bt + ' and a tag."') 0 1 1 `
         'fragment whose interior backticks grep verbatim stays an anchor' | Out-Null
 
     # --- true positives the fixes must not lose ---------------------------------------------
     Assert-Case "See ${bt}nope/definitely-missing.xyz${bt}." 1 1 0 `
         'dead path is still a finding' | Out-Null
+    Assert-Case "## Notes`n`nSee ${bt}nope/definitely-missing.xyz${bt}.`n`n${anchors}See ${bt}nope/other-missing.xyz${bt}." 2 2 0 `
+        'a backticked path that does not resolve is a finding wherever it stands, under any heading or none' | Out-Null
     # Built by concatenation so the literal never greps in a tracked copy of this file.
     $dead = 'zzz_dead_' + 'fragment_xyz();'
-    Assert-Case ('Anchor: "' + $dead + '"') 1 0 1 `
+    Assert-Case ($onFixture + '"' + $dead + '"') 1 1 1 `
         'dead fragment is still a finding' | Out-Null
 
     # --- rule 1 reads a span literally first; a bracket name is a wildcard to nothing --
@@ -224,16 +231,16 @@ try {
         'seventy plain citations in one body spend no expansion budget' | Out-Null
     # The anchor-line pass asks for the same spans again and spends nothing: every dead
     # fragment on forty anchor lines is a finding, none dropped by a budget spent twice.
-    $fortyAnchors = (1..40 | ForEach-Object { '- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "plain words ' + 'nowhere at all here ' + $_ + '"' }) -join "`n"
+    $fortyAnchors = $anchors + ((1..40 | ForEach-Object { '- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "plain words ' + 'nowhere at all here ' + $_ + '"' }) -join "`n")
     Assert-Case $fortyAnchors 40 1 40 `
         'forty anchor lines spend the budget once: each of their dead fragments is a finding' | Out-Null
     # An anchor line whose span expands to several files checks its fragment in each that resolves.
-    $braceFrag = Assert-Case ('- ' + $bt + 'src/{fixture,other}.ps1' + $bt + ' -- "plain words ' + 'in neither file"') 1 2 1 `
+    $braceFrag = Assert-Case ($anchors + '- ' + $bt + 'src/{fixture,other}.ps1' + $bt + ' -- "plain words ' + 'in neither file"') 1 2 1 `
         'a brace-set anchor line with a fragment no expansion holds is a finding'
     Assert-Match "in 'src/fixture\.ps1', 'src/other\.ps1'" ($braceFrag.Findings -join "`n") 'and it names every expansion'
-    Assert-Case ('- ' + $bt + 'src/{other,fixture}.ps1' + $bt + ' -- "plain words that live in the fixture"') 0 2 1 `
+    Assert-Case ($anchors + '- ' + $bt + 'src/{other,fixture}.ps1' + $bt + ' -- "plain words that live in the fixture"') 0 2 1 `
         'a brace-set anchor line with a fragment one expansion holds passes' | Out-Null
-    Assert-Case ('- ' + $bt + 'src/{fixture,gone}.ps1' + $bt + ' -- "plain words that live in the fixture"') 1 2 1 `
+    Assert-Case ($anchors + '- ' + $bt + 'src/{fixture,gone}.ps1' + $bt + ' -- "plain words that live in the fixture"') 1 2 1 `
         'an expansion that does not resolve is a path finding and adds no fragment finding' | Out-Null
     # Four shapes with six real sets and a run of 16000 unbalanced braces, with and without a
     # close brace after the run: 64 expansions each, and the expander's one pass makes the
@@ -279,37 +286,38 @@ try {
     else { Write-Host "FAIL: Paths of a pathless body: '$($noPaths -join '|')'" -ForegroundColor Red; $failures++ }
 
     # --- quotes pair left to right; an out-of-bounds phrase is consumed, not reused ----------
-    Assert-Case 'The "nine char" gate; then it stops here "short" today.' 0 0 0 `
+    Assert-Case ($onFixture + 'The "nine char" gate; then it stops here "short" today.') 0 1 0 `
         'two short quoted phrases on one line yield no fragment' | Out-Null
-    $paired = Assert-Case ('Old "short" and, per the note; see "' + $dead + '" here.') 1 0 1 `
+    $paired = Assert-Case ($onFixture + 'Old "short" and, per the note; see "' + $dead + '" here.') 1 1 1 `
         'a short phrase before a dead fragment: the dead fragment is still reached'
     Assert-Match   ([regex]::Escape($dead)) ($paired.Findings -join "`n") 'the finding names the dead fragment'
     Assert-NoMatch 'per the note'           ($paired.Findings -join "`n") 'and not the prose between the two phrases'
-    Assert-Case ('A "' + ('y' * 130) + '" and, per the note; see "ok" here.') 0 0 0 `
+    Assert-Case ($onFixture + 'A "' + ('y' * 130) + '" and, per the note; see "ok" here.') 0 1 0 `
         'an over-120 phrase is consumed too, so the prose after it is no fragment' | Out-Null
-    Assert-Case 'Only one " quote on this line; nothing_else();' 0 0 0 `
+    Assert-Case ($onFixture + 'Only one " quote on this line; nothing_else();') 0 1 0 `
         'an unterminated quote closes no pair and yields no fragment' | Out-Null
-    $maxBody = '"\' * 32768
-    $null = Get-AnchorFindings -Text 'warm "$fixtureAnchor = 12345" up'  # warm the regex and the JIT: the first call in a process is far slower than the rest
+    # The anchor line padded to the GitHub cap with escaped quotes, ending in a lone backslash.
+    $maxBody = $onFixture + ('"\' * [math]::Floor((65536 - $onFixture.Length) / 2))
+    $null = Get-AnchorFindings -Text ($onFixture + '"$fixtureAnchor = 12345"')  # warm the regex and the JIT: the first call in a process is far slower than the rest
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $maxRun = Get-AnchorFindings -Text $maxBody
     $sw.Stop()
     Assert-Match 'frags=0 findings=0 within-5s=True' `
         "frags=$($maxRun.FragCount) findings=$($maxRun.Findings.Count) within-5s=$($sw.ElapsedMilliseconds -lt 5000) at $($sw.ElapsedMilliseconds)ms" `
-        'a 65536-character body (GitHub cap) of escaped quotes ending in a lone backslash yields no fragment, scanned inside 5s'
-    $escaped = Assert-Case 'Anchor: "set $x = \"hi\"; done" in the file.' 1 0 1 `
+        'a body of about 65536 characters (GitHub cap), an anchor line of escaped quotes ending in a lone backslash, yields no fragment, scanned inside 5s'
+    $escaped = Assert-Case ($onFixture + '"set $x = \"hi\"; done" in the file.') 1 1 1 `
         'a fragment holding an escaped quote is one fragment'
     Assert-Match ([regex]::Escape('set $x = "hi"; done')) ($escaped.Findings -join "`n") `
         'the escaped quote is unescaped and the fragment is read whole'
 
     # --- the length bounds measure the unescaped fragment, as the grep will see it ----------
-    Assert-Case 'See "no_go();" here.' 0 0 0 `
+    Assert-Case ($onFixture + '"no_go();" here.') 0 1 0 `
         'a code-ish phrase under the lower bound is not grepped' | Out-Null
-    Assert-Case ('See "' + ('zzz_gone_' * 15) + '" here.') 0 0 0 `
+    Assert-Case ($onFixture + '"' + ('zzz_gone_' * 15) + '" here.') 0 1 0 `
         'a code-ish phrase over the upper bound is not grepped' | Out-Null
-    Assert-Case 'Anchor: "\"a\": true," here.' 0 0 0 `
+    Assert-Case ($onFixture + '"\"a\": true," here.') 0 1 0 `
         'twelve raw characters, ten unescaped: under the lower bound, not grepped' | Out-Null
-    Assert-Case ('Anchor: "' + ('zzz_gone_' * 12) + ('\"' * 8) + '" here.') 1 0 1 `
+    Assert-Case ($onFixture + '"' + ('zzz_gone_' * 12) + ('\"' * 8) + '" here.') 1 1 1 `
         'a hundred and twenty-four raw characters, a hundred and sixteen unescaped: checked' | Out-Null
 
     # --- URLs and env-var style tokens are skipped before the [:#] split ---------
@@ -365,8 +373,10 @@ try {
     # what proves the backtick spelling is doing the work.
     Assert-Case "See ${bt}byovox:src/stt.rs${bt} -- ${bt}let routed = layout.resolve(key);${bt} here." 0 0 0 `
         'cross-repo citation contributes no path and no fragment' | Out-Null
-    Assert-Case 'See "let routed = layout.resolve(key);" here.' 1 0 1 `
-        'the same fragment double-quoted IS checked -- backticks instead of quotes is what skips it' | Out-Null
+    Assert-Case ($onFixture + '"let routed = layout.resolve(key);" here.') 1 1 1 `
+        'the same fragment double-quoted on an anchor line IS checked -- backticks instead of quotes is what skips it' | Out-Null
+    Assert-Case ($onFixture + $bt + 'let routed = layout.resolve(key);' + $bt + ' here.') 0 1 0 `
+        'and backticked on that same anchor line, it is not' | Out-Null
     Assert-Case "See ${bt}my_repo:src/stt.rs${bt} here." 1 1 0 `
         'an underscored repo name is NOT scheme-skipped -- the documented character class is real' | Out-Null
     # Guards against an over-broad colon-prefix skip: a relative path carrying a :line
@@ -397,88 +407,116 @@ try {
         'inline doc-impact excludes one line; the next line is still scanned' | Out-Null
 
     # --- clean conventional body ------------------------------------------------------------
-    Assert-Case ('See ' + $bt + 'src/fixture.ps1' + $bt + ' -- "$fixtureAnchor = 12345" holds the value.') 0 1 1 `
+    Assert-Case ($onFixture + '"$fixtureAnchor = 12345" holds the value.') 0 1 1 `
         'conventional path + fragment body is clean and counted' | Out-Null
 
-    # --- an anchor-shaped line verifies every fragment, in the file it cites ----------
+    # --- an anchor line verifies every fragment, in the file it cites ----------
     foreach ($fragment in @('/fixture/location/config.yaml', '2026-01-01-preview')) {
-        $bare = Assert-Case ('- `config.yaml` -- "' + $fragment + '"') 1 0 0 `
+        $bare = Assert-Case ($anchors + '- `config.yaml` -- "' + $fragment + '"') 1 0 0 `
             'bare evidence filenames are rejected independently of fragment slashes'
         Assert-Match '\./config\.yaml' ($bare.Findings -join "`n") 'the correction spells the top-level path explicitly'
-        Assert-Case ('- `./config.yaml` -- "' + $fragment + '"') 0 1 1 `
+        Assert-Case ($anchors + '- `./config.yaml` -- "' + $fragment + '"') 0 1 1 `
             'explicit top-level evidence verifies its own quote with or without slashes' | Out-Null
-        Assert-Case ('- `src/fixture.ps1` -- "$fixtureAnchor = 12345"' + "`n" + '- `config.yaml` -- "' + $fragment + '"') 1 1 1 `
+        Assert-Case ($anchors + '- `src/fixture.ps1` -- "$fixtureAnchor = 12345"' + "`n" + '- `config.yaml` -- "' + $fragment + '"') 1 1 1 `
             'another valid anchor cannot hide the malformed top-level evidence row' | Out-Null
     }
     Assert-Case 'Create `config.yaml` later.' 0 0 0 'an inline bare filename remains prose' | Out-Null
     Assert-Case '- Create `config.yaml` later.' 0 0 0 'a prose list item is not a bare-path evidence row' | Out-Null
     Assert-Case '- `config.yaml`' 0 0 0 'an unquoted bare file list remains a non-anchor mention' | Out-Null
-    Assert-Case '- `./config.yaml` -- "$fixtureAnchor = 12345"' 1 1 1 `
+    Assert-Case ("## What`n" + '- `config.yaml` holds "the preview channel date"') 0 0 0 `
+        'a quoted list item opening with a bare filename outside the Anchors heading is prose' | Out-Null
+    Assert-Case ($anchors + '- `./config.yaml` -- "$fixtureAnchor = 12345"') 1 1 1 `
         'a top-level anchor quote cannot pass only because another file holds it' | Out-Null
 
-    # A list item whose first backticked span passes rule 1 and resolves: every quoted fragment
-    # in the length bounds is verified, plain words too, and grepped in that one file.
+    # A list item under an Anchors heading whose first backticked span passes rule 1 and resolves:
+    # every quoted fragment in the length bounds is verified, plain words too, in that one file.
     # Built by concatenation so the literal never greps in a tracked copy of this file.
     $plainDead = 'plain words ' + 'nowhere at all here'
-    $anchorMiss = Assert-Case ('- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 1 1 1 `
-        'on an anchor line, a plain-words fragment absent from the cited file is a finding and counted'
+    $anchorMiss = Assert-Case ($onFixture + '"' + $plainDead + '"') 1 1 1 `
+        'on an anchor line under an Anchors heading, a fragment that no longer greps in the cited file is a finding and counted'
     Assert-Match 'src/fixture\.ps1' ($anchorMiss.Findings -join "`n") 'and the finding names the cited file'
-    Assert-Case ('- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "plain words that live in the fixture"') 0 1 1 `
+    Assert-Case ($onFixture + '"plain words that live in the fixture"') 0 1 1 `
         'the same shape present in the cited file is counted and clean' | Out-Null
-    Assert-Case ('- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "$otherAnchor = 67890"') 1 1 1 `
+    Assert-Case ($onFixture + '"$otherAnchor = 67890"') 1 1 1 `
         'a fragment present in another tracked file and absent from the cited one is a finding' | Out-Null
-    Assert-Case ('  1. ' + $bt + 'src/fixture.ps1:2' + $bt + ' -- "$otherAnchor = 67890"') 1 1 1 `
+    Assert-Case ($anchors + '  1. ' + $bt + 'src/fixture.ps1:2' + $bt + ' -- "$otherAnchor = 67890"') 1 1 1 `
         'a numbered, indented item citing the file with a :line suffix scopes to that file too' | Out-Null
-    Assert-Case ('- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "plain words that live in the fixture" and "$otherAnchor = 67890"') 1 1 2 `
+    Assert-Case ($onFixture + '"plain words that live in the fixture" and "$otherAnchor = 67890"') 1 1 2 `
         'two fragments on one anchor line are each verified in the cited file' | Out-Null
-    $leaf = Assert-Case ('- ' + $bt + 'deep/leaf.md' + $bt + ' -- "leaf words in the deep file" beside "$fixtureAnchor = 12345"') 1 1 2 `
+    $leaf = Assert-Case ($anchors + '- ' + $bt + 'deep/leaf.md' + $bt + ' -- "leaf words in the deep file" beside "$fixtureAnchor = 12345"') 1 1 2 `
         'a path resolved by the unique suffix match scopes the grep to the file it resolved to'
     Assert-Match 'src/deep/leaf\.md' ($leaf.Findings -join "`n") 'and the finding names the resolved file'
     # The suffix read is literal, not a suffix match against a wildcard: the unique suffix above
     # is a real tracked-file suffix, and a bracket name resolves the same way, not as a pattern.
-    Assert-Case ('- ' + $bt + 'src/[id]/page.ps1' + $bt + ' -- "page words that live in the bracket file"') 0 1 1 `
+    Assert-Case ($anchors + '- ' + $bt + 'src/[id]/page.ps1' + $bt + ' -- "page words that live in the bracket file"') 0 1 1 `
         'an anchor line citing a bracket-named file, with a fragment it holds, is clean' | Out-Null
-    $bracketMiss = Assert-Case ('- ' + $bt + 'src/[id]/page.ps1' + $bt + ' -- "' + $plainDead + '"') 1 1 1 `
+    $bracketMiss = Assert-Case ($anchors + '- ' + $bt + 'src/[id]/page.ps1' + $bt + ' -- "' + $plainDead + '"') 1 1 1 `
         'and with a fragment it lacks, one finding names the file, and rule 1 reports no path finding'
     Assert-Match ([regex]::Escape('src/[id]/page.ps1')) ($bracketMiss.Findings -join "`n") 'the finding names the bracket-named file exactly'
     # An anchor line never matches a glob span: unlike the two real tracked files src/*.ps1 names
     # above, this glob matches exactly one, which the old wildcard suffix read used to resolve.
-    Assert-Case ('- ' + $bt + 'src/deep/*.md' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
+    Assert-Case ($anchors + '- ' + $bt + 'src/deep/*.md' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
         'a glob matching exactly one tracked file is still not an anchor line: plain words are not grepped there' | Out-Null
-    Assert-Case ('- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + $bt + 'no' + $bt + ' such ' + $bt + 'text' + $bt + ' in it"') 1 1 1 `
+    Assert-Case ($onFixture + '"' + $bt + 'no' + $bt + ' such ' + $bt + 'text' + $bt + ' in it"') 1 1 1 `
         'on an anchor line a miss with interior backticks is a finding, not a skipped composite' | Out-Null
-    # Everywhere else, today's behaviour: the code-like filter, the repo-wide grep, the skip.
-    Assert-Case ('Prose citing ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
-        'the same plain-words fragment on a prose line is dropped unverified' | Out-Null
-    Assert-Case ('- ' + $bt + 'pwsh -File src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 0 0 0 `
+    # The Anchors section: opened by a # line outside a fence matching #+\s*Anchors\b, closed by
+    # any other # line outside a fence. A quote anywhere else is prose, whatever it looks like.
+    Assert-Case ('- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
+        'the same quote on an anchor-shaped line under no Anchors heading is none' | Out-Null
+    Assert-Case ("## Deliverable`n- ${bt}src/fixture.ps1${bt} -- " + '"' + $plainDead + '"') 0 1 0 `
+        'and under another heading, none' | Out-Null
+    Assert-Case ("${anchors}`n## Notes`n- ${bt}src/fixture.ps1${bt} -- " + '"' + $plainDead + '"') 0 1 0 `
+        'the next heading closes the Anchors section' | Out-Null
+    Assert-Case ("${bt}${bt}${bt}`n${anchors}${bt}${bt}${bt}`n- ${bt}src/fixture.ps1${bt} -- " + '"' + $plainDead + '"') 0 1 0 `
+        'an Anchors line inside a fence opens no section' | Out-Null
+    Assert-Case ("${anchors}${bt}${bt}${bt}`n# a comment in a fence`n${bt}${bt}${bt}`n- ${bt}src/fixture.ps1${bt} -- " + '"' + $plainDead + '"') 1 1 1 `
+        'a # line inside a fence does not close the section' | Out-Null
+    # A fence closes only on a bare backtick run at least as long as the one that opened it.
+    $deadLine = "- ${bt}src/fixture.ps1${bt} -- " + '"' + $plainDead + '"'
+    $b3 = "${bt}${bt}${bt}"
+    Assert-Case ("${b3}${bt}`n${b3}`n${anchors}${b3}`n${deadLine}`n${b3}${bt}") 0 1 0 `
+        'a balanced shorter fence inside a longer one closes nothing: an Anchors line inside opens no section' | Out-Null
+    Assert-Case ("${b3}${bt}`n${b3}`nx = 1`n`n${anchors}`n${deadLine}`n${b3}${bt}") 0 1 0 `
+        'an unpaired shorter marker inside a longer fence closes nothing either' | Out-Null
+    Assert-Case ("${b3}`n${b3}json`n${anchors}${deadLine}`n${b3}") 0 1 0 `
+        'a marker with an info string inside a fence is text, not its close' | Out-Null
+    Assert-Case ("${b3}`n${b3}${bt}`n${anchors}${deadLine}") 1 1 1 `
+        'a longer bare marker closes the fence, and the Anchors heading after it opens the section' | Out-Null
+    Assert-Case ("### Anchors @ abc1234`n- ${bt}src/fixture.ps1${bt} -- " + '"' + $plainDead + '"') 1 1 1 `
+        'a deeper Anchors heading with a stamp opens the section' | Out-Null
+    Assert-Case ("## anchors`n- ${bt}src/fixture.ps1${bt} -- " + '"' + $plainDead + '"') 0 1 0 `
+        'the heading is matched case-sensitively, as the re-point matches it' | Out-Null
+    Assert-Case ($anchors + 'Prose citing ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
+        'a prose line under the Anchors heading is no anchor line: its quote is none' | Out-Null
+    Assert-Case ('Anchor: "' + $dead + '" in the tree.') 0 0 0 `
+        'a code-looking quote in prose is none: it is not grepped repo-wide' | Out-Null
+    Assert-Case ($anchors + '- ' + $bt + 'pwsh -File src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 0 0 0 `
         'on a list item whose first span is a command line, it is dropped unverified' | Out-Null
-    Assert-Case ('- ' + $bt + 'nope/missing.xyz' + $bt + ' -- "' + $plainDead + '"') 1 1 0 `
+    Assert-Case ($anchors + '- ' + $bt + 'nope/missing.xyz' + $bt + ' -- "' + $plainDead + '"') 1 1 0 `
         'on a list item whose first span does not resolve, it is dropped unverified' | Out-Null
-    Assert-Case ('- see ' + $bt + 'pwsh x' + $bt + ' then ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
+    Assert-Case ($anchors + '- see ' + $bt + 'pwsh x' + $bt + ' then ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
         'the first backticked span decides, not a later one' | Out-Null
-    Assert-Case ("- ${bt}src/fixture.ps1${bt} -- the fixture`n  " + '"' + $plainDead + '"') 0 1 0 `
+    Assert-Case ("$anchors- ${bt}src/fixture.ps1${bt} -- the fixture`n  " + '"' + $plainDead + '"') 0 1 0 `
         'a continuation line under an anchor item is judged by itself' | Out-Null
-    Assert-Case 'Anchor: "$otherAnchor = 67890" in the tree.' 0 0 1 `
-        'a code-like fragment on a line that cites no file is still grepped repo-wide' | Out-Null
-    Assert-Case ("- ${bt}byovox:src/stt.rs${bt} -- " + '"' + $plainDead + '"') 0 0 0 `
+    Assert-Case ("$anchors- ${bt}byovox:src/stt.rs${bt} -- " + '"' + $plainDead + '"') 0 0 0 `
         'a citation into another repository is never an anchor line' | Out-Null
     # An anchor line names a file in the index the grep reads, not whatever Test-Path answers.
-    Assert-Case ('- ' + $bt + 'src/*.ps1' + $bt + ' -- "$fixtureAnchor = 12345"') 0 1 1 `
-        'a glob span names no one tracked file, so its line reads as before and the fragment greps repo-wide' | Out-Null
-    Assert-Case ('- ' + $bt + 'src/untracked.md' + $bt + ' -- "plain words that live untracked"') 0 1 0 `
+    Assert-Case ($anchors + '- ' + $bt + 'src/*.ps1' + $bt + ' -- "' + $plainDead + '"') 0 1 0 `
+        'a glob span names no one tracked file, so its line is no anchor line and its quote is none' | Out-Null
+    Assert-Case ($anchors + '- ' + $bt + 'src/untracked.md' + $bt + ' -- "plain words that live untracked"') 0 1 0 `
         'an untracked file is no anchor line, so its plain-words fragment is not reported against it' | Out-Null
     Assert-Case ("See ${bt}src/[id]/draft.md${bt} here.") 0 1 0 `
         'an untracked file under a bracketed directory is found as spelled, probed literally' | Out-Null
     Assert-Case ("See ${bt}eep/leaf.md${bt} here.") 1 1 0 `
         'a suffix that cuts a path segment names no file: eep/leaf.md is not src/deep/leaf.md' | Out-Null
-    Assert-Case 'Uses "$fixtureAnchor = 12345" and "$FixtureAnchor = 12345" here.' 1 0 2 `
+    Assert-Case ($onFixture + 'uses "$fixtureAnchor = 12345" and "$FixtureAnchor = 12345" here.') 1 1 2 `
         'two fragments that differ only in case are two to verify: the variant that does not grep is a finding' | Out-Null
     $cased = Get-AnchorFindings -Text "See ${bt}src/fixture.ps1${bt} and ${bt}SRC/fixture.ps1${bt}."
     if ($cased.PathCount -eq 2) { Write-Host '  ok: two spellings that differ only in case are two paths to the count, as to Paths' -ForegroundColor DarkGray }
     else { Write-Host "FAIL: PathCount of a case pair -- expected 2, got $($cased.PathCount)" -ForegroundColor Red; $failures++ }
-    Assert-Case ('- ' + $bt + './src/fixture.ps1' + $bt + ' -- "plain words that live in the fixture"') 0 1 1 `
+    Assert-Case ($anchors + '- ' + $bt + './src/fixture.ps1' + $bt + ' -- "plain words that live in the fixture"') 0 1 1 `
         'a ./ spelling names the same tracked file' | Out-Null
-    Assert-Case ('- ' + $bt + 'src/pkg.d' + $bt + ' -- "plain words inside the package dir"') 0 1 0 `
+    Assert-Case ($anchors + '- ' + $bt + 'src/pkg.d' + $bt + ' -- "plain words inside the package dir"') 0 1 0 `
         'a span naming a directory in the index is no anchor line, however few files it holds' | Out-Null
     if ($umlautMade) {
         # Under an OEM console code page, as a Windows console has, so the index is read as the
@@ -486,11 +524,11 @@ try {
         $callerEncoding = [Console]::OutputEncoding
         try {
             [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(437)
-            Assert-Case ('- ' + $bt + $umlautName + $bt + ' -- "plain words in the umlaut file"') 0 1 1 `
+            Assert-Case ($anchors + '- ' + $bt + $umlautName + $bt + ' -- "plain words in the umlaut file"') 0 1 1 `
                 'a tracked file with a non-ASCII name, spelled exactly, is found and its fragment greps' | Out-Null
-            Assert-Case ('- ' + $bt + $umlautName.Substring(4) + $bt + ' -- "plain words in the umlaut file"') 0 1 1 `
+            Assert-Case ($anchors + '- ' + $bt + $umlautName.Substring(4) + $bt + ' -- "plain words in the umlaut file"') 0 1 1 `
                 'and by its suffix' | Out-Null
-            $umlautMiss = Assert-Case ('- ' + $bt + $umlautName + $bt + ' -- "' + $plainDead + '"') 1 1 1 `
+            $umlautMiss = Assert-Case ($anchors + '- ' + $bt + $umlautName + $bt + ' -- "' + $plainDead + '"') 1 1 1 `
                 'a miss there names the file as written, not C-quoted'
             $after = [Console]::OutputEncoding.CodePage
         }
@@ -500,9 +538,9 @@ try {
     }
     else { Write-Host "  skip: this filesystem refuses a non-ASCII file name" -ForegroundColor DarkGray }
     # Fragments are case-sensitive to the grep, so a hit does not stand in for a case-variant miss.
-    Assert-Case ("- ${bt}src/fixture.ps1${bt} -- `"PLAIN WORDS THAT LIVE IN THE FIXTURE`"`n- ${bt}src/fixture.ps1${bt} -- `"plain words that live in the fixture`"") 1 1 2 `
+    Assert-Case ("$anchors- ${bt}src/fixture.ps1${bt} -- `"PLAIN WORDS THAT LIVE IN THE FIXTURE`"`n- ${bt}src/fixture.ps1${bt} -- `"plain words that live in the fixture`"") 1 1 2 `
         'a case-variant miss is reported beside the hit' | Out-Null
-    Assert-Case ('- ' + $bt + 'src/fixture.ps1' + $bt + ' -- "' + ('plain words ' * 11) + '"') 0 1 0 `
+    Assert-Case ($onFixture + '"' + ('plain words ' * 11) + '"') 0 1 0 `
         'the length bounds still apply on an anchor line: a hundred-and-thirty-two-character phrase is not checked' | Out-Null
     # A list line with no quote has nothing to verify and resolves nothing: four hundred of them
     # citing one path, which rule 1 resolves once, are read inside five seconds.
@@ -554,12 +592,16 @@ try {
         if ($shimmed -ne (Get-ChildItem -LiteralPath $shimDir.FullName | Select-Object -First 1).FullName -or -not $rejects -or -not $passes) {
             Write-Host "  skip: the git shim does not shadow git here or does not behave (git resolves to $shimmed, rejects=$rejects, passes=$passes), so the older-git shape is untested" -ForegroundColor DarkGray
         } else {
-            Assert-Case ('See ' + $bt + 'src/fixture.ps1' + $bt + ' -- "$fixtureAnchor = 12345" holds the value.') 0 1 1 `
+            Assert-Case ($onFixture + '"$fixtureAnchor = 12345" holds the value.') 0 1 1 `
                 'on a git that rejects --max-count, a live fragment still resolves' | Out-Null
         }
     } finally {
         $env:PATH = $savedPath
-        Remove-Item -LiteralPath $shimDir.FullName -Recurse -Force
+        # On Windows a git child launched through git.cmd can still hold the shim for a moment after the rows pass.
+        for ($try = 1; ; $try++) {
+            try { Remove-Item -LiteralPath $shimDir.FullName -Recurse -Force -ErrorAction Stop; break }
+            catch [System.IO.IOException] { if ($try -ge 10) { throw }; Start-Sleep -Milliseconds 500 }
+        }
     }
 
     # --- the anchor gate's -Demote removes, then adds needs-ruling --------------------------
@@ -681,8 +723,8 @@ try {
         'gone words' | Set-Content -LiteralPath 'src/gone.md'
         git add . 2>$null
         function Get-RefFindings($Body, [string]$Ref) { (Get-AnchorFindings -Text $Body -Ref $Ref).Findings.Count }
-        $refFrag  = '- `src/a.ps1` - "refOnlyFrag = 1"'
-        $workFrag = '- `src/a.ps1` - "workOnlyFrag = 2"'
+        $refFrag  = $anchors + '- `src/a.ps1` - "refOnlyFrag = 1"'
+        $workFrag = $anchors + '- `src/a.ps1` - "workOnlyFrag = 2"'
         $freeFrag = 'Quote: "refOnlyFrag = 1" here.'
         $goneBody = 'See `src/gone.md` for it.'
         $globBody = 'See `src/glob/*.ps1` for it.'
@@ -690,8 +732,7 @@ try {
         Assert-Match '^1$' (Get-RefFindings $refFrag '')    'no -Ref: the same fragment, absent from the working tree, is a finding'
         Assert-Match '^1$' (Get-RefFindings $workFrag 'at') '-Ref: an anchor-line fragment present only in the working tree is a finding'
         Assert-Match '^0$' (Get-RefFindings $workFrag '')   'no -Ref: the working-tree fragment is found'
-        Assert-Match '^0$' (Get-RefFindings $freeFrag 'at') '-Ref: a repo-wide fragment present only at the ref is found'
-        Assert-Match '^1$' (Get-RefFindings $freeFrag '')   'no -Ref: the repo-wide fragment, absent from the working tree, is a finding'
+        Assert-Match '^0$' (Get-RefFindings $freeFrag '')   'no -Ref: a quote in prose, absent from the working tree, is no finding: it is not grepped repo-wide'
         Assert-Match '^1$' (Get-RefFindings $goneBody 'at') '-Ref: a path absent at the ref is a finding though the working tree holds it'
         Assert-Match '^0$' (Get-RefFindings $goneBody '')   'no -Ref: the working-tree path resolves'
         Assert-Match '^0$' (Get-RefFindings $globBody 'at') '-Ref: a root-relative glob span resolves when a path at the ref matches it'

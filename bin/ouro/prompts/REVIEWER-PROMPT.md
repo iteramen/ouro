@@ -4,7 +4,7 @@ Fill every `{…}`; an `{Optional: …}` block is filled whole or dropped whole,
 the contract paragraphs verbatim — they are what makes the output verifiable. One prompt per
 range; one numbered section per commit. The prompt as written is the probe format, a full
 change's; the light variant (express) swaps exactly one output item and nothing else, and the
-sized variant (standard) swaps that item and adds its budget paragraph — the Flow class of
+sized variant (standard) swaps that item and adds its sizing paragraph — the Flow class of
 contract §4.
 
 - [The prompt](#the-prompt)
@@ -27,9 +27,9 @@ Report only findings you verified by reading the actual files or executing a pro
 available}), each with `path:line`, the concrete input or state that triggers it, and the wrong
 outcome. Speculation without a reproducing scenario is not a finding.
 
-Your budget is {turn budget} turns: reaching it, stop and report what you have, listing each vector
-you did not finish under UNTESTED. Run no build, gate or suite the pull request's checks already
-ran: probe the change, not the whole checker.
+If the run ends before you finish every vector, report what you have, listing each vector you did
+not finish under UNTESTED. Run no build, gate or suite the pull request's checks already ran:
+probe the change, not the whole checker.
 
 {the "A dispatch waits for its own runs" and "Work is tied to a named head" rules of contract §7,
 read in at dispatch time}
@@ -120,14 +120,14 @@ verbatim except output item 2, which becomes:
    covered the change. Then `UNTESTED`: each hunk or vector you did not finish, and why.
 ```
 
-and with this paragraph after the turn-budget one:
+and with this paragraph after the UNTESTED one:
 
 ```
 Your work is sized to the change: probes only at the hunks it changed and the claims it makes,
-not a campaign over the file. The turn budget above is the ceiling, not the target.
+not a campaign over the file.
 ```
 
-The budget paragraph sizes the work and output item 2 the evidence to match, so a hunk with no
+The sizing paragraph sizes the work and output item 2 the evidence to match, so a hunk with no
 line is visibly unreviewed.
 
 ## Verification message

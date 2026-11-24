@@ -8,16 +8,15 @@ configuration are never read.
 import json
 import os
 import re
-import shlex
 import tempfile
 from pathlib import Path
 
 from .. import sh
 from .process import probe_env, worker_env
-from . import PROBE, READ, Capabilities, builder, diagnostics, process, schema
+from . import PROBE, READ, SANDBOXED_PROBE, Capabilities, builder, diagnostics, process, schema
 from .backends import NOT_REQUIRED, UNCONFINED, Interface
 from .instructions import repository, run_skill
-from .qwen_isolation import SHARED_TOOLS, SHELL, WRITES, final_text, hook_command, isolated_env, settings_for, tool_calls, unhooked
+from .qwen_isolation import SHARED_TOOLS, SHELL, WRITES, final_text, hook_argv, hook_command, isolated_env, settings_for, tool_calls, unhooked
 
 MIN_VERSION = (0, 26, 6)
 FLAGS = ("--auth-type", "--output-format", "--approval-mode", "--json-schema", "--chat-recording", "--model")
@@ -34,9 +33,10 @@ def sandbox_route(where):
 
 
 def sandboxed(name, tools):
-    """Whether the node runs under the tool execution sandbox in place of the allow-list hook: a PROBE review node alone."""
-    if tools.sandbox and (name != "REVIEW" or not tools.probe):
-        raise sh.DriverError(f"qwen {name}: the tool execution sandbox serves a PROBE review node alone")
+    """Whether the node runs under the tool execution sandbox in place of the allow-list hook: a PROBE review node, and
+    the preflight's CHECKPOINT call that proves its route, alone."""
+    if tools.sandbox and (name not in ("REVIEW", "CHECKPOINT") or not tools.probe):
+        raise sh.DriverError(f"qwen {name}: the tool execution sandbox serves a PROBE review node and its preflight proof alone")
     return tools.sandbox
 
 
@@ -50,7 +50,7 @@ def guidance(tools):
                  "so an edit there goes under manual.")
     if not shell:
         return text
-    scope = ("any single command but git push, git commit and gh, with no `$`, glob, brace or git `-c`" if tools.probe else
+    scope = ("any single command but git push, git commit and gh, with no `$`, no git `-c` and no glob or brace that could name git or gh" if tools.probe else
              "only these exact commands: " + ", ".join(f"`{c}`" for c in tools.commands))
     return (text + " run_shell_command takes " + scope +
             ", one per call, in the working directory and in the foreground; chaining, pipes, redirection, "
@@ -144,9 +144,10 @@ def _execute(name, prompt, model, tools, cwd, timeout, denied, ignored_schema, s
             answer["_denied"] = denied_writes(hook)
         reported = result.get("usage")
         usage = {**(reported if isinstance(reported, dict) else {}), "provider": "qwen", "model": model,
-                 "tool_calls": tool_calls(events), "hook": hook}
+                 "tool_calls": tool_calls(events), "hook": hook, "num_turns": result.get("num_turns")}
     for target, source in (("input", "input_tokens"), ("output", "output_tokens"), ("cache_read", "cache_read_input_tokens")):
         diagnostic[target] = diagnostics.count(usage.get(source))
+    diagnostic["turns"] = diagnostics.count(result.get("num_turns"))
     return answer, session, usage, None
 
 
@@ -173,7 +174,7 @@ def hook_proof(settings):
             (scratch / f"{name}.json").write_text(json.dumps({"root": directory, "commands": commands, "probe": probe,
                                                               "edit": name == "build"}), encoding="utf-8")
         for policy, tool, args, code in HOOK_CASES:
-            r = sh.run(shlex.split(hook_command(evidence, policy and scratch / f"{policy}.json", policy == "build")),
+            r = sh.run(hook_argv(hook_command(evidence, policy and scratch / f"{policy}.json", policy == "build")),
                        input_text=json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": args}),
                        timeout=30, env=worker_env(settings))
             if r.code != code:
@@ -204,31 +205,37 @@ LIVE = (("commands", ("checkpointer",), Capabilities(commands=(LISTED,)), ("run"
         ("BUILD", ("builder", "builder_trivial"), builder([LISTED]), ("run", "write")))
 
 
-def contract_proof(label, calls, usage, root):
+def contract_proof(label, calls, usage, root, sandbox=False):
     """Accepted only when each of `calls` ran without error and the hook granted it: the listed command, the write of
-    WRITTEN inside `root`. A tool Qwen Code withheld or declined shows no such call."""
+    WRITTEN inside `root`. A tool Qwen Code withheld or declined shows no such call. Under the `sandbox` no hook runs,
+    so the transcript alone proves the call."""
     target = (Path(root) / WRITTEN).resolve()
     for call in calls:
         ran = any(c["tool"] == call and not c["error"] and ((c.get("command") or "").strip() == LISTED if call == "run" else
                                                              Path(root, c["path"] or "").resolve() == target)
                   for c in usage["tool_calls"])
-        hooked = any(h.get("tool") == {"run": SHELL, "write": "write_file"}[call] and h.get("granted") for h in usage["hook"])
+        hooked = sandbox or any(h.get("tool") == {"run": SHELL, "write": "write_file"}[call] and h.get("granted")
+                                for h in usage["hook"])
         if not ran or not hooked:
             raise sh.DriverError(f"preflight qwen model {usage.get('model')}: the {label} contract's {call} proof failed "
-                                 f"(call observed {ran}, hook observed {hooked}); the tool is missing or not granted")
+                                 f"(call observed {ran}, hook observed {'none: sandboxed' if sandbox else hooked}); "
+                                 "the tool is missing or not granted")
 
 
 def live_proofs(settings, needs, root):
     """One live CLI call per distinct (contract, model) pair among `needs`, {role: contract}, for each role whose
-    contract is wider than READ, each through the hook in a trusted `root`."""
+    contract is wider than READ, each through the hook in a trusted `root`; a sandboxed PROBE reviewer's call launches
+    under the tool execution sandbox, as its review node does."""
     proofs = []
     for label, served, contract, calls in LIVE:
+        if label == "PROBE" and needs.get("reviewer") == SANDBOXED_PROBE:
+            contract = SANDBOXED_PROBE
         for model in dict.fromkeys(settings.model(role, "") for role in served if needs.get(role, READ) != READ):
             with diagnostics.attempt("CHECKPOINT", "qwen", model) as diagnostic:
                 _, session, usage, cost = _execute(
                     "CHECKPOINT", " ".join(ASKS[c] for c in calls) + " Then return done as finding, with stop null.",
                     model, contract, root, 180, None, {}, settings, diagnostic)
-            contract_proof(label, calls, usage, root)
+            contract_proof(label, calls, usage, root, contract.sandbox)
             proofs.append((session, usage, cost))
     return proofs
 

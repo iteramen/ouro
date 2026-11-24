@@ -59,7 +59,7 @@ def exercise(h):
         code, out, err = c.ouro("run", "1", "--validate")
         if not caller_supported:
             h.check(name + ": unsupported proof never reaches Ready or spends another BUILD",
-                    code == 0 and "waiting for validation" in out and not ready(c)
+                    code == 4 and "waiting for validation" in out and not ready(c)
                     and not c.prompts("REVIEW") and len(c.prompts("BUILD")) == 1
                     and no_caller_receipt(c) and not any(s.startswith("pr merge") for s in c.sigs()))
             continue
@@ -80,7 +80,7 @@ def exercise(h):
             c.ouro("run", "1")
             code, out, err = c.ouro("run", "1", "--validate")
             h.check(name + ": actual unsupported validation waits without proof, review or another BUILD",
-                    code == 0 and "waiting for validation" in out and not ready(c)
+                    code == 4 and "waiting for validation" in out and not ready(c)
                     and not c.prompts("REVIEW") and len(c.prompts("BUILD")) == 1
                     and no_caller_receipt(c) and not any(s.startswith("pr merge") for s in c.sigs()))
         c = h.happy_case("execution-unsupported-driver-mutation", files={
@@ -91,7 +91,7 @@ def exercise(h):
         code, out, err = c.ouro("run", "1", "--validate")
         worktree = pathlib.Path(c.node_call("BUILD")["cwd"])
         h.check("unsupported caller validation never reaches the mutating driver gate",
-                code == 0 and "waiting for validation" in out and not ready(c)
+                code == 4 and "waiting for validation" in out and not ready(c)
                 and not c.prompts("REVIEW") and len(c.prompts("BUILD")) == 1 and no_caller_receipt(c)
                 and "changed by gate" not in (worktree / "src/app.py").read_text(encoding="utf-8"))
         print("SKIP: supported caller proof controls; actual unsupported refusal controls above remain required")
@@ -170,7 +170,7 @@ def exercise(h):
     c = case("success", successes)
     code, out, err = c.ouro("run", "1")
     h.check("worker-only candidates wait for explicit caller consent instead of auto-executing",
-            code == 0 and "waiting for validation" in out and not ready(c)
+            code == 4 and "waiting for validation" in out and not ready(c)
             and not c.prompts("REVIEW") and no_caller_receipt(c) and len(c.prompts("BUILD")) == 1)
     code, out, err = c.ouro("run", "1", "--validate")
     h.check("real successful commands satisfy proof despite an empty self-report and a CI notice",
@@ -196,7 +196,7 @@ def exercise(h):
     c.clear_prompts()
     code, out, err = c.ouro("run", "1")
     h.check("corrupt proof without current candidates uses the bounded fix path",
-            code == 0 and len(c.prompts("BUILD")) == 1 and "waiting for validation" in out
+            code == 4 and len(c.prompts("BUILD")) == 1 and "waiting for validation" in out
             and "Missing successful execution evidence" in out and sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments()) == ready_before)
     c.clear_prompts()
     code, out, err = c.ouro("run", "1", "--validate")
@@ -221,7 +221,7 @@ def exercise(h):
     c.clear_prompts()
     code, out, err = c.ouro("run", "1")
     h.check("current-candidate corrupt proof waits for consent without rebuilding",
-            code == 0 and not c.prompts("BUILD") and not c.prompts("REVIEW")
+            code == 4 and not c.prompts("BUILD") and not c.prompts("REVIEW")
             and "waiting for validation" in out and h.git(wt, "rev-parse", "HEAD") == head
             and sum(x["body"].startswith("**Ready for merge**") for x in c.pr_comments()) == ready_before)
     c.clear_prompts()
@@ -365,7 +365,7 @@ def exercise(h):
         {"cmd": cmd, "reason": "worker executable unavailable"} for cmd in (command, second)]})
     code, out, err = c.ouro("run", "1")
     h.check("environment-blocked execution waits without a synthetic fix or review",
-            code == 0 and "waiting for validation" in out and len(c.prompts("BUILD")) == 1
+            code == 4 and "waiting for validation" in out and len(c.prompts("BUILD")) == 1
             and not c.prompts("REVIEW") and not ready(c))
     code, out, err = c.ouro("run", "1", "--validate")
     h.check("genuine exact-head caller validation satisfies all required commands",

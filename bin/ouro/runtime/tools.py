@@ -213,7 +213,8 @@ def probe_configuration(root, environment, launch):
                           "allow_upstream_proxy", "dangerously_allow_non_loopback_proxy",
                           "dangerously_allow_all_unix_sockets", "mode", "domains", "unix_sockets",
                           "allow_local_binding", "mitm"}
-        if (set(network) != network_fields or network["enabled"] is not False
+        # Codex 0.171+ adds transparent_tcp; older releases omit it. Null, like every other field.
+        if (set(network) - {"transparent_tcp"} != network_fields or network["enabled"] is not False
                 or any(value is not None for key, value in network.items() if key != "enabled")):
             raise ValueError("network grants")
         admission_stage = "requirements"

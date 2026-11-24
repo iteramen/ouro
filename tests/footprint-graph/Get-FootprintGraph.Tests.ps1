@@ -16,7 +16,9 @@
     each one (exit 1, empty stdout, the stand-in's own text on stderr, and the usage and no-
     repository exits beside it); and a read that returns 500 rows, with a 499-row control. Row 21:
     an issue carrying `checkpoint` links nothing (no collision, batch or leverage, one wave), with
-    row 1 as its control and a label that only holds the word as the near miss.
+    row 1 as its control and a label that only holds the word as the near miss. Row 22: a file the
+    body names only in an Anchors section is anchorOnly and still links, with a fenced heading and
+    an inline Doc impact line in the section as near misses.
     It needs pwsh and git only, so a Windows leg with no bash runs every row.
 #>
 $ErrorActionPreference = 'Stop'
@@ -371,6 +373,20 @@ exit $LASTEXITCODE
     $near = New-Issue 1 'agent-ready' "- ${bt}src/a.txt${bt}"; $near.labels = @(@{ name = 'agent-ready' }, @{ name = 'checkpoints' })
     $g = Invoke-Graph @($near, (New-Issue 2 'agent-ready' "- ${bt}src/a.txt${bt}"))
     Assert-Equal '1-2:[src/a.txt]' (Format-Collisions $g.Json) 'row 21 near miss: a label that only holds the word still links'
+
+    # --- row 22: a file the body names only in an Anchors section is anchorOnly, and still links -----
+    function Get-AnchorOnly($Json, [int]$N) { Format-Value @(@($Json.issues | Where-Object number -eq $N)[0].anchorOnly) }
+    $g = Invoke-Graph @(
+        (New-Issue 1 'agent-ready' "Change ${bt}src/b.txt${bt}.`n`n## Anchors @ abc1234`n`n- ${bt}src/a.txt${bt} -- read`n- ${bt}src/b.txt${bt} -- changed`n`n## Later`n`n${bt}src/c.txt${bt}"),
+        (New-Issue 2 'agent-ready' "- ${bt}src/a.txt${bt} -- the file"),
+        (New-Issue 3 'agent-ready' "${bt}${bt}${bt}`n## Anchors`n- ${bt}src/a.txt${bt}`n${bt}${bt}${bt}"),
+        (New-Issue 4 'agent-ready' "## Anchors`n`n- ${bt}src/a.txt${bt} -- read`n`nDoc impact on close: ${bt}src/a.txt${bt}"))
+    Assert-Equal '[src/a.txt,src/b.txt,src/c.txt]' (Get-Footprint $g.Json 1) 'row 22: the Anchors section stays in the footprint'
+    Assert-Equal '[src/a.txt]' (Get-AnchorOnly $g.Json 1) 'row 22: a file named only on its Anchors lines is anchorOnly, one named outside them too is not'
+    Assert-Equal '1-2:[src/a.txt]|1-3:[src/a.txt]|1-4:[src/a.txt]|2-3:[src/a.txt]|2-4:[src/a.txt]|3-4:[src/a.txt]' (Format-Collisions $g.Json) 'row 22: and it still links'
+    Assert-Equal '[]' (Get-AnchorOnly $g.Json 2) 'row 22 control: a body with no Anchors section has none'
+    Assert-Equal '[]' (Get-AnchorOnly $g.Json 3) 'row 22 near miss: an Anchors heading inside a fence opens no section'
+    Assert-Equal '[]' (Get-AnchorOnly $g.Json 4) 'row 22 near miss: an inline Doc impact line in the section names the file as written'
 
     # --- row 10: a failing read exits 1 with empty stdout -----------------------------------------
     foreach ($mode in 'fail-first', 'fail-second') {

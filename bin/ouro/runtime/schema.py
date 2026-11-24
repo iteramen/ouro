@@ -13,14 +13,17 @@ def arr(items):
 S, INTEGER = {"type": "string"}, {"type": "integer"}
 STOP = {"anyOf": [obj(reason=S, question=S), {"type": "null"}]}
 SCHEMAS = {
-    "TRIAGE": obj(verdict={"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE"]},
-                  size=S, flow=S, deliverable=S, doc_impact=S, manual=arr(S), labels=arr(S), comment=S, question=S),
+    "TRIAGE": obj(verdict={"type": "string", "enum": ["PROMOTE", "NEEDS-RULING", "CHECKPOINT", "BLOCKED", "SPLIT", "STALE", "DUPLICATE"]},
+                  size=S, flow=S, deliverable=S, doc_impact=S, manual=arr(S), labels=arr(S), comment=S, question=S,
+                  duplicate_of={"anyOf": [INTEGER, {"type": "null"}]},
+                  children=arr(obj(title=S, labels=arr(S), comments=arr(S), notes=arr(obj(comment=S, note=S)), exit=S, anchors=arr(S),
+                                   size=S, flow=S, parts=arr(obj(text=S, flow=S)), question=S))),
     "BUILD": obj(subject=S, body=S, claims=arr(obj(path=S, claim=S, verified_by=S)), gates_run=arr(obj(cmd=S, exit=INTEGER)),
                  validation_pending=arr(obj(cmd=S, reason=S)), residue=arr(S), manual=arr(obj(path=S, edit=S)),
                  door=S, blast_radius=S, stop=STOP, replies=arr(obj(comment_id=INTEGER, reply=S))),
     "REVIEW": obj(verdict={"type": "string", "enum": ["CLEAN", "FINDINGS"]},
-                  findings=arr(obj(severity={"type": "string", "enum": ["H", "M", "L"]}, file=S, line=INTEGER, claim=S, evidence=S, scope=S)),
-                  false_record_sentences=INTEGER, files_read=arr(S), stop=STOP),
+                  findings=arr(obj(severity={"type": "string", "enum": ["H", "M", "L"]}, file=S, line=INTEGER, claim=S, evidence=S, scope=S, route=S, reason=S)),
+                  residue=arr(obj(item=S, index=INTEGER, route=S, reason=S)), false_record_sentences=INTEGER, files_read=arr(S), stop=STOP),
     "CHECKPOINT": obj(finding=S, stop=STOP),
     "FOLLOWUP": obj(issues=arr(obj(title=S, body=S, labels=arr(S)))),
 }

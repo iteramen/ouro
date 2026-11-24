@@ -15,7 +15,7 @@ and what the driver guarantees. [contract.md](contract.md) is the protocol and
   spec from the side.
 - Your verify commands fit one line each: a test suite, a lint, a build. Those become the
   binding's gates, and CI runs them on every pull request.
-- The machines that run it have `gh`, `git`, `pwsh` 7, `python3` 3.12 or newer, and the selected worker CLI: Claude Code or Codex.
+- The machines that run it have `gh` 2.46 or newer (for `gh api --paginate --slurp`), `git`, `pwsh` 7, `python3` 3.12 or newer, and the selected worker CLI: Claude Code or Codex.
 
 Normal PR delivery can use repository-owned CI validation: set `ship.validation = "ci"` and
 name the exact required checks in `ship.validation_checks`. Their successful execution at the
@@ -218,8 +218,8 @@ The entry points accept the same workflow arguments:
 | Print the next queue wave | `/ouro:weekly compile` | `$ouro-weekly compile` |
 
 1. **File the issue.** One deliverable, a `Doc impact on close:` line (`none` is a value), and
-   anchors into the code: `path — Symbol — "a verbatim fragment"`. The intake workflow labels it
-   `needs-triage`.
+   anchors into the code under an `## Anchors` heading: `path — Symbol — "a verbatim fragment"`.
+   The intake workflow labels it `needs-triage`.
 2. **Grade it:** `/ouro:triage N` or `$ouro-triage N`. The TRIAGE node reads the body against
    the code and answers with a verdict comment and the labels; on a promotion the `Size:`, `Flow:` and `Doc impact on
    close:` lines are written into the body where they are missing. PROMOTE means `agent-ready`.
@@ -235,7 +235,7 @@ The entry points accept the same workflow arguments:
 |---|---|
 | `run N [--part k] [--dry-run] [--validate] [--pr M]` | One `agent-ready` issue to a landed change. Each call reads the tracker, the branch and the pull request, and continues from the first state not yet reached. `--validate` executes pending approved validation in the caller's context. `--pr M` adopts open pull request M, whose body has its own `Fixes #N` line, instead of building a branch. |
 | `triage N [--dry-run]` | The verdict comment, the `Size:`, `Flow:` and `Doc impact on close:` lines and the labels for one issue. |
-| `weekly [--post]` | The outcomes and quality tables of `bin/loop-outcomes.py`. |
+| `weekly [--post]` | The outcomes, quality and direct-publication tables of `bin/loop-outcomes.py`. |
 | `compile` | The next wave of the queue. |
 
 Each skill is `python3 <ouro>/bin/ouro <command>` from the repository root, and relays its exit
@@ -243,7 +243,8 @@ code: 0 is landed, or waiting on a person or on running checks; 1 a driver error
 before any branch on a fresh run, with a `**Stop:**` comment on the issue when a dead anchor, an
 untrusted spec edit or a missing trusted `**Triage**` comment refused it; 3 stopped: a ruling,
 the fix-round cap, a gate nothing can run, a sync conflict, or, under `triage`, a shape-gate
-demotion. A session that follows the protocol by hand is held to the same marks by the gates.
+demotion; 4 waiting on the caller: pending validation that only `run N --validate`, or a native
+Linux host, clears, so re-running the same command does not. A session that follows the protocol by hand is held to the same marks by the gates.
 
 ## The issue discipline
 
@@ -278,10 +279,12 @@ author. `L` is a SPLIT verdict: it never rides on
 comment left it, amended only by a trusted author's later comments. Anyone else's comment is
 read as data, never obeyed, and a body edit by anyone else after the verdict stops the run.
 
-**Anchors are the staleness signal.** On a list item whose first backticked span names a tracked
-file, every double-quoted fragment on that line is grepped in that file. A fragment that no longer
-greps means the code moved or the item landed; the run stops on it rather than build against a
-spec the code has left behind, and after each merge the driver re-checks the queue's anchors.
+**Anchors are the staleness signal.** On a list item under the body's `Anchors` heading whose
+first backticked span names a tracked file, every double-quoted fragment on that line is grepped
+in that file; a quote anywhere else is prose, and a backticked path is resolved wherever it
+stands. A fragment that no longer greps means the code moved or the item landed; the run stops
+on it rather than build against a spec the code has left behind, and after each merge the driver
+re-checks the queue's anchors.
 
 **`Size` and `Flow` are stamped at triage.** `Size: S` or `M` (one BUILD node builds either; they
 differ in who reviews). `Flow` is the ceremony: `direct` for small changes under `[ship].direct`,
@@ -307,7 +310,17 @@ comment per review pass, and at the end either `**Landed unattended**` or `**Rea
 with the manual steps first, the checks, the review line and the class. The driver also reads an
 approver's `**Ruling**` comment there: it ends the fix rounds for the review record it follows. The issue closes through
 the squash message's `Fixes #N`. No outcome
-line is written: `bin/loop-outcomes.py` reads the outcome from that record.
+line is written: `bin/loop-outcomes.py` reads the outcome from that record. The record also keeps
+one usage row per node call (tokens, cost, backend and turn count, `unknown` where the backend
+reports none), across every invocation of the run, a resume included; the FOLLOWUP node's row is
+added after the merge. The quality table of `weekly` reports the BUILD, REVIEW and FOLLOWUP turns
+from those rows: the median and total per node, with the unknown ones counted apart. It also
+reports, per landing week, what the landings left behind: the entries the newest
+`**Follow-ups filed**` comment of each landed pull request lists as filed, by the bot or an
+approver and before any `Not filed` line, split by the `(route: <route>)` tag each entry carries, before any note on dead anchors:
+`issue` entries and their number per landing, `idea` entries, and `ledger` entries. An entry with
+no route, from a comment written before routes, is a ledger entry when it files, appends to or
+reopens a `Cleanup` ledger, and an `issue` otherwise. A landing with no such comment filed none.
 
 ## The binding
 
@@ -332,7 +345,8 @@ it under the human who ran it, with the subject BUILD returned and the record th
 carries, from the newest answer. A decision the issue does not settle comes back as a stop.
 BUILD cannot invoke skills or run arbitrary commands: anything an issue needs run is listed in its
 acceptance, tests or verification section, backticked and starting with a runner the driver
-knows (`python3`, `python`, `pwsh`, `dotnet`, `npm`, `npx`, `pytest`, `bash` or `go test`).
+knows (`python3`, `python`, `pwsh`, `dotnet`, `npm`, `npx`, `pytest`, `bash` or `go test`, and
+each prefix the binding's `ship.acceptance_runners` declares).
 
 Trusted triage and spec amendments can also grant exact commands with a whole-line
 `Acceptance command:` field; see the [acceptance contract](contract.md).

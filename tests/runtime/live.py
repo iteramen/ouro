@@ -66,13 +66,44 @@ def main():
     print("All five Codex nodes and negative capability probes passed.", flush=True)
 
 
+def claude_probe_home():
+    """One Claude PROBE REVIEW node with CLAUDE_CONFIG_DIR undeclared, on an authenticated Claude Code."""
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        sys.exit("unset CLAUDE_CONFIG_DIR: this row proves the launch with it undeclared")
+    stray = pathlib.Path.home() / ".claude" / ".claude.json"
+    before = stray.exists()
+    cfg = developer.Settings("claude", {role: "sonnet" for role in developer.ROLES})
+    with public_fixture("ouro-public-fixture-") as folder:
+        root = pathlib.Path(folder)
+        (root / "sample.py").write_text("def total(values):\n    return sum(values)\n", encoding="utf-8")
+        answer = node.run_node("REVIEW", "Read sample.py. Do not edit anything. Return CLEAN, no findings, "
+                               "false_record_sentences 0, and files_read listing the files.", "sonnet",
+                               node.PROBE, str(root), 240, runtime=cfg)
+    print(json.dumps({"harness": sh.run(sh.argv_for("claude", "--version")).out.strip(), "answer": answer,
+                      "evidence": node.USAGE[-1], "stray_claude_json_before": before,
+                      "stray_claude_json_after": stray.exists()}, ensure_ascii=False), flush=True)
+    assert answer["verdict"] == "CLEAN", answer
+    assert before or not stray.exists(), f"the PROBE launch created {stray}"
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe-boundary", action="store_true",
                         help="qualify the default Codex PROBE boundary; retain public fixtures and evidence")
-    if parser.parse_args().probe_boundary:
+    parser.add_argument("--qwen-sandbox", action="store_true",
+                        help="qualify the Qwen Code sandboxed PROBE review node; retain public fixtures and evidence")
+    parser.add_argument("--claude-probe-home", action="store_true",
+                        help="launch one Claude PROBE node with CLAUDE_CONFIG_DIR undeclared; print the harness version, "
+                             "its answer and whether ~/.claude/.claude.json exists afterwards")
+    args = parser.parse_args()
+    if args.claude_probe_home:
+        claude_probe_home()
+    elif args.probe_boundary:
         from probe_boundary import qualify
+        qualify()
+    elif args.qwen_sandbox:
+        from qwen_sandbox_boundary import qualify
         qualify()
     else:
         main()

@@ -39,6 +39,13 @@ landing = "merge-squash"
 # `actions/`, `hooks/`, `release/` or `.claude/`, or whose first segment holds a wildcard (it
 # reaches every top-level directory). Table: ouro/docs/binding.md.
 # direct = ["docs/notes/*.md"]
+# One developer's own policy, keyed by gh login (compared without regard to case). An entry sets
+# `policy`, `unattended_classes` or both; a key it leaves out is the repository's. It goes after
+# every [ship] key above. Table: ouro/docs/binding.md.
+# [[ship.person]]
+# login = "octocat"
+# policy = "merge-on-green"
+# unattended_classes = ["express"]
 
 [models]
 # Optional, like every table below but [owner]. Absent means each role runs the reading
